@@ -93,22 +93,23 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
   const exactByTickerAndClass = instruments.find(
     (item: any) =>
       String(item.ticker ?? '').toUpperCase() === normalized &&
-      String(item.classCode ?? '').toUpperCase() === classCode &&
-      !!item.instrumentUid
+      String(item.classCode ?? '').toUpperCase() === classCode
   );
 
   const exactByTicker = instruments.find(
     (item: any) =>
-      String(item.ticker ?? '').toUpperCase() === normalized &&
-      !!item.instrumentUid
+      String(item.ticker ?? '').toUpperCase() === normalized
   );
 
-  const fallback = instruments.find((item: any) => !!item.instrumentUid);
+  const instrument = exactByTickerAndClass ?? exactByTicker ?? instruments[0];
 
-  const instrument = exactByTickerAndClass ?? exactByTicker ?? fallback;
+  const instrumentId =
+    instrument?.instrumentUid ||
+    instrument?.figi ||
+    `${normalized}_${instrument?.classCode || classCode}`;
 
-  if (!instrument?.instrumentUid) {
-    throw new Error(`Не удалось определить instrumentUid для ${normalized}`);
+  if (!instrumentId) {
+    throw new Error(`Не удалось определить instrumentId для ${normalized}`);
   }
 
   console.log(
@@ -116,15 +117,17 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
     'input=', raw,
     'normalized=', normalized,
     'requestedClassCode=', classCode,
-    'selectedTicker=', instrument.ticker,
-    'selectedClassCode=', instrument.classCode,
-    'instrumentUid=', instrument.instrumentUid,
+    'selectedTicker=', instrument?.ticker,
+    'selectedClassCode=', instrument?.classCode,
+    'instrumentUid=', instrument?.instrumentUid,
+    'figi=', instrument?.figi,
+    'resolvedInstrumentId=', instrumentId,
     'resultsCount=', instruments.length
   );
 
-  instrumentCache.set(cacheKey, instrument.instrumentUid);
+  instrumentCache.set(cacheKey, instrumentId);
 
-  return instrument.instrumentUid;
+  return instrumentId;
 }
 
 export async function getCandles(
