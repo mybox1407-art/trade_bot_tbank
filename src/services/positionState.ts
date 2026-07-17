@@ -21,7 +21,7 @@ export interface ClosedTrade {
   reason: 'take_profit' | 'stop_loss' | 'manual';
 }
 
-const STARTING_BALANCE = 500;
+const STARTING_BALANCE = 50000;
 const POSITION_PERCENT = 0.10;
 
 let balance = STARTING_BALANCE;
