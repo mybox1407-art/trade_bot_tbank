@@ -14,7 +14,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "ccxt": "^4.5.64",
+    "axios": "^1.7.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "technicalindicators": "^3.1.0"
