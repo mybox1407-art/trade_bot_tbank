@@ -36,6 +36,10 @@ const api = axios.create({
 
 const instrumentCache = new Map<string, string>();
 
+const symbolAliases: Record<string, string> = {
+  YNDX: 'YDEX'
+};
+
 function quotationToNumber(value?: TinkoffQuotation): number {
   if (!value) return 0;
   const units = Number(value.units ?? 0);
@@ -64,7 +68,8 @@ function mapInterval(timeframe: string): string {
 }
 
 async function resolveInstrumentId(symbol: string): Promise<string> {
-  const normalized = symbol.trim().toUpperCase();
+  const raw = symbol.trim().toUpperCase();
+  const normalized = symbolAliases[raw] ?? raw;
   const classCode = process.env.MOEX_DEFAULT_CLASS_CODE || 'TQBR';
   const cacheKey = `${normalized}_${classCode}`;
 
