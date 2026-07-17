@@ -1,4 +1,5 @@
 import axios from 'axios';
+import https from 'https';
 import { env } from '../config/env';
 
 type Candle = {
@@ -19,13 +20,18 @@ const BASE_URL = env.tinkoffSandbox
   ? 'https://sandbox-invest-public-api.tbank.ru/rest'
   : 'https://invest-public-api.tbank.ru/rest';
 
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false
+});
+
 const api = axios.create({
   baseURL: BASE_URL,
   headers: {
     Authorization: `Bearer ${env.tinkoffToken}`,
     'Content-Type': 'application/json'
   },
-  timeout: 15000
+  timeout: 15000,
+  httpsAgent
 });
 
 const instrumentCache = new Map<string, string>();
@@ -111,13 +117,21 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
     throw new Error(`Инструмент ${normalized} не найден в T-Invest API`);
   }
 
-  const instrumentId = instrument.instrumentUid || instrument.uid || `${normalized}_${instrument.classCode || classCode}`;
+  const instrumentId =
+    instrument.instrumentUid ||
+    instrument.uid ||
+    `${normalized}_${instrument.classCode || classCode}`;
+
   instrumentCache.set(cacheKey, instrumentId);
 
   return instrumentId;
 }
 
-export async function getCandles(symbol: string, timeframe = '15m', limit = 250): Promise<Candle[]> {
+export async function getCandles(
+  symbol: string,
+  timeframe = '15m',
+  limit = 250
+): Promise<Candle[]> {
   const instrumentId = await resolveInstrumentId(symbol);
   const interval = mapInterval(timeframe);
   const candleMinutes = timeframeToMinutes(timeframe);
