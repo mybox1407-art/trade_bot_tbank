@@ -4,7 +4,11 @@ services:
     container_name: trade_bot
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - "3011:3011"
     environment:
-      - PORT=3001
+      - PORT=3011
       - NODE_ENV=production
+      - TINKOFF_TOKEN=${TINKOFF_TOKEN}
+      - TINKOFF_SANDBOX=${TINKOFF_SANDBOX}
+      - MOEX_DEFAULT_TICKER=${MOEX_DEFAULT_TICKER}
+      - MOEX_DEFAULT_CLASS_CODE=${MOEX_DEFAULT_CLASS_CODE}
