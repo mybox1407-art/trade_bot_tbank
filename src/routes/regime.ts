@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import axios from 'axios';
 import { getCandles } from '../services/exchange';
 import { detectMarketRegime } from '../services/strategy';
 
@@ -36,7 +37,16 @@ router.post('/regime', async (req, res) => {
       candlesReceived: candles.length,
       ...result
     });
-  } catch (error) {
+  } catch (error: any) {
+    if (axios.isAxiosError(error)) {
+      return res.status(error.response?.status || 500).json({
+        ok: false,
+        error: error.message,
+        axiosStatus: error.response?.status,
+        axiosData: error.response?.data ?? null
+      });
+    }
+
     return res.status(500).json({
       ok: false,
       error: error instanceof Error ? error.message : 'unknown_error'
