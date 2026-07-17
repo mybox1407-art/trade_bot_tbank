@@ -1,6 +1,6 @@
 import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 
-const STARTING_BALANCE = 500;
+const STARTING_BALANCE = 50000;
 const MAX_RISK_PER_TRADE = 0.01;
 const MIN_ADX_TREND = 20;
 const MIN_ADX_RANGE = 18;
