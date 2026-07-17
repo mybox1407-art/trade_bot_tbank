@@ -4,6 +4,6 @@ dotenv.config();
 
 export const env = {
   port: Number(process.env.PORT) || 3001,
-  apiKey: process.env.API_KEY || '',
-  apiSecret: process.env.API_SECRET || ''
+  tinkoffToken: process.env.TINKOFF_TOKEN || '',
+  tinkoffSandbox: (process.env.TINKOFF_SANDBOX ?? 'true') === 'true'
 };
