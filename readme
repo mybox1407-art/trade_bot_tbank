@@ -1,8 +1,8 @@
 cd ~
-rm -rf trade_bot
-git clone https://github.com/mybox1407-art/trade_bot_crypto_impulse.git
-cd trade_bot_crypto_impulse/trade_bot_binance
+rm -rf trade_bot_tbank
+git clone https://github.com/mybox1407-art/trade_bot_tbank.git
+cd trade_bot_tbank
 
 
 docker compose up -d --build
-docker network connect n8n-docker_default trade_bot_crypto_impulse
+docker network connect n8n-docker_default trade_bot_tbank
