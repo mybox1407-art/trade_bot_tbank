@@ -63,26 +63,6 @@ function mapInterval(timeframe: string): string {
   return intervals[timeframe] ?? 'CANDLE_INTERVAL_15_MIN';
 }
 
-function timeframeToMinutes(timeframe: string): number {
-  const values: Record<string, number> = {
-    '1m': 1,
-    '2m': 2,
-    '3m': 3,
-    '5m': 5,
-    '10m': 10,
-    '15m': 15,
-    '30m': 30,
-    '1h': 60,
-    '2h': 120,
-    '4h': 240,
-    '1d': 1440,
-    '1w': 10080,
-    '1M': 43200
-  };
-
-  return values[timeframe] ?? 15;
-}
-
 async function resolveInstrumentId(symbol: string): Promise<string> {
   const normalized = symbol.trim().toUpperCase();
   const classCode = process.env.MOEX_DEFAULT_CLASS_CODE || 'TQBR';
@@ -134,10 +114,25 @@ export async function getCandles(
 ): Promise<Candle[]> {
   const instrumentId = await resolveInstrumentId(symbol);
   const interval = mapInterval(timeframe);
-  const candleMinutes = timeframeToMinutes(timeframe);
 
   const to = new Date();
-  const from = new Date(to.getTime() - limit * candleMinutes * 60 * 1000);
+
+  let lookbackDays = 10;
+  if (timeframe === '1m') lookbackDays = 10;
+  else if (timeframe === '2m') lookbackDays = 10;
+  else if (timeframe === '3m') lookbackDays = 12;
+  else if (timeframe === '5m') lookbackDays = 20;
+  else if (timeframe === '10m') lookbackDays = 25;
+  else if (timeframe === '15m') lookbackDays = 30;
+  else if (timeframe === '30m') lookbackDays = 45;
+  else if (timeframe === '1h') lookbackDays = 90;
+  else if (timeframe === '2h') lookbackDays = 180;
+  else if (timeframe === '4h') lookbackDays = 365;
+  else if (timeframe === '1d') lookbackDays = 500;
+  else if (timeframe === '1w') lookbackDays = 1500;
+  else if (timeframe === '1M') lookbackDays = 4000;
+
+  const from = new Date(to.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
 
   const { data } = await api.post(
     '/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
@@ -151,7 +146,7 @@ export async function getCandles(
 
   const candles = data?.candles ?? [];
 
-  return candles.map((c: any) => ({
+  const mapped = candles.map((c: any) => ({
     time: new Date(c.time).getTime(),
     open: quotationToNumber(c.open),
     high: quotationToNumber(c.high),
@@ -159,6 +154,18 @@ export async function getCandles(
     close: quotationToNumber(c.close),
     volume: Number(c.volume ?? 0)
   }));
+
+  console.log(
+    '[getCandles]',
+    'symbol=', symbol,
+    'timeframe=', timeframe,
+    'requestedLimit=', limit,
+    'received=', mapped.length,
+    'from=', from.toISOString(),
+    'to=', to.toISOString()
+  );
+
+  return mapped.slice(-limit);
 }
 
 export async function getCurrentPrice(symbol: string): Promise<number> {
