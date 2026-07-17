@@ -1,0 +1,10 @@
+services:
+  trade_bot:
+    build: .
+    container_name: trade_bot
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - NODE_ENV=production
