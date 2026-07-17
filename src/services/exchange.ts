@@ -78,19 +78,49 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
   }
 
   const { data } = await api.post(
-    '/tinkoff.public.invest.api.contract.v1.InstrumentsService/GetInstrumentBy',
+    '/tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument',
     {
-      idType: 'INSTRUMENT_ID_TYPE_TICKER',
-      id: normalized,
-      classCode
+      query: normalized
     }
   );
 
-  const instrument = data?.instrument;
+  const instruments = data?.instruments ?? [];
+
+  if (!instruments.length) {
+    throw new Error(`Инструмент ${normalized} не найден в T-Invest API`);
+  }
+
+  const exactByTickerAndClass = instruments.find(
+    (item: any) =>
+      String(item.ticker ?? '').toUpperCase() === normalized &&
+      String(item.classCode ?? '').toUpperCase() === classCode &&
+      !!item.instrumentUid
+  );
+
+  const exactByTicker = instruments.find(
+    (item: any) =>
+      String(item.ticker ?? '').toUpperCase() === normalized &&
+      !!item.instrumentUid
+  );
+
+  const fallback = instruments.find((item: any) => !!item.instrumentUid);
+
+  const instrument = exactByTickerAndClass ?? exactByTicker ?? fallback;
 
   if (!instrument?.instrumentUid) {
-    throw new Error(`Инструмент ${normalized} (${classCode}) не найден в T-Invest API`);
+    throw new Error(`Не удалось определить instrumentUid для ${normalized}`);
   }
+
+  console.log(
+    '[resolveInstrumentId]',
+    'input=', raw,
+    'normalized=', normalized,
+    'requestedClassCode=', classCode,
+    'selectedTicker=', instrument.ticker,
+    'selectedClassCode=', instrument.classCode,
+    'instrumentUid=', instrument.instrumentUid,
+    'resultsCount=', instruments.length
+  );
 
   instrumentCache.set(cacheKey, instrument.instrumentUid);
 
