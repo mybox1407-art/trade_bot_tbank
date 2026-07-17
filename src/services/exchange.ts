@@ -117,20 +117,20 @@ export async function getCandles(
 
   const to = new Date();
 
-  let lookbackDays = 10;
-  if (timeframe === '1m') lookbackDays = 10;
-  else if (timeframe === '2m') lookbackDays = 10;
-  else if (timeframe === '3m') lookbackDays = 12;
-  else if (timeframe === '5m') lookbackDays = 20;
-  else if (timeframe === '10m') lookbackDays = 25;
-  else if (timeframe === '15m') lookbackDays = 30;
-  else if (timeframe === '30m') lookbackDays = 45;
+  let lookbackDays = 1;
+  if (timeframe === '1m') lookbackDays = 1;
+  else if (timeframe === '2m') lookbackDays = 1;
+  else if (timeframe === '3m') lookbackDays = 1;
+  else if (timeframe === '5m') lookbackDays = 7;
+  else if (timeframe === '10m') lookbackDays = 7;
+  else if (timeframe === '15m') lookbackDays = 21;
+  else if (timeframe === '30m') lookbackDays = 21;
   else if (timeframe === '1h') lookbackDays = 90;
-  else if (timeframe === '2h') lookbackDays = 180;
-  else if (timeframe === '4h') lookbackDays = 365;
-  else if (timeframe === '1d') lookbackDays = 500;
-  else if (timeframe === '1w') lookbackDays = 1500;
-  else if (timeframe === '1M') lookbackDays = 4000;
+  else if (timeframe === '2h') lookbackDays = 90;
+  else if (timeframe === '4h') lookbackDays = 90;
+  else if (timeframe === '1d') lookbackDays = 365;
+  else if (timeframe === '1w') lookbackDays = 365 * 5;
+  else if (timeframe === '1M') lookbackDays = 365 * 10;
 
   const from = new Date(to.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
 
