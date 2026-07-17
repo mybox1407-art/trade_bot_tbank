@@ -1,7 +1,7 @@
 services:
   trade_bot:
     build: .
-    container_name: trade_bot
+    container_name: trade_bot_tbank
     restart: unless-stopped
     ports:
       - "3011:3011"
