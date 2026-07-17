@@ -73,38 +73,23 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
   }
 
   const { data } = await api.post(
-    '/tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument',
+    '/tinkoff.public.invest.api.contract.v1.InstrumentsService/GetInstrumentBy',
     {
-      query: normalized
+      idType: 'INSTRUMENT_ID_TYPE_TICKER',
+      id: normalized,
+      classCode
     }
   );
 
-  const instruments = data?.instruments ?? [];
+  const instrument = data?.instrument;
 
-  const exact = instruments.find(
-    (item: any) =>
-      item.ticker === normalized &&
-      item.classCode === classCode
-  );
-
-  const fallback = instruments.find(
-    (item: any) => item.ticker === normalized
-  );
-
-  const instrument = exact ?? fallback;
-
-  if (!instrument) {
-    throw new Error(`Инструмент ${normalized} не найден в T-Invest API`);
+  if (!instrument?.instrumentUid) {
+    throw new Error(`Инструмент ${normalized} (${classCode}) не найден в T-Invest API`);
   }
 
-  const instrumentId =
-    instrument.instrumentUid ||
-    instrument.uid ||
-    `${normalized}_${instrument.classCode || classCode}`;
+  instrumentCache.set(cacheKey, instrument.instrumentUid);
 
-  instrumentCache.set(cacheKey, instrumentId);
-
-  return instrumentId;
+  return instrument.instrumentUid;
 }
 
 export async function getCandles(
