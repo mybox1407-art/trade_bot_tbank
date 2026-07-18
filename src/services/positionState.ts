@@ -67,6 +67,8 @@ export function openPosition(data: {
   entryPrice: number;
   takeProfitPrice: number;
   stopLossPrice: number;
+  positionSize?: number | null;
+  quantity?: number | null;
 }) {
   const symbol = normalizeSymbol(data.symbol);
 
@@ -79,8 +81,19 @@ export function openPosition(data: {
     };
   }
 
-  const notional = getPositionNotional();
-  const quantity = notional / data.entryPrice;
+  let quantity: number;
+  let notional: number;
+
+  if (data.quantity != null && data.quantity > 0) {
+    quantity = data.quantity;
+    notional = quantity * data.entryPrice;
+  } else if (data.positionSize != null && data.positionSize > 0) {
+    notional = data.positionSize;
+    quantity = notional / data.entryPrice;
+  } else {
+    notional = getPositionNotional();
+    quantity = notional / data.entryPrice;
+  }
 
   const position: VirtualPosition = {
     symbol,
