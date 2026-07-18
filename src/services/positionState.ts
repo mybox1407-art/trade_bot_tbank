@@ -25,19 +25,36 @@ const STARTING_BALANCE = 50000;
 const POSITION_PERCENT = 0.10;
 
 let balance = STARTING_BALANCE;
-let currentPosition: VirtualPosition | null = null;
-let lastClosedTrade: ClosedTrade | null = null;
+const positions = new Map<string, VirtualPosition>();
+const lastClosedTrades = new Map<string, ClosedTrade>();
+
+function normalizeSymbol(symbol: string) {
+  return symbol.trim().toUpperCase();
+}
 
 export function getBalance() {
   return balance;
 }
 
-export function getPosition() {
-  return currentPosition;
+export function getPosition(symbol: string) {
+  return positions.get(normalizeSymbol(symbol)) ?? null;
 }
 
-export function getLastClosedTrade() {
-  return lastClosedTrade;
+export function getAllPositions() {
+  return Array.from(positions.values());
+}
+
+export function getLastClosedTrade(symbol?: string) {
+  if (symbol) {
+    return lastClosedTrades.get(normalizeSymbol(symbol)) ?? null;
+  }
+
+  const trades = Array.from(lastClosedTrades.values());
+  if (!trades.length) return null;
+
+  return trades.sort(
+    (a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime()
+  )[0];
 }
 
 export function getPositionNotional() {
@@ -51,15 +68,22 @@ export function openPosition(data: {
   takeProfitPrice: number;
   stopLossPrice: number;
 }) {
-  if (currentPosition) {
-    return { ok: false, message: 'Position already open', position: currentPosition };
+  const symbol = normalizeSymbol(data.symbol);
+
+  const existingPosition = positions.get(symbol);
+  if (existingPosition) {
+    return {
+      ok: false,
+      message: `Position already open for ${symbol}`,
+      position: existingPosition
+    };
   }
 
   const notional = getPositionNotional();
   const quantity = notional / data.entryPrice;
 
-  currentPosition = {
-    symbol: data.symbol,
+  const position: VirtualPosition = {
+    symbol,
     side: data.side,
     entryPrice: data.entryPrice,
     quantity,
@@ -69,32 +93,54 @@ export function openPosition(data: {
     openedAt: new Date().toISOString()
   };
 
-  return { ok: true, balance, position: currentPosition };
+  positions.set(symbol, position);
+
+  return {
+    ok: true,
+    balance,
+    position
+  };
 }
 
-export function closePosition(exitPrice: number, reason: 'take_profit' | 'stop_loss' | 'manual') {
-  if (!currentPosition) {
-    return { ok: false, message: 'No open position' };
+export function closePosition(
+  symbol: string,
+  exitPrice: number,
+  reason: 'take_profit' | 'stop_loss' | 'manual'
+) {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  const position = positions.get(normalizedSymbol);
+
+  if (!position) {
+    return {
+      ok: false,
+      message: `No open position for ${normalizedSymbol}`
+    };
   }
 
-  const realizedPnL = currentPosition.side === 'long'
-    ? (exitPrice - currentPosition.entryPrice) * currentPosition.quantity
-    : (currentPosition.entryPrice - exitPrice) * currentPosition.quantity;
+  const realizedPnL =
+    position.side === 'long'
+      ? (exitPrice - position.entryPrice) * position.quantity
+      : (position.entryPrice - exitPrice) * position.quantity;
 
-  lastClosedTrade = {
-    symbol: currentPosition.symbol,
-    side: currentPosition.side,
-    entryPrice: currentPosition.entryPrice,
+  const closedTrade: ClosedTrade = {
+    symbol: position.symbol,
+    side: position.side,
+    entryPrice: position.entryPrice,
     exitPrice,
-    quantity: currentPosition.quantity,
-    notional: currentPosition.notional,
+    quantity: position.quantity,
+    notional: position.notional,
     realizedPnL,
     closedAt: new Date().toISOString(),
     reason
   };
 
-  balance = balance + realizedPnL;
-  currentPosition = null;
+  balance += realizedPnL;
+  positions.delete(normalizedSymbol);
+  lastClosedTrades.set(normalizedSymbol, closedTrade);
 
-  return { ok: true, balance, lastClosedTrade };
+  return {
+    ok: true,
+    balance,
+    lastClosedTrade: closedTrade
+  };
 }
