@@ -23,6 +23,7 @@ export interface ClosedTrade {
 
 const STARTING_BALANCE = 50000;
 const POSITION_PERCENT = 0.10;
+const COMMISSION_RATE = 0.003; // 0.3% за сделку, тариф "Инвестор"
 
 let balance = STARTING_BALANCE;
 const positions = new Map<string, VirtualPosition>();
@@ -130,10 +131,17 @@ export function closePosition(
     };
   }
 
-  const realizedPnL =
+  const grossPnL =
     position.side === 'long'
       ? (exitPrice - position.entryPrice) * position.quantity
       : (position.entryPrice - exitPrice) * position.quantity;
+
+  const entryCommission = position.notional * COMMISSION_RATE;
+  const exitNotional = exitPrice * position.quantity;
+  const exitCommission = exitNotional * COMMISSION_RATE;
+  const totalCommission = entryCommission + exitCommission;
+
+  const realizedPnL = grossPnL - totalCommission;
 
   const closedTrade: ClosedTrade = {
     symbol: position.symbol,
