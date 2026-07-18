@@ -6,6 +6,11 @@ const MIN_ADX_TREND = 20;
 const MIN_ADX_RANGE = 18;
 const BB_SQUEEZE_THRESHOLD = 0.05;
 
+const COMMISSION_RATE = 0.003; // 0.3% за сделку
+const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2; // вход + выход
+const MIN_TP_ATR_MULTIPLIER = 0.5;
+const MIN_NET_PROFIT_BUFFER_RATE = 0.001; // 0.1% поверх комиссий как минимальный запас
+
 export interface Candle {
   time: number;
   open: number;
@@ -67,6 +72,33 @@ function getAtrMultipliers(regime: MarketRegime) {
   }
 
   return { stop: 0, target: 0 };
+}
+
+function normalizeTakeProfit(params: {
+  side: 'long' | 'short' | 'none';
+  price: number;
+  takeProfitPrice: number | null;
+  lastAtr: number;
+}) {
+  const { side, price, takeProfitPrice, lastAtr } = params;
+
+  if (side === 'none' || takeProfitPrice == null || lastAtr <= 0) {
+    return takeProfitPrice;
+  }
+
+  const minAtrDistance = lastAtr * MIN_TP_ATR_MULTIPLIER;
+  const minCommissionDistance = price * (ROUND_TRIP_COMMISSION_RATE + MIN_NET_PROFIT_BUFFER_RATE);
+  const minDistance = Math.max(minAtrDistance, minCommissionDistance);
+
+  if (side === 'long') {
+    return Math.max(takeProfitPrice, price + minDistance);
+  }
+
+  if (side === 'short') {
+    return Math.min(takeProfitPrice, price - minDistance);
+  }
+
+  return takeProfitPrice;
 }
 
 export function detectMarketRegime(candles: Candle[]) {
@@ -320,6 +352,13 @@ export function analyzeMarket(candles: Candle[]) {
     sell = false;
     side = 'none';
   }
+
+  takeProfitPrice = normalizeTakeProfit({
+    side,
+    price,
+    takeProfitPrice,
+    lastAtr
+  });
 
   if (side !== 'none' && stopLossPrice != null) {
     const riskPerUnit = Math.abs(price - stopLossPrice);
