@@ -16,6 +16,8 @@ type OpenPositionBody = {
   side?: 'long' | 'short';
   takeProfitPrice?: number;
   stopLossPrice?: number;
+  positionSize?: number | null;
+  quantity?: number | null;
 };
 
 type CheckCloseBody = {
@@ -63,7 +65,14 @@ router.get('/balance', (_req, res) => {
 
 router.post('/open', async (req: Request<{}, any, OpenPositionBody>, res) => {
   try {
-    const { symbol, side, takeProfitPrice, stopLossPrice } = req.body;
+    const {
+      symbol,
+      side,
+      takeProfitPrice,
+      stopLossPrice,
+      positionSize,
+      quantity
+    } = req.body;
 
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
 
@@ -91,7 +100,9 @@ router.post('/open', async (req: Request<{}, any, OpenPositionBody>, res) => {
       side,
       entryPrice,
       takeProfitPrice,
-      stopLossPrice
+      stopLossPrice,
+      positionSize: positionSize ?? null,
+      quantity: quantity ?? null
     });
 
     return res.json(result);
