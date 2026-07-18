@@ -1,7 +1,8 @@
-import { Router } from 'express';
+import { Router, Request } from 'express';
 import { getCurrentPrice } from '../services/exchange';
 import {
   closePosition,
+  getAllPositions,
   getBalance,
   getLastClosedTrade,
   getPosition,
@@ -10,12 +11,46 @@ import {
 
 const router = Router();
 
+type OpenPositionBody = {
+  symbol?: string;
+  side?: 'long' | 'short';
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+};
+
+type CheckCloseBody = {
+  symbol?: string;
+};
+
+type ClosePositionBody = {
+  symbol?: string;
+  reason?: 'take_profit' | 'stop_loss' | 'manual';
+};
+
 router.get('/status', (_req, res) => {
   res.json({
     ok: true,
     balance: getBalance(),
-    position: getPosition(),
+    positions: getAllPositions(),
     lastClosedTrade: getLastClosedTrade()
+  });
+});
+
+router.get('/status/:symbol', (req, res) => {
+  const symbol = String(req.params.symbol || '').trim().toUpperCase();
+
+  if (!symbol) {
+    return res.status(400).json({
+      ok: false,
+      message: 'symbol is required'
+    });
+  }
+
+  return res.json({
+    ok: true,
+    balance: getBalance(),
+    position: getPosition(symbol),
+    lastClosedTrade: getLastClosedTrade(symbol)
   });
 });
 
@@ -26,105 +61,150 @@ router.get('/balance', (_req, res) => {
   });
 });
 
-router.post('/open', async (req, res) => {
+router.post('/open', async (req: Request<{}, any, OpenPositionBody>, res) => {
   try {
-    const { symbol, side, takeProfitPrice, stopLossPrice } = req.body as {
-      symbol?: string;
-      side?: 'long' | 'short';
-      takeProfitPrice?: number;
-      stopLossPrice?: number;
-    };
+    const { symbol, side, takeProfitPrice, stopLossPrice } = req.body;
 
-    if (!symbol || !side || takeProfitPrice == null || stopLossPrice == null) {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+
+    if (!normalizedSymbol || !side || takeProfitPrice == null || stopLossPrice == null) {
       return res.status(400).json({
         ok: false,
         message: 'symbol, side, takeProfitPrice, stopLossPrice are required'
       });
     }
 
-    if (getPosition()) {
+    const existingPosition = getPosition(normalizedSymbol);
+
+    if (existingPosition) {
       return res.status(409).json({
         ok: false,
-        message: 'Position already open',
-        position: getPosition()
+        message: `Position already open for ${normalizedSymbol}`,
+        position: existingPosition
       });
     }
 
-    const entryPrice = await getCurrentPrice(symbol);
+    const entryPrice = await getCurrentPrice(normalizedSymbol);
+
     const result = openPosition({
-      symbol,
+      symbol: normalizedSymbol,
       side,
       entryPrice,
       takeProfitPrice,
       stopLossPrice
     });
 
-    res.json(result);
+    return res.json(result);
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
       message: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });
 
-router.get('/check-close', async (_req, res) => {
+router.post('/check-close', async (req: Request<{}, any, CheckCloseBody>, res) => {
   try {
-    const pos = getPosition();
+    const normalizedSymbol = String(req.body.symbol || '').trim().toUpperCase();
 
-    if (!pos) {
-      return res.json({ ok: true, action: 'none', reason: 'no_position' });
+    if (!normalizedSymbol) {
+      return res.status(400).json({
+        ok: false,
+        message: 'symbol is required'
+      });
     }
 
-    const currentPrice = await getCurrentPrice(pos.symbol);
+    const pos = getPosition(normalizedSymbol);
 
-    const hitTakeProfit = pos.side === 'long'
-      ? currentPrice >= pos.takeProfitPrice
-      : currentPrice <= pos.takeProfitPrice;
+    if (!pos) {
+      return res.json({
+        ok: true,
+        action: 'none',
+        reason: 'no_position',
+        symbol: normalizedSymbol
+      });
+    }
 
-    const hitStopLoss = pos.side === 'long'
-      ? currentPrice <= pos.stopLossPrice
-      : currentPrice >= pos.stopLossPrice;
+    const currentPrice = await getCurrentPrice(normalizedSymbol);
+
+    const hitTakeProfit =
+      pos.side === 'long'
+        ? currentPrice >= pos.takeProfitPrice
+        : currentPrice <= pos.takeProfitPrice;
+
+    const hitStopLoss =
+      pos.side === 'long'
+        ? currentPrice <= pos.stopLossPrice
+        : currentPrice >= pos.stopLossPrice;
 
     if (hitTakeProfit) {
-      const result = closePosition(currentPrice, 'take_profit');
-      return res.json({ ok: true, action: 'closed', reason: 'take_profit', currentPrice, result });
+      const result = closePosition(normalizedSymbol, currentPrice, 'take_profit');
+
+      return res.json({
+        ok: true,
+        action: 'closed',
+        reason: 'take_profit',
+        symbol: normalizedSymbol,
+        currentPrice,
+        result
+      });
     }
 
     if (hitStopLoss) {
-      const result = closePosition(currentPrice, 'stop_loss');
-      return res.json({ ok: true, action: 'closed', reason: 'stop_loss', currentPrice, result });
+      const result = closePosition(normalizedSymbol, currentPrice, 'stop_loss');
+
+      return res.json({
+        ok: true,
+        action: 'closed',
+        reason: 'stop_loss',
+        symbol: normalizedSymbol,
+        currentPrice,
+        result
+      });
     }
 
     return res.json({
       ok: true,
       action: 'hold',
+      symbol: normalizedSymbol,
       currentPrice,
       position: pos
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
       message: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });
 
-router.post('/close', async (req, res) => {
+router.post('/close', async (req: Request<{}, any, ClosePositionBody>, res) => {
   try {
-    const { reason } = req.body as { reason?: 'take_profit' | 'stop_loss' | 'manual' };
-    const pos = getPosition();
+    const { reason } = req.body;
+    const normalizedSymbol = String(req.body.symbol || '').trim().toUpperCase();
 
-    if (!pos) {
-      return res.status(409).json({ ok: false, message: 'No open position' });
+    if (!normalizedSymbol) {
+      return res.status(400).json({
+        ok: false,
+        message: 'symbol is required'
+      });
     }
 
-    const exitPrice = await getCurrentPrice(pos.symbol);
-    const result = closePosition(exitPrice, reason || 'manual');
+    const pos = getPosition(normalizedSymbol);
 
-    res.json(result);
+    if (!pos) {
+      return res.status(409).json({
+        ok: false,
+        message: `No open position for ${normalizedSymbol}`
+      });
+    }
+
+    const exitPrice = await getCurrentPrice(normalizedSymbol);
+    const result = closePosition(normalizedSymbol, exitPrice, reason || 'manual');
+
+    return res.json(result);
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
       message: error instanceof Error ? error.message : 'Unknown error'
     });
