@@ -2,17 +2,18 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 
 const STARTING_BALANCE = 50000;
 const MAX_RISK_PER_TRADE = 0.01;
+
 const MIN_ADX_TREND = 20;
 const MIN_ADX_RANGE = 18;
 const BB_SQUEEZE_THRESHOLD = 0.05;
 
-const COMMISSION_RATE = 0.003; // 0.3% за сделку
+const COMMISSION_RATE = 0.003; // 0.3% за одну сторону сделки
 const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2; // вход + выход
+const MIN_NET_PROFIT_BUFFER_RATE = 0.001; // 0.1% запас поверх round-trip комиссии
 const MIN_TP_ATR_MULTIPLIER = 0.5;
-const MIN_NET_PROFIT_BUFFER_RATE = 0.001; // 0.1% поверх комиссий как минимальный запас
 
 const STRUCTURE_LOOKBACK = 10;
-const MIN_EXPECTED_NET_MOVE_RATE = 0.002; // минимум 0.2% чистого ожидаемого движения после комиссий
+const MIN_EXPECTED_NET_MOVE_RATE = 0.002; // минимум 0.2% чистого движения после комиссии
 
 export interface Candle {
   time: number;
@@ -44,23 +45,27 @@ type RegimeIndicators = {
   avgVol20: number;
 };
 
-function last<T>(arr: T[]) {
+function last<T>(arr: T[]): T {
   return arr[arr.length - 1];
 }
 
-function prev<T>(arr: T[]) {
+function prev<T>(arr: T[]): T {
   return arr[arr.length - 2];
 }
 
-function mean(values: number[]) {
+function mean(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-function getVolumeSpike(volumes: number[], avgVol20: number) {
+function getVolumeSpike(volumes: number[], avgVol20: number): boolean {
   const v = volumes[volumes.length - 1] ?? 0;
   return v >= avgVol20 * 1.1;
 }
 
+/**
+ * ATR-множители под режим рынка.
+ * В тренде и в breakout делаем стопы шире, чтобы не выбивало рыночным шумом.
+ */
 function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
   const highVol = atrPct > 0.02;
 
@@ -79,6 +84,11 @@ function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
   return { stop: 0, target: 0 };
 }
 
+/**
+ * Минимально допустимый тейк:
+ * 1) не ближе заданной доли ATR,
+ * 2) не ближе, чем требуется для покрытия комиссий и небольшого запаса.
+ */
 function normalizeTakeProfit(params: {
   side: 'long' | 'short' | 'none';
   price: number;
@@ -106,6 +116,10 @@ function normalizeTakeProfit(params: {
   return takeProfitPrice;
 }
 
+/**
+ * Считает ожидаемое движение до тейка после вычета round-trip комиссии.
+ * Нужен, чтобы не открывать сделки, в которых чистый потенциал слишком мал.
+ */
 function expectedNetMove(params: {
   side: 'long' | 'short' | 'none';
   price: number;
@@ -114,7 +128,11 @@ function expectedNetMove(params: {
   const { side, price, takeProfitPrice } = params;
 
   if (side === 'none' || takeProfitPrice == null || price <= 0) {
-    return { grossMove: 0, netMove: 0, netMoveRate: 0 };
+    return {
+      grossMove: 0,
+      netMove: 0,
+      netMoveRate: 0
+    };
   }
 
   const grossMove =
@@ -126,9 +144,21 @@ function expectedNetMove(params: {
   const netMove = grossMove - commissionCost;
   const netMoveRate = netMove / price;
 
-  return { grossMove, netMove, netMoveRate };
+  return {
+    grossMove,
+    netMove,
+    netMoveRate
+  };
 }
 
+/**
+ * Структурная цель по ближайшей локальной структуре.
+ * Для long — ориентир на локальный максимум последних N свечей.
+ * Для short — ориентир на локальный минимум последних N свечей.
+ *
+ * Дополнительно не даем structureTarget быть слишком близко,
+ * поэтому сравниваем с базовой целью 1.5 ATR.
+ */
 function getStructureTarget(params: {
   side: 'long' | 'short' | 'none';
   highs: number[];
@@ -138,7 +168,9 @@ function getStructureTarget(params: {
 }) {
   const { side, highs, lows, price, lastAtr } = params;
 
-  if (side === 'none') return null;
+  if (side === 'none') {
+    return null;
+  }
 
   const recentHigh = Math.max(...highs.slice(-STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STRUCTURE_LOOKBACK));
@@ -154,6 +186,10 @@ function getStructureTarget(params: {
   return null;
 }
 
+/**
+ * Защитная проверка, чтобы уровни выхода не оказались
+ * "перевернутыми" относительно цены входа.
+ */
 function validateExitLevels(params: {
   side: 'long' | 'short' | 'none';
   price: number;
@@ -165,12 +201,16 @@ function validateExitLevels(params: {
   let { stopLossPrice, takeProfitPrice } = params;
 
   const fallbackStopDistance = Math.max(lastAtr, price * 0.003);
-  const fallbackTakeDistance = Math.max(lastAtr * 1.5, price * (ROUND_TRIP_COMMISSION_RATE + MIN_NET_PROFIT_BUFFER_RATE));
+  const fallbackTakeDistance = Math.max(
+    lastAtr * 1.5,
+    price * (ROUND_TRIP_COMMISSION_RATE + MIN_NET_PROFIT_BUFFER_RATE)
+  );
 
   if (side === 'long') {
     if (stopLossPrice == null || stopLossPrice >= price) {
       stopLossPrice = price - fallbackStopDistance;
     }
+
     if (takeProfitPrice == null || takeProfitPrice <= price) {
       takeProfitPrice = price + fallbackTakeDistance;
     }
@@ -180,6 +220,7 @@ function validateExitLevels(params: {
     if (stopLossPrice == null || stopLossPrice <= price) {
       stopLossPrice = price + fallbackStopDistance;
     }
+
     if (takeProfitPrice == null || takeProfitPrice >= price) {
       takeProfitPrice = price - fallbackTakeDistance;
     }
@@ -224,6 +265,7 @@ export function detectMarketRegime(candles: Candle[]) {
   const lastEma50 = last(ema50);
   const lastEma200 = last(ema200);
   const lastBb = last(bb);
+
   const avgVol20 = mean(volumes.slice(-20));
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const adxRising = lastAdx.adx > prevAdx.adx;
@@ -285,6 +327,7 @@ export function analyzeMarket(candles: Candle[]) {
   const opens = candles.map(c => c.open);
 
   const regimeInfo = detectMarketRegime(candles);
+
   const macd = MACD.calculate({
     values: closes,
     fastPeriod: 12,
@@ -293,6 +336,7 @@ export function analyzeMarket(candles: Candle[]) {
     SimpleMAOscillator: false,
     SimpleMASignal: false
   });
+
   const rsi = RSI.calculate({ period: 14, values: closes });
   const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
   const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
@@ -315,7 +359,7 @@ export function analyzeMarket(candles: Candle[]) {
       stopLossPrice: null,
       positionSize: null,
       quantity: null,
-      regime: 'unknown',
+      regime: 'unknown' as MarketRegime,
       indicators: { ready: false }
     };
   }
@@ -333,6 +377,7 @@ export function analyzeMarket(candles: Candle[]) {
   const prevAtr = prev(atr);
 
   const lastBb = last(bb);
+  const prevBb = prev(bb);
 
   const lastOpen = last(opens);
   const lastHigh = last(highs);
@@ -365,14 +410,14 @@ export function analyzeMarket(candles: Candle[]) {
   const bodyPctOfRange = candleBody / candleRange;
 
   const bullishBreakClose =
-    prevPrice <= prev(last([lastBb, lastBb])) && // placeholder-safe compatibility
+    prevPrice <= prevBb.upper &&
     price > lastBb.upper &&
     price > lastOpen &&
     bodyPctOfRange >= 0.55 &&
     lastAtr >= prevAtr;
 
   const bearishBreakClose =
-    prevPrice >= prev(last([lastBb, lastBb])) &&
+    prevPrice >= prevBb.lower &&
     price < lastBb.lower &&
     price < lastOpen &&
     bodyPctOfRange >= 0.55 &&
@@ -381,20 +426,24 @@ export function analyzeMarket(candles: Candle[]) {
   if (regime === 'trend_up' && macdCrossUp && rsiBull && price > regimeIndicators.ema200) {
     side = 'long';
     buy = true;
+
     stopLossPrice = price - lastAtr * atrMultipliers.stop;
 
     const atrTarget = price + lastAtr * atrMultipliers.target;
     const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
+
     takeProfitPrice = Math.max(atrTarget, structureTarget ?? atrTarget);
   }
 
   if (regime === 'trend_down' && macdCrossDown && rsiBear && price < regimeIndicators.ema200) {
     side = 'short';
     sell = true;
+
     stopLossPrice = price + lastAtr * atrMultipliers.stop;
 
     const atrTarget = price - lastAtr * atrMultipliers.target;
     const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
+
     takeProfitPrice = Math.min(atrTarget, structureTarget ?? atrTarget);
   }
 
@@ -405,13 +454,17 @@ export function analyzeMarket(candles: Candle[]) {
     if (longSetup) {
       side = 'long';
       buy = true;
+
       stopLossPrice = price - lastAtr * atrMultipliers.stop;
+
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
       takeProfitPrice = Math.max(lastBb.middle, structureTarget ?? lastBb.middle);
     } else if (shortSetup) {
       side = 'short';
       sell = true;
+
       stopLossPrice = price + lastAtr * atrMultipliers.stop;
+
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
       takeProfitPrice = Math.min(lastBb.middle, structureTarget ?? lastBb.middle);
     }
@@ -431,18 +484,22 @@ export function analyzeMarket(candles: Candle[]) {
     if (breakoutUp) {
       side = 'long';
       buy = true;
+
       stopLossPrice = price - lastAtr * atrMultipliers.stop;
 
       const atrTarget = price + lastAtr * atrMultipliers.target;
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
+
       takeProfitPrice = Math.max(atrTarget, structureTarget ?? atrTarget);
     } else if (breakoutDown) {
       side = 'short';
       sell = true;
+
       stopLossPrice = price + lastAtr * atrMultipliers.stop;
 
       const atrTarget = price - lastAtr * atrMultipliers.target;
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
+
       takeProfitPrice = Math.min(atrTarget, structureTarget ?? atrTarget);
     }
   }
@@ -451,6 +508,8 @@ export function analyzeMarket(candles: Candle[]) {
     buy = false;
     sell = false;
     side = 'none';
+    takeProfitPrice = null;
+    stopLossPrice = null;
   }
 
   takeProfitPrice = normalizeTakeProfit({
