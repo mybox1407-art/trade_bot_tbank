@@ -10,6 +10,7 @@ npm run download:candles -- BBG00475KKY8 NVTK 240
 npm run download:candles -- BBG004731489 GMKN 240
 npm run download:candles -- BBG004S681W1 MTSS 240
 npm run download:candles -- BBG004730ZJ9 VTBR 240
+npm run download:candles -- TCS80A107UL4 T 240
 
 npm run download:candles -- BBG000R607Y3 IRKT 730
 npm run download:candles -- BBG004S683W7 AFLT 730
