@@ -1,34 +1,35 @@
-import { analyzeMarket, Candle, MarketRegime } from '../services/strategy';
+import {
+  analyzeMarket,
+  Candle,
+  MarketRegime,
+  PARTIAL_LOCK_R,
+  TP1_FRACTION
+} from '../services/strategy';
 
 /**
  * Настройки бэктеста.
  */
 export interface BacktestOptions {
   startingBalance?: number;
-  /** Комиссия за одну сторону, 0.0005 = 0.05% */
+  /** Комиссия за одну сторону (0.0005 = 0.05%). */
   commissionRate?: number;
   warmupCandles?: number;
   onePositionAtTime?: boolean;
-  /**
-   * Если на одной свече задеты и SL, и TP — считаем, что сработал стоп.
-   */
+  /** Если на свече и SL, и TP — считаем стоп. */
   conservativeIntrabarExecution?: boolean;
-  /** Пауза после убытка / стопа (в свечах). */
+  /** Пауза после ЛЮБОЙ закрытой сделки (свечи). */
   cooldownCandles?: number;
   progressLogEvery?: number;
-
   /**
-   * Когда цена прошла moveToBreakevenR * R в плюс —
-   * переносим стоп в зону lock-in (entry ± 0.3R, не ниже комиссии).
-   * 0 = выключено.
+   * Макс. новых входов за календарный день (UTC).
+   * 0 = без лимита.
    */
-  moveToBreakevenR?: number;
-
-  /**
-   * После lock-in: трейлинг-стоп на trailAfterBreakevenR * R от экстремума.
-   * 0 = только lock-in, без трейла (рекомендуется, пока TP не начнут стабильно браться).
-   */
-  trailAfterBreakevenR?: number;
+  maxTradesPerDay?: number;
+  /** Закрыть по close, если позиция живёт дольше N свечей. */
+  timeStopBars?: number;
+  /** Если через N бар нет earlyAbortMinR * R — выход по close. */
+  earlyAbortBars?: number;
+  earlyAbortMinR?: number;
 }
 
 interface OpenPosition {
@@ -36,18 +37,18 @@ interface OpenPosition {
   regime: MarketRegime | string;
   openedAt: number;
   entryPrice: number;
-  /** Текущий стоп (может двигаться после lock-in / трейла). */
   stopLossPrice: number;
-  /** Исходный стоп — для расчёта 1R. */
   initialStopLossPrice: number;
-  takeProfitPrice: number;
+  takeProfit1Price: number;
+  takeProfit2Price: number;
+  /** Текущий оставшийся объём */
   quantity: number;
+  initialQuantity: number;
   positionSize: number;
   balanceBefore: number;
-  /** 1R в цене: |entry − initial stop|. */
   initialR: number;
-  /** Уже перенесли стоп в lock-in. */
-  breakevenMoved: boolean;
+  tp1Done: boolean;
+  tp1Fraction: number;
 }
 
 export interface BacktestTrade {
@@ -62,7 +63,15 @@ export interface BacktestTrade {
   takeProfitPrice: number;
   quantity: number;
   positionSize: number;
-  closeReason: 'stop_loss' | 'take_profit' | 'forced_close' | 'breakeven' | 'trail_stop';
+  closeReason:
+    | 'stop_loss'
+    | 'take_profit'
+    | 'take_profit_1'
+    | 'take_profit_2'
+    | 'forced_close'
+    | 'time_stop'
+    | 'early_abort'
+    | 'breakeven';
   grossPnl: number;
   commissionOpen: number;
   commissionClose: number;
@@ -71,6 +80,7 @@ export interface BacktestTrade {
   balanceBefore: number;
   balanceAfter: number;
   barsHeld: number;
+  leg: 'partial' | 'full';
 }
 
 export interface BacktestSummary {
@@ -98,10 +108,7 @@ export interface BacktestResult {
   options: Required<BacktestOptions>;
   trades: BacktestTrade[];
   summary: BacktestSummary;
-  equityCurve: Array<{
-    time: number;
-    balance: number;
-  }>;
+  equityCurve: Array<{ time: number; balance: number }>;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -140,19 +147,26 @@ function getGrossPnl(params: {
   return (entryPrice - exitPrice) * quantity;
 }
 
+/** YYYY-MM-DD UTC */
+function utcDateKey(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
 function tryOpenPosition(params: {
   visibleCandles: Candle[];
   currentBalance: number;
 }): OpenPosition | null {
   const { visibleCandles, currentBalance } = params;
-  const signal = analyzeMarket(visibleCandles);
+  const signal = analyzeMarket(visibleCandles, currentBalance);
 
   if (
     signal.side === 'none' ||
-    signal.positionSize == null ||
     signal.quantity == null ||
+    signal.positionSize == null ||
     signal.stopLossPrice == null ||
-    signal.takeProfitPrice == null
+    signal.takeProfit1Price == null ||
+    signal.takeProfit2Price == null ||
+    signal.initialR == null
   ) {
     return null;
   }
@@ -160,12 +174,9 @@ function tryOpenPosition(params: {
   const lastCandle = visibleCandles[visibleCandles.length - 1];
   const entryPrice = toNumber(signal.price);
   const stopLossPrice = toNumber(signal.stopLossPrice);
-  const takeProfitPrice = toNumber(signal.takeProfitPrice);
+  const initialR = toNumber(signal.initialR);
 
-  if (entryPrice <= 0) return null;
-
-  const initialR = Math.abs(entryPrice - stopLossPrice);
-  if (initialR <= 0) return null;
+  if (entryPrice <= 0 || initialR <= 0) return null;
 
   return {
     side: signal.side,
@@ -174,198 +185,60 @@ function tryOpenPosition(params: {
     entryPrice,
     stopLossPrice,
     initialStopLossPrice: stopLossPrice,
-    takeProfitPrice,
+    takeProfit1Price: toNumber(signal.takeProfit1Price),
+    takeProfit2Price: toNumber(signal.takeProfit2Price),
     quantity: toNumber(signal.quantity),
+    initialQuantity: toNumber(signal.quantity),
     positionSize: toNumber(signal.positionSize),
     balanceBefore: currentBalance,
     initialR,
-    breakevenMoved: false
+    tp1Done: false,
+    tp1Fraction: signal.tp1Fraction ?? TP1_FRACTION
   };
 }
 
-/**
- * Управление стопом после открытия:
- * 1) Когда цена прошла moveToBreakevenR * R в плюс —
- *    переносим стоп в lock-in: entry ± max(комиссия, 0.3R).
- *    Так фиксируем небольшой плюс, но не режем тренд раньше TP.
- * 2) Если trailAfterBreakevenR > 0 — дальше трейлим от экстремума,
- *    не опуская стоп ниже lock-in.
- */
-function updateTrailingStop(params: {
-  position: OpenPosition;
-  candle: Candle;
-  moveToBreakevenR: number;
-  trailAfterBreakevenR: number;
-  commissionRate: number;
-}): void {
-  const {
-    position,
-    candle,
-    moveToBreakevenR,
-    trailAfterBreakevenR,
-    commissionRate
-  } = params;
-
-  if (moveToBreakevenR <= 0) return;
-
-  const r = position.initialR;
-  if (r <= 0) return;
-
-  // Запас на round-trip комиссию + минимум 0.3R прибыли в стопе
-  const commBuffer = position.entryPrice * commissionRate * 2.2;
-  const lockIn = Math.max(commBuffer, r * 0.3);
-
-  if (position.side === 'long') {
-    const favorable = candle.high - position.entryPrice;
-
-    // Перенос в lock-in только после достаточного хода в плюс
-    if (!position.breakevenMoved && favorable >= moveToBreakevenR * r) {
-      const beStop = position.entryPrice + lockIn;
-      if (beStop > position.stopLossPrice) {
-        position.stopLossPrice = beStop;
-      }
-      position.breakevenMoved = true;
-    }
-
-    // Опциональный трейл после lock-in
-    if (position.breakevenMoved && trailAfterBreakevenR > 0) {
-      const trailStop = candle.high - trailAfterBreakevenR * r;
-      const floor = position.entryPrice + lockIn;
-      const next = Math.max(trailStop, floor);
-      if (next > position.stopLossPrice) {
-        position.stopLossPrice = next;
-      }
-    }
-  } else {
-    const favorable = position.entryPrice - candle.low;
-
-    if (!position.breakevenMoved && favorable >= moveToBreakevenR * r) {
-      const beStop = position.entryPrice - lockIn;
-      if (beStop < position.stopLossPrice) {
-        position.stopLossPrice = beStop;
-      }
-      position.breakevenMoved = true;
-    }
-
-    if (position.breakevenMoved && trailAfterBreakevenR > 0) {
-      const trailStop = candle.low + trailAfterBreakevenR * r;
-      const ceiling = position.entryPrice - lockIn;
-      const next = Math.min(trailStop, ceiling);
-      if (next < position.stopLossPrice) {
-        position.stopLossPrice = next;
-      }
-    }
-  }
-}
-
-function checkExitOnCandle(params: {
-  position: OpenPosition;
-  candle: Candle;
-  conservativeIntrabarExecution: boolean;
-}): {
-  exitPrice: number;
-  closeReason: 'stop_loss' | 'take_profit' | 'breakeven' | 'trail_stop';
-} | null {
-  const { position, candle, conservativeIntrabarExecution } = params;
-
-  // Считаем выход «breakeven», если стоп близко к входу (lock-in / комиссия)
-  const stopIsBreakeven =
-    position.breakevenMoved &&
-    Math.abs(position.stopLossPrice - position.entryPrice) <
-      position.entryPrice * 0.008;
-
-  if (position.side === 'long') {
-    const stopHit = candle.low <= position.stopLossPrice;
-    const takeHit = candle.high >= position.takeProfitPrice;
-
-    if (stopHit && takeHit) {
-      return conservativeIntrabarExecution
-        ? {
-            exitPrice: position.stopLossPrice,
-            closeReason: stopIsBreakeven ? 'breakeven' : 'stop_loss'
-          }
-        : { exitPrice: position.takeProfitPrice, closeReason: 'take_profit' };
-    }
-
-    if (stopHit) {
-      let reason: 'stop_loss' | 'breakeven' | 'trail_stop' = 'stop_loss';
-      if (position.breakevenMoved) {
-        reason = stopIsBreakeven ? 'breakeven' : 'trail_stop';
-      }
-      return { exitPrice: position.stopLossPrice, closeReason: reason };
-    }
-
-    if (takeHit) {
-      return { exitPrice: position.takeProfitPrice, closeReason: 'take_profit' };
-    }
-
-    return null;
-  }
-
-  const stopHit = candle.high >= position.stopLossPrice;
-  const takeHit = candle.low <= position.takeProfitPrice;
-
-  if (stopHit && takeHit) {
-    return conservativeIntrabarExecution
-      ? {
-          exitPrice: position.stopLossPrice,
-          closeReason: stopIsBreakeven ? 'breakeven' : 'stop_loss'
-        }
-      : { exitPrice: position.takeProfitPrice, closeReason: 'take_profit' };
-  }
-
-  if (stopHit) {
-    let reason: 'stop_loss' | 'breakeven' | 'trail_stop' = 'stop_loss';
-    if (position.breakevenMoved) {
-      reason = stopIsBreakeven ? 'breakeven' : 'trail_stop';
-    }
-    return { exitPrice: position.stopLossPrice, closeReason: reason };
-  }
-
-  if (takeHit) {
-    return { exitPrice: position.takeProfitPrice, closeReason: 'take_profit' };
-  }
-
-  return null;
-}
-
-function closePosition(params: {
+function buildTrade(params: {
   symbol: string;
   position: OpenPosition;
-  closeReason: BacktestTrade['closeReason'];
+  qty: number;
   exitPrice: number;
   closedAt: number;
+  closeReason: BacktestTrade['closeReason'];
   balanceBeforeClose: number;
   commissionRate: number;
   barsHeld: number;
+  leg: 'partial' | 'full';
+  /** Комиссию на вход — только на первую ногу позиции */
+  chargeOpenCommission: boolean;
 }): BacktestTrade {
   const {
     symbol,
     position,
-    closeReason,
+    qty,
     exitPrice,
     closedAt,
+    closeReason,
     balanceBeforeClose,
     commissionRate,
-    barsHeld
+    barsHeld,
+    leg,
+    chargeOpenCommission
   } = params;
 
-  const openTurnover = position.entryPrice * position.quantity;
-  const closeTurnover = exitPrice * position.quantity;
-
-  const commissionOpen = getCommission(openTurnover, commissionRate);
+  const openTurnover = position.entryPrice * qty;
+  const closeTurnover = exitPrice * qty;
+  const commissionOpen = chargeOpenCommission
+    ? getCommission(openTurnover, commissionRate)
+    : 0;
   const commissionClose = getCommission(closeTurnover, commissionRate);
   const totalCommission = commissionOpen + commissionClose;
-
   const grossPnl = getGrossPnl({
     side: position.side,
     entryPrice: position.entryPrice,
     exitPrice,
-    quantity: position.quantity
+    quantity: qty
   });
-
   const netPnl = grossPnl - totalCommission;
-  const balanceAfter = balanceBeforeClose + netPnl;
 
   return {
     symbol,
@@ -376,9 +249,11 @@ function closePosition(params: {
     entryPrice: round(position.entryPrice),
     exitPrice: round(exitPrice),
     stopLossPrice: round(position.stopLossPrice),
-    takeProfitPrice: round(position.takeProfitPrice),
-    quantity: round(position.quantity, 12),
-    positionSize: round(position.positionSize, 8),
+    takeProfitPrice: round(
+      leg === 'partial' ? position.takeProfit1Price : position.takeProfit2Price
+    ),
+    quantity: round(qty, 12),
+    positionSize: round(position.entryPrice * qty, 8),
     closeReason,
     grossPnl: round(grossPnl),
     commissionOpen: round(commissionOpen),
@@ -386,8 +261,215 @@ function closePosition(params: {
     totalCommission: round(totalCommission),
     netPnl: round(netPnl),
     balanceBefore: round(position.balanceBefore),
-    balanceAfter: round(balanceAfter),
-    barsHeld
+    balanceAfter: round(balanceBeforeClose + netPnl),
+    barsHeld,
+    leg
+  };
+}
+
+/**
+ * Выходы на свече: SL, TP1 (partial), TP2.
+ * Conservative: при SL+TP на одной свече — SL.
+ */
+function processExitsOnCandle(params: {
+  symbol: string;
+  position: OpenPosition;
+  candle: Candle;
+  balance: number;
+  commissionRate: number;
+  barsHeld: number;
+  conservative: boolean;
+  openCommissionRemaining: boolean;
+}): {
+  trades: BacktestTrade[];
+  balance: number;
+  stillOpen: boolean;
+  openCommissionRemaining: boolean;
+} {
+  const { symbol, position, candle, commissionRate, barsHeld, conservative } =
+    params;
+
+  let { balance, openCommissionRemaining } = params;
+  const trades: BacktestTrade[] = [];
+
+  const hitStop =
+    position.side === 'long'
+      ? candle.low <= position.stopLossPrice
+      : candle.high >= position.stopLossPrice;
+
+  const hitTp1 =
+    !position.tp1Done &&
+    (position.side === 'long'
+      ? candle.high >= position.takeProfit1Price
+      : candle.low <= position.takeProfit1Price);
+
+  const hitTp2 =
+    position.side === 'long'
+      ? candle.high >= position.takeProfit2Price
+      : candle.low <= position.takeProfit2Price;
+
+  // SL приоритетнее TP при conservative
+  if (hitStop && (hitTp1 || hitTp2) && conservative) {
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.stopLossPrice,
+      closedAt: candle.time,
+      closeReason:
+        position.tp1Done &&
+        Math.abs(position.stopLossPrice - position.entryPrice) <
+          position.initialR * 0.5
+          ? 'breakeven'
+          : 'stop_loss',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  // TP1 — частичное закрытие
+  if (hitTp1 && position.quantity > 1) {
+    let qty1 = Math.floor(position.initialQuantity * position.tp1Fraction);
+    qty1 = Math.max(1, Math.min(qty1, position.quantity - 1));
+
+    const t1 = buildTrade({
+      symbol,
+      position,
+      qty: qty1,
+      exitPrice: position.takeProfit1Price,
+      closedAt: candle.time,
+      closeReason: 'take_profit_1',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'partial',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t1.balanceAfter;
+    trades.push(t1);
+    openCommissionRemaining = false;
+
+    position.quantity -= qty1;
+    position.tp1Done = true;
+
+    // Остаток: стоп в +PARTIAL_LOCK_R
+    const lock = position.initialR * PARTIAL_LOCK_R;
+    if (position.side === 'long') {
+      position.stopLossPrice = Math.max(
+        position.stopLossPrice,
+        position.entryPrice + lock
+      );
+    } else {
+      position.stopLossPrice = Math.min(
+        position.stopLossPrice,
+        position.entryPrice - lock
+      );
+    }
+  }
+
+  // Если qty=1 и hitTp1 без partial — закрываем целиком по TP1
+  if (hitTp1 && !position.tp1Done && position.quantity === 1) {
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: 1,
+      exitPrice: position.takeProfit1Price,
+      closedAt: candle.time,
+      closeReason: 'take_profit_1',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  const hitStop2 =
+    position.side === 'long'
+      ? candle.low <= position.stopLossPrice
+      : candle.high >= position.stopLossPrice;
+
+  const hitTp2b =
+    position.side === 'long'
+      ? candle.high >= position.takeProfit2Price
+      : candle.low <= position.takeProfit2Price;
+
+  if (position.quantity > 0 && hitStop2 && hitTp2b && conservative) {
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.stopLossPrice,
+      closedAt: candle.time,
+      closeReason: position.tp1Done ? 'breakeven' : 'stop_loss',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  if (position.quantity > 0 && hitStop2) {
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.stopLossPrice,
+      closedAt: candle.time,
+      closeReason: position.tp1Done ? 'breakeven' : 'stop_loss',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  if (position.quantity > 0 && hitTp2b) {
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.takeProfit2Price,
+      closedAt: candle.time,
+      closeReason: 'take_profit_2',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  return {
+    trades,
+    balance,
+    stillOpen: position.quantity > 0,
+    openCommissionRemaining
   };
 }
 
@@ -410,6 +492,10 @@ function calculateDrawdown(equityCurve: Array<{ time: number; balance: number }>
   };
 }
 
+/**
+ * Сводка: группируем ноги одного входа (openedAt+side+entry) —
+ * иначе partial раздует число «сделок» и winrate.
+ */
 function buildSummary(params: {
   symbol: string;
   trades: BacktestTrade[];
@@ -419,18 +505,18 @@ function buildSummary(params: {
 }): BacktestSummary {
   const { symbol, trades, startBalance, endBalance, equityCurve } = params;
 
-  const wins = trades.filter(t => t.netPnl > 0);
-  const losses = trades.filter(t => t.netPnl <= 0);
+  const groups = new Map<string, number>();
+  for (const t of trades) {
+    const key = `${t.openedAt}|${t.side}|${t.entryPrice}`;
+    groups.set(key, (groups.get(key) ?? 0) + t.netPnl);
+  }
+  const groupPnls = [...groups.values()];
 
-  const grossProfit = wins.reduce((sum, t) => sum + t.netPnl, 0);
-  const grossLossAbs = Math.abs(losses.reduce((sum, t) => sum + t.netPnl, 0));
-  const netProfit = trades.reduce((sum, t) => sum + t.netPnl, 0);
-
-  const avgNetPnl = trades.length ? netProfit / trades.length : 0;
-  const avgWin = wins.length ? grossProfit / wins.length : 0;
-  const avgLoss = losses.length
-    ? losses.reduce((sum, t) => sum + t.netPnl, 0) / losses.length
-    : 0;
+  const wins = groupPnls.filter(p => p > 0);
+  const losses = groupPnls.filter(p => p <= 0);
+  const grossProfit = wins.reduce((a, b) => a + b, 0);
+  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0));
+  const netProfit = groupPnls.reduce((a, b) => a + b, 0);
 
   const profitFactor =
     grossLossAbs > 0 ? grossProfit / grossLossAbs : grossProfit > 0 ? Infinity : 0;
@@ -439,16 +525,18 @@ function buildSummary(params: {
 
   return {
     symbol,
-    tradesCount: trades.length,
+    tradesCount: groupPnls.length,
     wins: wins.length,
     losses: losses.length,
-    winRate: round(trades.length ? wins.length / trades.length : 0, 6),
+    winRate: round(groupPnls.length ? wins.length / groupPnls.length : 0, 6),
     grossProfit: round(grossProfit),
     grossLoss: round(-grossLossAbs),
     netProfit: round(netProfit),
-    avgNetPnl: round(avgNetPnl),
-    avgWin: round(avgWin),
-    avgLoss: round(avgLoss),
+    avgNetPnl: round(groupPnls.length ? netProfit / groupPnls.length : 0),
+    avgWin: round(wins.length ? grossProfit / wins.length : 0),
+    avgLoss: round(
+      losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0
+    ),
     profitFactor: Number.isFinite(profitFactor) ? round(profitFactor, 6) : Infinity,
     startBalance: round(startBalance),
     endBalance: round(endBalance),
@@ -459,7 +547,7 @@ function buildSummary(params: {
 }
 
 /**
- * Основной прогон бэктеста по одному инструменту.
+ * Основной прогон бэктеста.
  */
 export function runStrategyBacktest(
   symbol: string,
@@ -472,11 +560,14 @@ export function runStrategyBacktest(
     warmupCandles: options.warmupCandles ?? 250,
     onePositionAtTime: options.onePositionAtTime ?? true,
     conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true,
-    cooldownCandles: options.cooldownCandles ?? 6,
+    // Пауза после любой сделки (не только убытка)
+    cooldownCandles: options.cooldownCandles ?? 12,
     progressLogEvery: options.progressLogEvery ?? 5000,
-    // По умолчанию: lock-in после 1.6R, трейл выключен — чтобы TP успевали срабатывать
-    moveToBreakevenR: options.moveToBreakevenR ?? 1.6,
-    trailAfterBreakevenR: options.trailAfterBreakevenR ?? 0
+    // 0 = без лимита входов в день
+    maxTradesPerDay: options.maxTradesPerDay ?? 0,
+    timeStopBars: options.timeStopBars ?? 64,
+    earlyAbortBars: options.earlyAbortBars ?? 16,
+    earlyAbortMinR: options.earlyAbortMinR ?? 0.25
   };
 
   if (!Array.isArray(candles) || candles.length === 0) {
@@ -500,7 +591,9 @@ export function runStrategyBacktest(
   let balance = resolvedOptions.startingBalance;
   let openPosition: OpenPosition | null = null;
   let openPositionIndex = -1;
+  let openCommissionRemaining = false;
   let cooldownRemaining = 0;
+  const entriesPerDay = new Map<string, number>();
 
   const trades: BacktestTrade[] = [];
   const equityCurve: Array<{ time: number; balance: number }> = [
@@ -516,6 +609,7 @@ export function runStrategyBacktest(
   for (let i = resolvedOptions.warmupCandles; i < sortedCandles.length; i++) {
     const visibleCandles = sortedCandles.slice(0, i + 1);
     const currentCandle = sortedCandles[i];
+    const barsHeld = openPosition ? i - openPositionIndex : 0;
 
     if (resolvedOptions.progressLogEvery > 0) {
       const processedBars = i - resolvedOptions.warmupCandles;
@@ -547,101 +641,156 @@ export function runStrategyBacktest(
     }
 
     if (openPosition) {
-      // 1) Сначала двигаем стоп (lock-in / трейл) по high/low свечи
-      updateTrailingStop({
-        position: openPosition,
-        candle: currentCandle,
-        moveToBreakevenR: resolvedOptions.moveToBreakevenR,
-        trailAfterBreakevenR: resolvedOptions.trailAfterBreakevenR,
-        commissionRate: resolvedOptions.commissionRate
-      });
-
-      // 2) Затем проверяем выход уже с обновлённым стопом
-      const exit = checkExitOnCandle({
-        position: openPosition,
-        candle: currentCandle,
-        conservativeIntrabarExecution: resolvedOptions.conservativeIntrabarExecution
-      });
-
-      if (exit) {
-        const trade = closePosition({
+      // Time-stop: слишком долго держим
+      if (barsHeld >= resolvedOptions.timeStopBars) {
+        const t = buildTrade({
           symbol,
           position: openPosition,
-          closeReason: exit.closeReason,
-          exitPrice: exit.exitPrice,
+          qty: openPosition.quantity,
+          exitPrice: currentCandle.close,
           closedAt: currentCandle.time,
+          closeReason: 'time_stop',
           balanceBeforeClose: balance,
           commissionRate: resolvedOptions.commissionRate,
-          barsHeld: i - openPositionIndex
+          barsHeld,
+          leg: 'full',
+          chargeOpenCommission: openCommissionRemaining
         });
-
-        balance = trade.balanceAfter;
-        trades.push(trade);
+        balance = t.balanceAfter;
+        trades.push(t);
         equityCurve.push({ time: currentCandle.time, balance: round(balance) });
-
-        // Пауза после полного стопа или любого убытка
-        if (trade.closeReason === 'stop_loss' || trade.netPnl <= 0) {
-          cooldownRemaining = resolvedOptions.cooldownCandles;
-        }
-
+        cooldownRemaining = resolvedOptions.cooldownCandles;
         openPosition = null;
         openPositionIndex = -1;
+        openCommissionRemaining = false;
+      } else if (
+        // Early abort: за N бар нет даже небольшого плюса
+        barsHeld >= resolvedOptions.earlyAbortBars &&
+        !openPosition.tp1Done
+      ) {
+        const fav =
+          openPosition.side === 'long'
+            ? currentCandle.close - openPosition.entryPrice
+            : openPosition.entryPrice - currentCandle.close;
+
+        if (fav < resolvedOptions.earlyAbortMinR * openPosition.initialR) {
+          const t = buildTrade({
+            symbol,
+            position: openPosition,
+            qty: openPosition.quantity,
+            exitPrice: currentCandle.close,
+            closedAt: currentCandle.time,
+            closeReason: 'early_abort',
+            balanceBeforeClose: balance,
+            commissionRate: resolvedOptions.commissionRate,
+            barsHeld,
+            leg: 'full',
+            chargeOpenCommission: openCommissionRemaining
+          });
+          balance = t.balanceAfter;
+          trades.push(t);
+          equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+          cooldownRemaining = resolvedOptions.cooldownCandles;
+          openPosition = null;
+          openPositionIndex = -1;
+          openCommissionRemaining = false;
+        }
+      }
+
+      if (openPosition) {
+        const result = processExitsOnCandle({
+          symbol,
+          position: openPosition,
+          candle: currentCandle,
+          balance,
+          commissionRate: resolvedOptions.commissionRate,
+          barsHeld,
+          conservative: resolvedOptions.conservativeIntrabarExecution,
+          openCommissionRemaining
+        });
+
+        balance = result.balance;
+        openCommissionRemaining = result.openCommissionRemaining;
+
+        for (const t of result.trades) {
+          trades.push(t);
+          equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+        }
+
+        if (!result.stillOpen) {
+          // Cooldown после любой полностью закрытой позиции
+          cooldownRemaining = resolvedOptions.cooldownCandles;
+          openPosition = null;
+          openPositionIndex = -1;
+          openCommissionRemaining = false;
+        }
       }
     }
 
-    if (openPosition && resolvedOptions.onePositionAtTime) {
-      continue;
-    }
+    if (openPosition && resolvedOptions.onePositionAtTime) continue;
 
     if (cooldownRemaining > 0) {
       cooldownRemaining -= 1;
       continue;
     }
 
-    if (!openPosition || !resolvedOptions.onePositionAtTime) {
-      const maybeOpen = tryOpenPosition({
-        visibleCandles,
-        currentBalance: balance
-      });
+    // Лимит в день только если maxTradesPerDay > 0
+    if (resolvedOptions.maxTradesPerDay > 0) {
+      const dayKey = utcDateKey(currentCandle.time);
+      const usedToday = entriesPerDay.get(dayKey) ?? 0;
+      if (usedToday >= resolvedOptions.maxTradesPerDay) continue;
+    }
 
-      if (maybeOpen && !openPosition) {
-        openPosition = maybeOpen;
-        openPositionIndex = i;
+    const maybeOpen = tryOpenPosition({
+      visibleCandles,
+      currentBalance: balance
+    });
+
+    if (maybeOpen) {
+      openPosition = maybeOpen;
+      openPositionIndex = i;
+      openCommissionRemaining = true;
+
+      if (resolvedOptions.maxTradesPerDay > 0) {
+        const dayKey = utcDateKey(currentCandle.time);
+        const usedToday = entriesPerDay.get(dayKey) ?? 0;
+        entriesPerDay.set(dayKey, usedToday + 1);
       }
     }
   }
 
-  // Принудительно закрываем хвост истории по close последней свечи
+  // Хвост истории — forced close
   if (openPosition) {
     const lastCandle = sortedCandles[sortedCandles.length - 1];
-    const trade = closePosition({
+    const t = buildTrade({
       symbol,
       position: openPosition,
-      closeReason: 'forced_close',
+      qty: openPosition.quantity,
       exitPrice: lastCandle.close,
       closedAt: lastCandle.time,
+      closeReason: 'forced_close',
       balanceBeforeClose: balance,
       commissionRate: resolvedOptions.commissionRate,
-      barsHeld: sortedCandles.length - 1 - openPositionIndex
+      barsHeld: sortedCandles.length - 1 - openPositionIndex,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
     });
-    balance = trade.balanceAfter;
-    trades.push(trade);
+    balance = t.balanceAfter;
+    trades.push(t);
     equityCurve.push({ time: lastCandle.time, balance: round(balance) });
   }
-
-  const summary = buildSummary({
-    symbol,
-    trades,
-    startBalance: resolvedOptions.startingBalance,
-    endBalance: balance,
-    equityCurve
-  });
 
   return {
     symbol,
     options: resolvedOptions,
     trades,
-    summary,
+    summary: buildSummary({
+      symbol,
+      trades,
+      startBalance: resolvedOptions.startingBalance,
+      endBalance: balance,
+      equityCurve
+    }),
     equityCurve
   };
 }
