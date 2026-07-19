@@ -4,21 +4,13 @@ import { runStrategyBacktest } from './strategyBacktest';
 import { Candle } from '../services/strategy';
 
 /**
- * Пауза после убыточной сделки / стопа (свечи).
+ * Пауза после любой закрытой сделки (свечи).
  * Можно переопределить 4-м аргументом CLI.
  */
-const DEFAULT_COOLDOWN_CANDLES = 6;
+const DEFAULT_COOLDOWN_CANDLES = 12;
 
 /** Как часто печатать прогресс (0 = выкл.). */
 const PROGRESS_LOG_EVERY = 5000;
-
-/**
- * Параметры управления стопом (должны совпадать с вызовом runStrategyBacktest).
- * BE/lock-in после 1.6R — чтобы крупные TP не срезались раньше времени.
- * Трейл выключен, пока не вернём стабильные take_profit.
- */
-const MOVE_TO_BREAKEVEN_R = 1.6;
-const TRAIL_AFTER_BREAKEVEN_R = 0;
 
 /** ANSI-цвета для терминала */
 const ANSI = {
@@ -32,7 +24,7 @@ const ANSI = {
 } as const;
 
 /**
- * Окраска строки. Если stdout не TTY (pipe/файл) — без escape-кодов.
+ * Окраска строки. Если stdout не TTY — без escape-кодов.
  */
 function colorize(text: string, color: keyof typeof ANSI): string {
   if (!process.stdout.isTTY) {
@@ -134,28 +126,19 @@ function formatDuration(seconds: number): string {
   return `${hours} ч ${mins} мин`;
 }
 
-function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: number } {
-  if (candlesCount <= 5000) {
-    return { minSec: 5, maxSec: 20 };
-  }
-
-  if (candlesCount <= 15000) {
-    return { minSec: 15, maxSec: 60 };
-  }
-
-  if (candlesCount <= 30000) {
-    return { minSec: 30, maxSec: 120 };
-  }
-
-  if (candlesCount <= 60000) {
-    return { minSec: 60, maxSec: 300 };
-  }
-
+function estimateBacktestTime(candlesCount: number): {
+  minSec: number;
+  maxSec: number;
+} {
+  if (candlesCount <= 5000) return { minSec: 5, maxSec: 20 };
+  if (candlesCount <= 15000) return { minSec: 15, maxSec: 60 };
+  if (candlesCount <= 30000) return { minSec: 30, maxSec: 120 };
+  if (candlesCount <= 60000) return { minSec: 60, maxSec: 300 };
   return { minSec: 180, maxSec: 600 };
 }
 
 /**
- * Итоги бэктеста: плюс — зелёный, минус — красный.
+ * Итоги: плюс — зелёный, минус — красный.
  */
 function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   const s = result.summary;
@@ -167,18 +150,26 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
 
   console.log('\n========== ИТОГИ БЭКТЕСТА ==========');
   console.log(`Инструмент:            ${s.symbol}`);
-  console.log(`Сделок:                ${s.tradesCount}`);
+  console.log(`Сделок (групп):        ${s.tradesCount}`);
   console.log(`Побед:                 ${colorize(String(s.wins), 'green')}`);
   console.log(`Поражений:             ${colorize(String(s.losses), 'red')}`);
   console.log(`Win rate:              ${formatNumber(s.winRate * 100, 2)}%`);
-  console.log(`Gross profit:          ${colorize(formatNumber(s.grossProfit, 2), 'green')}`);
-  console.log(`Gross loss:            ${colorize(formatNumber(s.grossLoss, 2), 'red')}`);
+  console.log(
+    `Gross profit:          ${colorize(formatNumber(s.grossProfit, 2), 'green')}`
+  );
+  console.log(
+    `Gross loss:            ${colorize(formatNumber(s.grossLoss, 2), 'red')}`
+  );
   console.log(
     `Net profit:            ${colorize(formatNumber(s.netProfit, 2), netColor)}`
   );
   console.log(`Avg net pnl:           ${formatNumber(s.avgNetPnl, 2)}`);
-  console.log(`Avg win:               ${colorize(formatNumber(s.avgWin, 2), 'green')}`);
-  console.log(`Avg loss:              ${colorize(formatNumber(s.avgLoss, 2), 'red')}`);
+  console.log(
+    `Avg win:               ${colorize(formatNumber(s.avgWin, 2), 'green')}`
+  );
+  console.log(
+    `Avg loss:              ${colorize(formatNumber(s.avgLoss, 2), 'red')}`
+  );
   console.log(
     `Profit factor:         ${colorize(
       Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity',
@@ -188,15 +179,19 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   console.log(`Стартовый баланс:      ${formatNumber(s.startBalance, 2)}`);
   console.log(`Финальный баланс:      ${formatNumber(s.endBalance, 2)}`);
   console.log(
-    `Доходность:            ${colorize(formatNumber(s.returnPct * 100, 2) + '%', retColor)}`
+    `Доходность:            ${colorize(
+      formatNumber(s.returnPct * 100, 2) + '%',
+      retColor
+    )}`
   );
   console.log(`Макс. просадка:        ${formatNumber(s.maxDrawdownAbs, 2)}`);
-  console.log(`Макс. просадка %:      ${formatNumber(s.maxDrawdownPct * 100, 2)}%`);
+  console.log(
+    `Макс. просадка %:      ${formatNumber(s.maxDrawdownPct * 100, 2)}%`
+  );
 }
 
 /**
- * Печать сделок.
- * Без limit — все; с limit — последние N.
+ * Печать ног сделок (partial + full).
  * Прибыль — зелёный, убыток — красный, ноль — жёлтый.
  */
 function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: number) {
@@ -205,8 +200,8 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
 
   const title =
     limit != null && limit > 0 && limit < all.length
-      ? `ПОСЛЕДНИЕ ${trades.length} ИЗ ${all.length} СДЕЛОК`
-      : `ВСЕ СДЕЛКИ (${trades.length})`;
+      ? `ПОСЛЕДНИЕ ${trades.length} ИЗ ${all.length} НОГ`
+      : `ВСЕ НОГИ СДЕЛОК (${trades.length})`;
 
   console.log(`\n========== ${title} ==========`);
 
@@ -233,6 +228,7 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
       `SL: ${formatNumber(trade.stopLossPrice, 4)}`,
       `TP: ${formatNumber(trade.takeProfitPrice, 4)}`,
       `Qty: ${formatNumber(trade.quantity, 0)}`,
+      `Leg: ${trade.leg}`,
       `Причина: ${trade.closeReason}`,
       `Net PnL: ${formatNumber(trade.netPnl, 2)}`,
       `Комиссия: ${formatNumber(trade.totalCommission, 2)}`,
@@ -256,7 +252,7 @@ function printUsage() {
 
 Пример:
   npm run backtest -- ./src/backtest/data/SBER_15m.json SBER
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
 `);
 }
 
@@ -312,32 +308,39 @@ function main() {
   console.log(`Инструмент:            ${symbolArg}`);
   console.log(`Свечей загружено:      ${candles.length}`);
   console.log(
-    `Период данных:         ${formatDate(candles[0].time)} -> ${formatDate(candles[candles.length - 1].time)}`
+    `Период данных:         ${formatDate(candles[0].time)} -> ${formatDate(
+      candles[candles.length - 1].time
+    )}`
   );
-  console.log(`Cooldown после убытка: ${cooldownCandles} свеч.`);
+  console.log(`Cooldown после сделки:  ${cooldownCandles} свеч. (после любой)`);
   console.log(
-    `Оценка времени:        ~ ${formatDuration(estimated.minSec)} - ${formatDuration(estimated.maxSec)}`
+    `Оценка времени:        ~ ${formatDuration(estimated.minSec)} - ${formatDuration(
+      estimated.maxSec
+    )}`
   );
   console.log(`Лог прогресса:         каждые ${PROGRESS_LOG_EVERY} свечей`);
-  console.log(`Lock-in после:         ${MOVE_TO_BREAKEVEN_R} R (стоп ≈ entry ± 0.3R)`);
-  console.log(
-    `Trail после lock-in:   ${
-      TRAIL_AFTER_BREAKEVEN_R > 0 ? `${TRAIL_AFTER_BREAKEVEN_R} R` : 'выкл.'
-    }`
-  );
+  console.log(`Модель выхода:         TP1 50%@1.2R → lock 0.2R → TP2@2.5R`);
+  console.log(`Лимит входов в день:   выкл.`);
+  console.log(`Time-stop / abort:     64 бар / 16 бар < 0.25R`);
+  console.log(`Кап стопа:             ≤ 1.2% цены`);
 
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
     const elapsedSec = (Date.now() - startedAt) / 1000;
     console.log(
-      `[${new Date().toISOString()}] Бэктест выполняется... прошло ${formatDuration(elapsedSec)}`
+      `[${new Date().toISOString()}] Бэктест выполняется... прошло ${formatDuration(
+        elapsedSec
+      )}`
     );
   }, 15000);
 
   let result: ReturnType<typeof runStrategyBacktest>;
 
   try {
-    const progressMarkers = Math.max(1, Math.floor(candles.length / PROGRESS_LOG_EVERY));
+    const progressMarkers = Math.max(
+      1,
+      Math.floor(candles.length / PROGRESS_LOG_EVERY)
+    );
 
     console.log(`Прогресс:              0/${candles.length} свечей`);
     console.log(`Ожидаемое число логов: ~ ${progressMarkers}`);
@@ -350,10 +353,10 @@ function main() {
       conservativeIntrabarExecution: true,
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
-      // Lock-in только после 1.6R — не режем победы на полпути к TP
-      moveToBreakevenR: MOVE_TO_BREAKEVEN_R,
-      // Трейл выкл., пока снова не появятся стабильные take_profit
-      trailAfterBreakevenR: TRAIL_AFTER_BREAKEVEN_R
+      maxTradesPerDay: 0, // без лимита «1 вход в день»
+      timeStopBars: 64,
+      earlyAbortBars: 16,
+      earlyAbortMinR: 0.25
     });
   } finally {
     clearInterval(heartbeat);
