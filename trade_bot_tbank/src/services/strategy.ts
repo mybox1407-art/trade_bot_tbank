@@ -13,7 +13,26 @@ const MIN_NET_PROFIT_BUFFER_RATE = 0.001; // 0.1% запас поверх round-
 const MIN_TP_ATR_MULTIPLIER = 0.5;
 
 const STRUCTURE_LOOKBACK = 10;
+const STOP_STRUCTURE_LOOKBACK = 5;
+const BREAKOUT_LOOKBACK = 20;
+
 const MIN_EXPECTED_NET_MOVE_RATE = 0.002; // минимум 0.2% чистого движения после комиссии
+const MIN_RISK_REWARD_RATIO = 1.5;
+
+// Фильтр торговых часов:
+// 10:00–18:00 МСК = 07:00–15:00 UTC
+const TRADING_HOUR_UTC_FROM = 7;
+const TRADING_HOUR_UTC_TO = 15;
+
+// Более строгий фильтр объема для breakout
+const VOLUME_SPIKE_MULTIPLIER = 1.35;
+
+// Минимальное смещение пробоя за уровень в долях ATR,
+// чтобы не ловить мелкий шум вокруг полос Боллинджера
+const BREAKOUT_MIN_ATR_DISPLACEMENT = 0.5;
+
+// Дополнительный фильтр тела свечи для breakout
+const BREAKOUT_MIN_BODY_PCT = 0.6;
 
 export interface Candle {
   time: number;
@@ -59,29 +78,38 @@ function mean(values: number[]): number {
 
 function getVolumeSpike(volumes: number[], avgVol20: number): boolean {
   const v = volumes[volumes.length - 1] ?? 0;
-  return v >= avgVol20 * 1.1;
+  return v >= avgVol20 * VOLUME_SPIKE_MULTIPLIER;
 }
 
 /**
  * ATR-множители под режим рынка.
- * В тренде и в breakout делаем стопы шире, чтобы не выбивало рыночным шумом.
+ * Для breakout целимся дальше, потому что идея режима —
+ * поймать расширение волатильности после сжатия.
  */
 function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
   const highVol = atrPct > 0.02;
 
   if (regime === 'trend_up' || regime === 'trend_down') {
-    return { stop: highVol ? 2.5 : 2.0, target: highVol ? 3.8 : 3.2 };
+    return { stop: highVol ? 2.3 : 2.0, target: highVol ? 3.8 : 3.2 };
   }
 
   if (regime === 'range') {
-    return { stop: 1.4, target: 1.0 };
+    return { stop: 1.4, target: 1.1 };
   }
 
   if (regime === 'breakout_watch') {
-    return { stop: highVol ? 2.5 : 2.0, target: highVol ? 4.0 : 3.6 };
+    return { stop: highVol ? 2.0 : 1.8, target: highVol ? 4.2 : 3.6 };
   }
 
   return { stop: 0, target: 0 };
+}
+
+/**
+ * Фильтр времени по UTC.
+ */
+function isTradingHour(timestamp: number): boolean {
+  const hourUtc = new Date(timestamp).getUTCHours();
+  return hourUtc >= TRADING_HOUR_UTC_FROM && hourUtc < TRADING_HOUR_UTC_TO;
 }
 
 /**
@@ -118,7 +146,6 @@ function normalizeTakeProfit(params: {
 
 /**
  * Считает ожидаемое движение до тейка после вычета round-trip комиссии.
- * Нужен, чтобы не открывать сделки, в которых чистый потенциал слишком мал.
  */
 function expectedNetMove(params: {
   side: 'long' | 'short' | 'none';
@@ -153,11 +180,6 @@ function expectedNetMove(params: {
 
 /**
  * Структурная цель по ближайшей локальной структуре.
- * Для long — ориентир на локальный максимум последних N свечей.
- * Для short — ориентир на локальный минимум последних N свечей.
- *
- * Дополнительно не даем structureTarget быть слишком близко,
- * поэтому сравниваем с базовой целью 1.5 ATR.
  */
 function getStructureTarget(params: {
   side: 'long' | 'short' | 'none';
@@ -184,6 +206,147 @@ function getStructureTarget(params: {
   }
 
   return null;
+}
+
+/**
+ * Структурный стоп по локальному экстремуму.
+ * Если структура слишком близко или "ломается", используем fallback через ATR.
+ */
+function getStructureStop(params: {
+  side: 'long' | 'short' | 'none';
+  highs: number[];
+  lows: number[];
+  price: number;
+  lastAtr: number;
+  atrStopMultiplier: number;
+}) {
+  const { side, highs, lows, price, lastAtr, atrStopMultiplier } = params;
+
+  if (side === 'none') {
+    return null;
+  }
+
+  const recentHigh = Math.max(...highs.slice(-STOP_STRUCTURE_LOOKBACK));
+  const recentLow = Math.min(...lows.slice(-STOP_STRUCTURE_LOOKBACK));
+
+  const fallbackLong = price - lastAtr * atrStopMultiplier;
+  const fallbackShort = price + lastAtr * atrStopMultiplier;
+
+  if (side === 'long') {
+    return Math.min(recentLow, fallbackLong);
+  }
+
+  if (side === 'short') {
+    return Math.max(recentHigh, fallbackShort);
+  }
+
+  return null;
+}
+
+/**
+ * Проверка минимального отношения прибыль/риск.
+ */
+function getRiskReward(params: {
+  side: 'long' | 'short' | 'none';
+  price: number;
+  stopLossPrice: number | null;
+  takeProfitPrice: number | null;
+}) {
+  const { side, price, stopLossPrice, takeProfitPrice } = params;
+
+  if (
+    side === 'none' ||
+    stopLossPrice == null ||
+    takeProfitPrice == null
+  ) {
+    return {
+      risk: 0,
+      reward: 0,
+      ratio: 0
+    };
+  }
+
+  const risk =
+    side === 'long'
+      ? price - stopLossPrice
+      : stopLossPrice - price;
+
+  const reward =
+    side === 'long'
+      ? takeProfitPrice - price
+      : price - takeProfitPrice;
+
+  if (risk <= 0 || reward <= 0) {
+    return {
+      risk,
+      reward,
+      ratio: 0
+    };
+  }
+
+  return {
+    risk,
+    reward,
+    ratio: reward / risk
+  };
+}
+
+/**
+ * Проверяем, что пробой действительно вышел за границу
+ * не только на "копейки", а хотя бы на разумную долю ATR.
+ */
+function getBreakoutDisplacement(params: {
+  side: 'long' | 'short';
+  price: number;
+  bandLevel: number;
+  lastAtr: number;
+}) {
+  const { side, price, bandLevel, lastAtr } = params;
+
+  if (lastAtr <= 0) {
+    return {
+      distance: 0,
+      distanceAtr: 0
+    };
+  }
+
+  const distance =
+    side === 'long'
+      ? price - bandLevel
+      : bandLevel - price;
+
+  return {
+    distance,
+    distanceAtr: distance / lastAtr
+  };
+}
+
+/**
+ * Проверяем пробой локальной структуры последних N свечей.
+ * Это помогает отсекать ложные выходы только за Bollinger Bands.
+ */
+function getStructureBreak(params: {
+  side: 'long' | 'short';
+  highs: number[];
+  lows: number[];
+  price: number;
+}) {
+  const { side, highs, lows, price } = params;
+
+  const recentHigh = Math.max(...highs.slice(-BREAKOUT_LOOKBACK, -1));
+  const recentLow = Math.min(...lows.slice(-BREAKOUT_LOOKBACK, -1));
+
+  if (side === 'long') {
+    return {
+      level: recentHigh,
+      broken: price > recentHigh
+    };
+  }
+
+  return {
+    level: recentLow,
+    broken: price < recentLow
+  };
 }
 
 /**
@@ -325,6 +488,7 @@ export function analyzeMarket(candles: Candle[]) {
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
   const opens = candles.map(c => c.open);
+  const volumes = candles.map(c => c.volume);
 
   const regimeInfo = detectMarketRegime(candles);
 
@@ -409,25 +573,116 @@ export function analyzeMarket(candles: Candle[]) {
   const candleRange = Math.max(lastHigh - lastLow, 1e-9);
   const bodyPctOfRange = candleBody / candleRange;
 
+  const longBreakoutDisplacement = getBreakoutDisplacement({
+    side: 'long',
+    price,
+    bandLevel: lastBb.upper,
+    lastAtr
+  });
+
+  const shortBreakoutDisplacement = getBreakoutDisplacement({
+    side: 'short',
+    price,
+    bandLevel: lastBb.lower,
+    lastAtr
+  });
+
+  const longStructureBreak = getStructureBreak({
+    side: 'long',
+    highs,
+    lows,
+    price
+  });
+
+  const shortStructureBreak = getStructureBreak({
+    side: 'short',
+    highs,
+    lows,
+    price
+  });
+
+  const volumeSpike = getVolumeSpike(volumes, regimeIndicators.avgVol20);
+
   const bullishBreakClose =
     prevPrice <= prevBb.upper &&
     price > lastBb.upper &&
     price > lastOpen &&
-    bodyPctOfRange >= 0.55 &&
-    lastAtr >= prevAtr;
+    bodyPctOfRange >= BREAKOUT_MIN_BODY_PCT &&
+    lastAtr >= prevAtr &&
+    longBreakoutDisplacement.distanceAtr >= BREAKOUT_MIN_ATR_DISPLACEMENT &&
+    longStructureBreak.broken &&
+    volumeSpike;
 
   const bearishBreakClose =
     prevPrice >= prevBb.lower &&
     price < lastBb.lower &&
     price < lastOpen &&
-    bodyPctOfRange >= 0.55 &&
-    lastAtr >= prevAtr;
+    bodyPctOfRange >= BREAKOUT_MIN_BODY_PCT &&
+    lastAtr >= prevAtr &&
+    shortBreakoutDisplacement.distanceAtr >= BREAKOUT_MIN_ATR_DISPLACEMENT &&
+    shortStructureBreak.broken &&
+    volumeSpike;
+
+  if (!isTradingHour(last(candles).time)) {
+    return {
+      price,
+      buy: false,
+      sell: false,
+      side: 'none' as 'long' | 'short' | 'none',
+      takeProfitPrice: null,
+      stopLossPrice: null,
+      positionSize: null,
+      quantity: null,
+      regime,
+      indicators: {
+        macdCrossUp,
+        macdCrossDown,
+        lastRsi,
+        prevRsi,
+        lastAtr,
+        prevAtr,
+        rsiBull,
+        rsiBear,
+        bbUpper: lastBb.upper,
+        bbMiddle: lastBb.middle,
+        bbLower: lastBb.lower,
+        bodyPctOfRange,
+        bullishBreakClose,
+        bearishBreakClose,
+        volumeSpike,
+        longBreakoutDisplacement,
+        shortBreakoutDisplacement,
+        longStructureBreak,
+        shortStructureBreak,
+        regimeReady: regimeInfo.ready,
+        regimeIndicators,
+        expectedNetMove: {
+          grossMove: 0,
+          netMove: 0,
+          netMoveRate: 0
+        },
+        riskReward: {
+          risk: 0,
+          reward: 0,
+          ratio: 0
+        },
+        ready: true
+      }
+    };
+  }
 
   if (regime === 'trend_up' && macdCrossUp && rsiBull && price > regimeIndicators.ema200) {
     side = 'long';
     buy = true;
 
-    stopLossPrice = price - lastAtr * atrMultipliers.stop;
+    stopLossPrice = getStructureStop({
+      side,
+      highs,
+      lows,
+      price,
+      lastAtr,
+      atrStopMultiplier: atrMultipliers.stop
+    });
 
     const atrTarget = price + lastAtr * atrMultipliers.target;
     const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
@@ -439,7 +694,14 @@ export function analyzeMarket(candles: Candle[]) {
     side = 'short';
     sell = true;
 
-    stopLossPrice = price + lastAtr * atrMultipliers.stop;
+    stopLossPrice = getStructureStop({
+      side,
+      highs,
+      lows,
+      price,
+      lastAtr,
+      atrStopMultiplier: atrMultipliers.stop
+    });
 
     const atrTarget = price - lastAtr * atrMultipliers.target;
     const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
@@ -456,46 +718,63 @@ export function analyzeMarket(candles: Candle[]) {
       buy = true;
 
       stopLossPrice = price - lastAtr * atrMultipliers.stop;
-
-      const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
-      takeProfitPrice = Math.max(lastBb.middle, structureTarget ?? lastBb.middle);
+      takeProfitPrice = Math.max(lastBb.middle, price + lastAtr * atrMultipliers.target);
     } else if (shortSetup) {
       side = 'short';
       sell = true;
 
       stopLossPrice = price + lastAtr * atrMultipliers.stop;
-
-      const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
-      takeProfitPrice = Math.min(lastBb.middle, structureTarget ?? lastBb.middle);
+      takeProfitPrice = Math.min(lastBb.middle, price - lastAtr * atrMultipliers.target);
     }
   }
 
+  // breakout_watch НЕ выключаем.
+  // Вместо этого даем вход только при более качественном подтверждении:
+  // объем, вынос за Bollinger минимум на 0.5 ATR, пробой локальной структуры и сильное тело свечи.
   if (regime === 'breakout_watch') {
     const breakoutUp =
       bullishBreakClose &&
       lastRsi > 56 &&
-      prevRsi <= 60;
+      prevRsi <= 60 &&
+      price > regimeIndicators.ema20;
 
     const breakoutDown =
       bearishBreakClose &&
       lastRsi < 44 &&
-      prevRsi >= 40;
+      prevRsi >= 40 &&
+      price < regimeIndicators.ema20;
 
     if (breakoutUp) {
       side = 'long';
       buy = true;
 
-      stopLossPrice = price - lastAtr * atrMultipliers.stop;
+      stopLossPrice = getStructureStop({
+        side,
+        highs,
+        lows,
+        price,
+        lastAtr,
+        atrStopMultiplier: atrMultipliers.stop
+      });
 
       const atrTarget = price + lastAtr * atrMultipliers.target;
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
 
+      // Для breakout берем более дальнюю цель,
+      // т.к. смысл режима — ловить импульс после сжатия
       takeProfitPrice = Math.max(atrTarget, structureTarget ?? atrTarget);
     } else if (breakoutDown) {
       side = 'short';
       sell = true;
 
-      stopLossPrice = price + lastAtr * atrMultipliers.stop;
+      stopLossPrice = getStructureStop({
+        side,
+        highs,
+        lows,
+        price,
+        lastAtr,
+        atrStopMultiplier: atrMultipliers.stop
+      });
 
       const atrTarget = price - lastAtr * atrMultipliers.target;
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
@@ -533,11 +812,19 @@ export function analyzeMarket(candles: Candle[]) {
     takeProfitPrice
   });
 
+  const riskReward = getRiskReward({
+    side,
+    price,
+    stopLossPrice,
+    takeProfitPrice
+  });
+
   if (
     side !== 'none' &&
     (
       netMoveCheck.netMove <= 0 ||
-      netMoveCheck.netMoveRate < MIN_EXPECTED_NET_MOVE_RATE
+      netMoveCheck.netMoveRate < MIN_EXPECTED_NET_MOVE_RATE ||
+      riskReward.ratio < MIN_RISK_REWARD_RATIO
     )
   ) {
     side = 'none';
@@ -545,6 +832,8 @@ export function analyzeMarket(candles: Candle[]) {
     sell = false;
     takeProfitPrice = null;
     stopLossPrice = null;
+    positionSize = null;
+    quantity = null;
   }
 
   if (side !== 'none' && stopLossPrice != null) {
@@ -578,9 +867,15 @@ export function analyzeMarket(candles: Candle[]) {
       bodyPctOfRange,
       bullishBreakClose,
       bearishBreakClose,
+      volumeSpike,
+      longBreakoutDisplacement,
+      shortBreakoutDisplacement,
+      longStructureBreak,
+      shortStructureBreak,
       regimeReady: regimeInfo.ready,
       regimeIndicators,
       expectedNetMove: netMoveCheck,
+      riskReward,
       ready: true
     }
   };
