@@ -7,6 +7,7 @@ npm run download:candles -- BBG004730RP0 GAZP 240
 npm run download:candles -- BBG004731032 LKOH 240
 npm run download:candles -- BBG004731354 ROSN 240
 npm run download:candles -- BBG00475KKY8 NVTK 240
+npm run download:candles -- BBG004731489 GMKN 240
 
 npm run download:candles -- BBG000R607Y3 IRKT 730
 npm run download:candles -- BBG004S683W7 AFLT 730
