@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import https from 'node:https';
 import axios from 'axios';
 
 type CandleInterval =
@@ -68,6 +69,10 @@ async function fetchCandles(params: {
   const url =
     'https://invest-public-api.tbank.ru/rest/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles';
 
+  const httpsAgent = new https.Agent({
+    rejectUnauthorized: false
+  });
+
   const response = await axios.post<ApiResponse>(
     url,
     {
@@ -81,7 +86,8 @@ async function fetchCandles(params: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      timeout: 30000
+      timeout: 30000,
+      httpsAgent
     }
   );
 
