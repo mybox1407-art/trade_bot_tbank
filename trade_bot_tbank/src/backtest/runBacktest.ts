@@ -185,30 +185,50 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
 }
 
 /**
- * Печать последних N сделок.
+ * Печать сделок.
+ * Без limit — все сделки.
+ * С limit — только последние N.
  */
-function printLastTrades(result: ReturnType<typeof runStrategyBacktest>, limit = 10) {
-  const trades = result.trades.slice(-limit);
+function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: number) {
+  const all = result.trades;
+  const trades =
+    limit != null && limit > 0 ? all.slice(-limit) : all;
 
-  console.log(`\n========== ПОСЛЕДНИЕ ${trades.length} СДЕЛОК ==========`);
+  const title =
+    limit != null && limit > 0 && limit < all.length
+      ? `ПОСЛЕДНИЕ ${trades.length} ИЗ ${all.length} СДЕЛОК`
+      : `ВСЕ СДЕЛКИ (${trades.length})`;
+
+  console.log(`\n========== ${title} ==========`);
 
   if (!trades.length) {
     console.log('Сделок нет.');
     return;
   }
 
-  for (const trade of trades) {
+  for (let i = 0; i < trades.length; i++) {
+    const trade = trades[i];
+    const num =
+      limit != null && limit > 0 && limit < all.length
+        ? all.length - trades.length + i + 1
+        : i + 1;
+
     console.log(
       [
+        `#${num}`,
         `Открыта: ${formatDate(trade.openedAt)}`,
         `Закрыта: ${formatDate(trade.closedAt)}`,
         `Сторона: ${trade.side}`,
         `Режим: ${trade.regime}`,
         `Вход: ${formatNumber(trade.entryPrice, 4)}`,
         `Выход: ${formatNumber(trade.exitPrice, 4)}`,
+        `SL: ${formatNumber(trade.stopLossPrice, 4)}`,
+        `TP: ${formatNumber(trade.takeProfitPrice, 4)}`,
+        `Qty: ${formatNumber(trade.quantity, 0)}`,
         `Причина: ${trade.closeReason}`,
         `Net PnL: ${formatNumber(trade.netPnl, 2)}`,
-        `Комиссия: ${formatNumber(trade.totalCommission, 2)}`
+        `Комиссия: ${formatNumber(trade.totalCommission, 2)}`,
+        `Bars: ${trade.barsHeld}`
       ].join(' | ')
     );
   }
@@ -282,7 +302,9 @@ function main() {
   console.log(`Файл:                  ${absolutePath}`);
   console.log(`Инструмент:            ${symbolArg}`);
   console.log(`Свечей загружено:      ${candles.length}`);
-  console.log(`Период данных:         ${formatDate(candles[0].time)} -> ${formatDate(candles[candles.length - 1].time)}`);
+  console.log(
+    `Период данных:         ${formatDate(candles[0].time)} -> ${formatDate(candles[candles.length - 1].time)}`
+  );
   console.log(`Cooldown после убытка: ${cooldownCandles} свеч.`);
   console.log(
     `Оценка времени:        ~ ${formatDuration(estimated.minSec)} - ${formatDuration(estimated.maxSec)}`
@@ -292,13 +314,13 @@ function main() {
   /**
    * Простой heartbeat в консоль.
    * Нужен только чтобы пользователь видел, что процесс жив.
-   * Он не знает реального прогресса внутри strategyBacktest,
-   * но показывает, что Node не завис.
    */
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
     const elapsedSec = (Date.now() - startedAt) / 1000;
-    console.log(`[${new Date().toISOString()}] Бэктест выполняется... прошло ${formatDuration(elapsedSec)}`);
+    console.log(
+      `[${new Date().toISOString()}] Бэктест выполняется... прошло ${formatDuration(elapsedSec)}`
+    );
   }, 15000);
 
   let result: ReturnType<typeof runStrategyBacktest>;
@@ -306,7 +328,6 @@ function main() {
   try {
     const progressMarkers = Math.max(1, Math.floor(candles.length / PROGRESS_LOG_EVERY));
 
-    // Информационное сообщение перед тяжелым расчетом
     console.log(`Прогресс:              0/${candles.length} свечей`);
     console.log(`Ожидаемое число логов: ~ ${progressMarkers}`);
 
@@ -316,10 +337,8 @@ function main() {
       warmupCandles: 250,
       onePositionAtTime: true,
       conservativeIntrabarExecution: true,
-
-      // Пауза после убыточной сделки / стопа.
-      // Важно: strategyBacktest.ts должен уметь принимать и обрабатывать этот параметр.
-      cooldownCandles
+      cooldownCandles,
+      progressLogEvery: PROGRESS_LOG_EVERY
     });
   } finally {
     clearInterval(heartbeat);
@@ -331,7 +350,8 @@ function main() {
   console.log(`Фактическое время:     ${formatDuration(totalElapsedSec)}`);
 
   printSummary(result);
-  printLastTrades(result, 10);
+  // Все сделки + SL / TP / Qty / Bars
+  printTrades(result);
 }
 
 main();
