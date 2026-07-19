@@ -10,6 +10,12 @@ import { Candle } from '../services/strategy';
 const DEFAULT_COOLDOWN_CANDLES = 4;
 
 /**
+ * Как часто печатать прогресс в консоль.
+ * Например, раз в 5000 обработанных свечей.
+ */
+const PROGRESS_LOG_EVERY = 5000;
+
+/**
  * Преобразование значения в число.
  */
 function toNumber(value: unknown): number {
@@ -98,6 +104,56 @@ function parseCooldownCandles(value: string | undefined): number {
   }
 
   return parsed;
+}
+
+/**
+ * Форматирование секунд в человекочитаемый вид.
+ */
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return 'неизвестно';
+  }
+
+  if (seconds < 60) {
+    return `${Math.round(seconds)} сек`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+
+  if (minutes < 60) {
+    return `${minutes} мин ${secs} сек`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+
+  return `${hours} ч ${mins} мин`;
+}
+
+/**
+ * Оценка времени выполнения бэктеста по числу свечей.
+ * Это грубая эвристика, чтобы пользователь видел,
+ * что процесс не завис и примерно сколько можно ждать.
+ */
+function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: number } {
+  if (candlesCount <= 5000) {
+    return { minSec: 5, maxSec: 20 };
+  }
+
+  if (candlesCount <= 15000) {
+    return { minSec: 15, maxSec: 60 };
+  }
+
+  if (candlesCount <= 30000) {
+    return { minSec: 30, maxSec: 120 };
+  }
+
+  if (candlesCount <= 60000) {
+    return { minSec: 60, maxSec: 300 };
+  }
+
+  return { minSec: 180, maxSec: 600 };
 }
 
 /**
@@ -220,24 +276,59 @@ function main() {
     );
   }
 
+  const estimated = estimateBacktestTime(candles.length);
+
   console.log('\n========== ПАРАМЕТРЫ ЗАПУСКА ==========');
   console.log(`Файл:                  ${absolutePath}`);
   console.log(`Инструмент:            ${symbolArg}`);
   console.log(`Свечей загружено:      ${candles.length}`);
   console.log(`Период данных:         ${formatDate(candles[0].time)} -> ${formatDate(candles[candles.length - 1].time)}`);
   console.log(`Cooldown после убытка: ${cooldownCandles} свеч.`);
+  console.log(
+    `Оценка времени:        ~ ${formatDuration(estimated.minSec)} - ${formatDuration(estimated.maxSec)}`
+  );
+  console.log(`Лог прогресса:         каждые ${PROGRESS_LOG_EVERY} свечей`);
 
-  const result = runStrategyBacktest(symbolArg, candles, {
-    startingBalance: 50000,
-    commissionRate: 0.003,
-    warmupCandles: 250,
-    onePositionAtTime: true,
-    conservativeIntrabarExecution: true,
+  /**
+   * Простой heartbeat в консоль.
+   * Нужен только чтобы пользователь видел, что процесс жив.
+   * Он не знает реального прогресса внутри strategyBacktest,
+   * но показывает, что Node не завис.
+   */
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    const elapsedSec = (Date.now() - startedAt) / 1000;
+    console.log(`[${new Date().toISOString()}] Бэктест выполняется... прошло ${formatDuration(elapsedSec)}`);
+  }, 15000);
 
-    // Пауза после убыточной сделки / стопа.
-    // Важно: strategyBacktest.ts должен уметь принимать и обрабатывать этот параметр.
-    cooldownCandles
-  });
+  let result: ReturnType<typeof runStrategyBacktest>;
+
+  try {
+    const progressMarkers = Math.max(1, Math.floor(candles.length / PROGRESS_LOG_EVERY));
+
+    // Информационное сообщение перед тяжелым расчетом
+    console.log(`Прогресс:              0/${candles.length} свечей`);
+    console.log(`Ожидаемое число логов: ~ ${progressMarkers}`);
+
+    result = runStrategyBacktest(symbolArg, candles, {
+      startingBalance: 50000,
+      commissionRate: 0.003,
+      warmupCandles: 250,
+      onePositionAtTime: true,
+      conservativeIntrabarExecution: true,
+
+      // Пауза после убыточной сделки / стопа.
+      // Важно: strategyBacktest.ts должен уметь принимать и обрабатывать этот параметр.
+      cooldownCandles
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  const totalElapsedSec = (Date.now() - startedAt) / 1000;
+
+  console.log('\n========== ВРЕМЯ ВЫПОЛНЕНИЯ ==========');
+  console.log(`Фактическое время:     ${formatDuration(totalElapsedSec)}`);
 
   printSummary(result);
   printLastTrades(result, 10);
