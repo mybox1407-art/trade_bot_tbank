@@ -31,6 +31,9 @@
       --color-error: #a53c52;
       --color-border: rgba(36,33,29,0.12);
       --color-divider: rgba(36,33,29,0.08);
+      --color-current-price-bg: rgba(255, 232, 138, 0.35);
+      --color-take-bg: rgba(110, 201, 136, 0.22);
+      --color-stop-bg: rgba(229, 115, 115, 0.20);
       --shadow-sm: 0 1px 2px rgba(26,22,17,.05), 0 8px 24px rgba(26,22,17,.04);
       --shadow-md: 0 2px 6px rgba(26,22,17,.06), 0 18px 44px rgba(26,22,17,.08);
       --radius-xl: 1.4rem;
@@ -49,6 +52,9 @@
       --color-error: #de7187;
       --color-border: rgba(229,225,218,0.12);
       --color-divider: rgba(229,225,218,0.08);
+      --color-current-price-bg: rgba(214, 178, 38, 0.22);
+      --color-take-bg: rgba(72, 160, 97, 0.22);
+      --color-stop-bg: rgba(180, 77, 95, 0.22);
       --shadow-sm: 0 1px 2px rgba(0,0,0,.25), 0 8px 24px rgba(0,0,0,.18);
       --shadow-md: 0 2px 6px rgba(0,0,0,.32), 0 18px 44px rgba(0,0,0,.28);
     }
@@ -87,9 +93,8 @@
     .table-wrap.fixed-table table{table-layout:fixed}
     th,td{text-align:left;padding:14px 12px;border-top:1px solid var(--color-divider);white-space:normal;word-break:break-word;overflow-wrap:anywhere;vertical-align:top;font-size:var(--text-sm)}
     thead th{color:var(--color-text-muted);font-weight:600;font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.06em;background:color-mix(in srgb,var(--color-surface) 72%, var(--color-surface-2));position:sticky;top:0}
-    tbody tr{cursor:pointer;transition:.16s ease}
+    tbody tr{transition:.16s ease}
     tbody tr:hover{background:color-mix(in srgb,var(--color-primary-highlight) 34%, var(--color-surface))}
-    tbody tr.active{outline:1px solid color-mix(in srgb,var(--color-primary) 24%, transparent)}
     .row-signal-true{background:color-mix(in srgb,var(--color-success) 12%, var(--color-surface))}
     .row-signal-false{background:color-mix(in srgb,var(--color-error) 12%, var(--color-surface))}
     .row-trade-loss{background:color-mix(in srgb,var(--color-error) 14%, var(--color-surface))}
@@ -103,6 +108,9 @@
     .pager{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto}
     .pager-info{font-size:var(--text-sm);color:var(--color-text-muted);min-width:150px;text-align:center}
     .mobile-note{display:none;color:var(--color-text-muted);font-size:var(--text-sm);margin-top:var(--space-3)}
+    .col-current-price{background:var(--color-current-price-bg)}
+    .col-take{background:var(--color-take-bg)}
+    .col-stop{background:var(--color-stop-bg)}
     @media (max-width: 1100px){.overview{grid-template-columns:1fr}}
     @media (max-width: 720px){
       .app{padding:var(--space-4)}
@@ -135,28 +143,32 @@
     </header>
 
     <main class="overview">
-      <section class="card" aria-labelledby="bots-table-title">
+      <section class="card" aria-labelledby="open-positions-title">
         <div class="card-header">
-          <h2 id="bots-table-title" class="card-title">Торговые боты</h2>
+          <h2 id="open-positions-title" class="card-title">Открытые позиции</h2>
         </div>
 
         <div class="card-actions">
-          <button class="primary-btn equal-btn" id="refreshBotsPositionsBtn">Обновить</button>
+          <button class="primary-btn equal-btn" id="refreshOpenPositionsBtn">Обновить</button>
         </div>
 
         <div class="table-wrap fixed-table">
           <table>
             <thead>
               <tr>
-                <th>Название</th>
-                <th>Дата запуска</th>
+                <th>Открыта</th>
+                <th>Пара</th>
+                <th>Сторона</th>
+                <th>Количество</th>
                 <th>Позиция</th>
-                <th>Биржа</th>
-                <th>Статус</th>
+                <th>Цена входа</th>
+                <th class="col-current-price">Текущая цена</th>
+                <th class="col-take">Тайк</th>
+                <th class="col-stop">Стоп</th>
               </tr>
             </thead>
-            <tbody id="botsTableBody">
-              <tr><td colspan="5">Загрузка...</td></tr>
+            <tbody id="openPositionsBody">
+              <tr><td colspan="9">Загрузка...</td></tr>
             </tbody>
           </table>
           <p class="mobile-note">На мобильном можно скроллить таблицу по горизонтали.</p>
@@ -250,7 +262,7 @@
               </tr>
             </thead>
             <tbody id="tradeLogBody">
-              <tr><td colspan="15">Загрузка...</td></tr>
+              <tr><td colspan="12">Загрузка...</td></tr>
             </tbody>
           </table>
         </div>
@@ -262,14 +274,14 @@
     (function () {
       const root = document.documentElement;
       const themeBtn = document.querySelector('[data-theme-toggle]');
+      const refreshOpenPositionsBtn = document.getElementById('refreshOpenPositionsBtn');
       const refreshSignalsBtn = document.getElementById('refreshSignalsBtn');
-      const refreshBotsPositionsBtn = document.getElementById('refreshBotsPositionsBtn');
       const pairFilter = document.getElementById('pairFilter');
       const periodFilter = document.getElementById('periodFilter');
       const prevPageBtn = document.getElementById('prevPageBtn');
       const nextPageBtn = document.getElementById('nextPageBtn');
       const pagerInfo = document.getElementById('pagerInfo');
-      const botsTableBody = document.getElementById('botsTableBody');
+      const openPositionsBody = document.getElementById('openPositionsBody');
       const workLogBody = document.getElementById('workLogBody');
       const tradeLogBody = document.getElementById('tradeLogBody');
       const refreshTradesBtn = document.getElementById('refreshTradesBtn');
@@ -277,11 +289,9 @@
       const tradePeriodFilter = document.getElementById('tradePeriodFilter');
 
       let theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      let botsState = [];
+      let openPositionsState = [];
       let signalsState = [];
       let positionsState = [];
-      let currentBotId = null;
-      let botPositionMap = {};
       let currentPage = 1;
       const pageSize = 5;
       let pairFilterValue = 'all';
@@ -291,18 +301,69 @@
 
       root.setAttribute('data-theme', theme);
 
-      function applyThemeLabel() { themeBtn.textContent = theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'; }
-      function normalizeResponse(json) { if (Array.isArray(json)) return json; if (json && typeof json === 'object' && Array.isArray(json.data)) return json.data; if (json && typeof json === 'object') return [json]; return []; }
-      function formatDate(value) { if (!value) return '-'; const d = new Date(value); if (Number.isNaN(d.getTime())) return value; return d.toLocaleString('ru-RU'); }
-      function formatNumber(value, digits = 8) { if (value === null || value === undefined || value === '') return '-'; const n = Number(value); if (Number.isNaN(n)) return String(value); return n.toFixed(digits).replace(/\.?0+$/, ''); }
+      function applyThemeLabel() {
+        themeBtn.textContent = theme === 'dark' ? 'Светлая тема' : 'Тёмная тема';
+      }
+
+      function normalizeResponse(json) {
+        if (Array.isArray(json)) return json;
+        if (json && typeof json === 'object' && Array.isArray(json.data)) return json.data;
+        if (json && typeof json === 'object') return [json];
+        return [];
+      }
+
+      function formatDate(value) {
+        if (!value) return '-';
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return value;
+        return d.toLocaleString('ru-RU');
+      }
+
+      function formatNumber(value, digits = 8) {
+        if (value === null || value === undefined || value === '') return '-';
+        const n = Number(value);
+        if (Number.isNaN(n)) return String(value);
+        return n.toFixed(digits).replace(/\.?0+$/, '');
+      }
+
       function boolLabel(value) { return value ? 'Да' : 'Нет'; }
-      function statusClass(status) { const s = String(status || '').toLowerCase(); if (s === 'run' || s === 'running' || s === 'active') return 'running'; if (s === 'pause' || s === 'paused') return 'paused'; return 'stopped'; }
-      function statusLabel(status) { const s = String(status || '').toLowerCase(); if (s === 'run' || s === 'running' || s === 'active') return 'Running'; if (s === 'pause' || s === 'paused') return 'Paused'; return 'Stopped'; }
-      function daysFromPeriod(period) { if (period === 'day') return 1; if (period === 'week') return 7; if (period === '2weeks') return 14; if (period === 'month') return 30; return null; }
-      function sideLabel(side) { const s = String(side || '').toLowerCase(); if (s === 'none') return '-'; if (s === 'long') return 'long'; if (s === 'short') return 'short'; return side ?? '-'; }
-      function regimeLabel(regime) { const s = String(regime || '').toLowerCase(); const map = { range: 'боковик', trend_up: 'тренд вверх', trend_down: 'тренд вниз', breakout_watch: 'ожидание пробоя', high_volatility: 'высокая волатильность', unknown: 'неизвестно' }; return map[s] ?? regime ?? '-'; }
-      function getPairValue(item) { return String(item.symbol || item.couple || '').trim().toLowerCase(); }
-      function getAvailablePairsFrom(items) { return [...new Set(items.map(getPairValue).filter(Boolean))].sort(); }
+
+      function daysFromPeriod(period) {
+        if (period === 'day') return 1;
+        if (period === 'week') return 7;
+        if (period === '2weeks') return 14;
+        if (period === 'month') return 30;
+        return null;
+      }
+
+      function sideLabel(side) {
+        const s = String(side || '').toLowerCase();
+        if (s === 'none') return '-';
+        if (s === 'long') return 'long';
+        if (s === 'short') return 'short';
+        return side ?? '-';
+      }
+
+      function regimeLabel(regime) {
+        const s = String(regime || '').toLowerCase();
+        const map = {
+          range: 'боковик',
+          trend_up: 'тренд вверх',
+          trend_down: 'тренд вниз',
+          breakout_watch: 'ожидание пробоя',
+          high_volatility: 'высокая волатильность',
+          unknown: 'неизвестно'
+        };
+        return map[s] ?? regime ?? '-';
+      }
+
+      function getPairValue(item) {
+        return String(item.symbol || item.couple || '').trim().toLowerCase();
+      }
+
+      function getAvailablePairsFrom(items) {
+        return [...new Set(items.map(getPairValue).filter(Boolean))].sort();
+      }
 
       function syncPairFilterOptions() {
         const pairs = getAvailablePairsFrom(signalsState);
@@ -348,7 +409,9 @@
         });
       }
 
-      function getPageCount(data) { return Math.max(1, Math.ceil(data.length / pageSize)); }
+      function getPageCount(data) {
+        return Math.max(1, Math.ceil(data.length / pageSize));
+      }
 
       function tradeRowClass(p) {
         const pnl = Number(p.realized_pnl);
@@ -358,90 +421,25 @@
         return '';
       }
 
-      async function checkBotPositionByWebhook(url) {
-        try {
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Accept': 'application/json' }
-          });
-
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-          const json = await res.json();
-          const items = normalizeResponse(json);
-          const item = items[0] || {};
-          const action = String(item.action || '').toLowerCase();
-
-          return action === 'hold';
-        } catch (error) {
-          console.error('checkBotPositionByWebhook error:', error);
-          return false;
-        }
-      }
-
-      function getPositionWebhookByBotId(botId) {
-        const id = Number(botId);
-        if (id === 1) return 'https://n8n.kino-test.ru/webhook/check_position';
-        if (id === 2) return 'https://n8n.kino-test.ru/webhook/check_position_moex';
-        return null;
-      }
-
-      async function refreshBotsPositions() {
-        botsState.forEach((bot) => {
-          botPositionMap[bot.id_bot] = null;
-        });
-        renderBotsTable();
-
-        try {
-          const results = await Promise.all(
-            botsState.map(async (bot) => {
-              const webhookUrl = getPositionWebhookByBotId(bot.id_bot);
-
-              if (!webhookUrl) {
-                return { botId: bot.id_bot, hasPosition: false };
-              }
-
-              const hasPosition = await checkBotPositionByWebhook(webhookUrl);
-              return { botId: bot.id_bot, hasPosition };
-            })
-          );
-
-          results.forEach(({ botId, hasPosition }) => {
-            botPositionMap[botId] = hasPosition;
-          });
-
-          renderBotsTable();
-        } catch (error) {
-          console.error('refreshBotsPositions error:', error);
-          renderBotsTable();
-        }
-      }
-
-      function getBotPositionLabel(botId) {
-        const value = botPositionMap[botId];
-        if (value === null || value === undefined) return 'Проверка...';
-        return value ? 'Да' : 'Нет';
-      }
-
-      function renderBotsTable() {
-        if (!botsState.length) {
-          botsTableBody.innerHTML = `<tr><td colspan="5">Боты не найдены</td></tr>`;
+      function renderOpenPositionsTable() {
+        if (!openPositionsState.length) {
+          openPositionsBody.innerHTML = `<tr><td colspan="9">Открытые позиции не найдены</td></tr>`;
           return;
         }
 
-        botsTableBody.innerHTML = botsState.map((bot) => {
-          const active = String(bot.id_bot) === String(currentBotId);
-
-          return `
-            <tr data-bot-id="${bot.id_bot}" class="${active ? 'active' : ''}">
-              <td><strong>${bot.name_bot ?? '-'}</strong></td>
-              <td>${formatDate(bot.date_start)}</td>
-              <td>${getBotPositionLabel(bot.id_bot)}</td>
-              <td>${bot.market ?? '-'}</td>
-              <td><span class="status ${statusClass(bot.status)}">${statusLabel(bot.status)}</span></td>
-            </tr>
-          `;
-        }).join('');
+        openPositionsBody.innerHTML = openPositionsState.map((p) => `
+          <tr>
+            <td>${formatDate(p.opened_at)}</td>
+            <td>${p.symbol ?? '-'}</td>
+            <td>${sideLabel(p.side)}</td>
+            <td>${p.quantity != null ? formatNumber(p.quantity, 3) : '-'}</td>
+            <td>${p.position_size != null ? formatNumber(p.position_size, 3) : '-'}</td>
+            <td>${p.entry_price != null ? formatNumber(p.entry_price, 3) : '-'}</td>
+            <td class="col-current-price"></td>
+            <td class="col-take">${p.take_profit_price != null ? formatNumber(p.take_profit_price, 3) : '-'}</td>
+            <td class="col-stop">${p.stop_loss_price != null ? formatNumber(p.stop_loss_price, 3) : '-'}</td>
+          </tr>
+        `).join('');
       }
 
       function renderSignalsTable() {
@@ -488,7 +486,7 @@
         const filtered = getFilteredTrades();
 
         if (!filtered.length) {
-          tradeLogBody.innerHTML = `<tr><td colspan="15">Сделки не найдены</td></tr>`;
+          tradeLogBody.innerHTML = `<tr><td colspan="12">Сделки не найдены</td></tr>`;
           return;
         }
 
@@ -514,57 +512,27 @@
         }).join('');
       }
 
-      function renderBotDetails(bot) {
-        if (!bot) {
-          tradeLogBody.innerHTML = `<tr><td colspan="15">Нет данных.</td></tr>`;
-          return;
-        }
-        renderTradesTable();
-      }
-
-      function selectBot(botId) {
-        currentBotId = botId;
-        currentPage = 1;
-        renderBotsTable();
-        renderBotDetails(botsState.find((b) => String(b.id_bot) === String(botId)));
-        loadSignals(botId);
-        loadPositions(botId);
-      }
-
-      async function loadBots() {
-        botsTableBody.innerHTML = `<tr><td colspan="5">Загрузка...</td></tr>`;
+      async function loadOpenPositions() {
+        openPositionsBody.innerHTML = `<tr><td colspan="9">Загрузка...</td></tr>`;
 
         try {
-          const res = await fetch('https://n8n.kino-test.ru/webhook/get_bots', {
+          const res = await fetch('https://n8n.kino-test.ru/webhook/open_positions_moex', {
             method: 'POST',
-            headers: { 'Accept': 'application/json' }
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }
           });
 
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
           const json = await res.json();
-          botsState = normalizeResponse(json);
-
-          if (!botsState.length) {
-            botsTableBody.innerHTML = `<tr><td colspan="5">Боты не найдены</td></tr>`;
-            return;
-          }
-
-          renderBotsTable();
-          await refreshBotsPositions();
-          selectBot(botsState[0].id_bot);
+          openPositionsState = normalizeResponse(json);
+          renderOpenPositionsTable();
         } catch (error) {
-          console.error('loadBots error:', error);
-          botsTableBody.innerHTML = `<tr><td colspan="5">Ошибка загрузки ботов</td></tr>`;
+          console.error('loadOpenPositions error:', error);
+          openPositionsBody.innerHTML = `<tr><td colspan="9">Ошибка загрузки открытых позиций</td></tr>`;
         }
       }
 
-      async function loadSignals(botId = currentBotId) {
-        if (!botId) {
-          workLogBody.innerHTML = `<tr><td colspan="12">Бот не выбран</td></tr>`;
-          return;
-        }
-
+      async function loadSignals() {
         workLogBody.innerHTML = `<tr><td colspan="12">Загрузка...</td></tr>`;
 
         try {
@@ -587,13 +555,8 @@
         }
       }
 
-      async function loadPositions(botId = currentBotId) {
-        if (!botId) {
-          tradeLogBody.innerHTML = `<tr><td colspan="15">Бот не выбран</td></tr>`;
-          return;
-        }
-
-        tradeLogBody.innerHTML = `<tr><td colspan="15">Загрузка...</td></tr>`;
+      async function loadPositions() {
+        tradeLogBody.innerHTML = `<tr><td colspan="12">Загрузка...</td></tr>`;
 
         try {
           const res = await fetch('https://n8n.kino-test.ru/webhook/get_positions_moex', {
@@ -610,7 +573,7 @@
           renderTradesTable();
         } catch (error) {
           console.error('loadPositions error:', error);
-          tradeLogBody.innerHTML = `<tr><td colspan="15">Ошибка загрузки торговли</td></tr>`;
+          tradeLogBody.innerHTML = `<tr><td colspan="12">Ошибка загрузки торговли</td></tr>`;
         }
       }
 
@@ -622,9 +585,9 @@
         applyThemeLabel();
       });
 
-      refreshBotsPositionsBtn.addEventListener('click', () => refreshBotsPositions());
-      refreshSignalsBtn.addEventListener('click', () => loadSignals(currentBotId));
-      refreshTradesBtn.addEventListener('click', () => loadPositions(currentBotId));
+      refreshOpenPositionsBtn.addEventListener('click', loadOpenPositions);
+      refreshSignalsBtn.addEventListener('click', loadSignals);
+      refreshTradesBtn.addEventListener('click', loadPositions);
 
       pairFilter.addEventListener('change', () => {
         pairFilterValue = pairFilter.value;
@@ -663,13 +626,9 @@
         }
       });
 
-      botsTableBody.addEventListener('click', (event) => {
-        const row = event.target.closest('tr[data-bot-id]');
-        if (!row) return;
-        selectBot(row.dataset.botId);
-      });
-
-      loadBots();
+      loadOpenPositions();
+      loadSignals();
+      loadPositions();
     })();
   </script>
 </body>
