@@ -6,12 +6,13 @@ npm run download:candles -- BBG004730N88 SBER 240
 npm run download:candles -- BBG004730RP0 GAZP 240
 npm run download:candles -- BBG004731032 LKOH 240
 npm run download:candles -- BBG004731354 ROSN 240
+npm run download:candles -- BBG00475KKY8 NVTK 240
+
 npm run download:candles -- BBG000R607Y3 IRKT 730
 npm run download:candles -- BBG004S683W7 AFLT 730
 npm run download:candles -- BBG00A0ZZBC2 SOFL 730
 npm run download:candles -- BBG004S681W1 MTSS 730
 npm run download:candles -- BBG00B3M9V52 T 730
-npm run download:candles -- BBG00475KKY8 NVTK 730
 npm run download:candles -- BBG00B5XQZ97 SMLT 730
 npm run download:candles -- BBG00QZD8W85 OZON 730
 npm run download:candles -- BBG00QSZXH95 VKCO 730
