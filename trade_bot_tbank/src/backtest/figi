@@ -2,7 +2,7 @@ export TINVEST_TOKEN=t.JEad0aPyZeL3vpVxMbMYWlHkkZKnt5TPIEqGgbv9z4Avxo_j45AYmw-xD
 
 Получение истории
 
-npm run download:candles -- BBG004730N88 SBER 730
+npm run download:candles -- BBG004730N88 SBER 120
 npm run download:candles -- BBG004730RP0 GAZP 730
 npm run download:candles -- BBG004731354 ROSN 730
 npm run download:candles -- BBG000R607Y3 IRKT 730
