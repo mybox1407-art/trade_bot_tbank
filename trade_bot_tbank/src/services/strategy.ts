@@ -4,28 +4,26 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-/** 2% риска на сделку — при DD ~0.5% на 1% есть запас для масштаба */
-export const MAX_RISK_PER_TRADE = 0.02;
+/** 1% — лучший PF/DD на этом отрезке; 2% только раздул убытки */
+export const MAX_RISK_PER_TRADE = 0.01;
 
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 
 /**
- * Модель выхода (бэктест — partial close):
- * - TP1: доля позиции @ TP1_R
- * - остаток: стоп → entry ± PARTIAL_LOCK_R * R, далее трейл в бэктесте, цель TP2_R
+ * Рабочая модель выхода (PF ~1.85 на SBER 15m):
+ * TP1 50% @ 1.2R → lock 0.2R на остатке → TP2 @ 2.5R
+ * Без агрессивного трейла runner (он резал победы).
  */
-export const TP1_FRACTION = 0.4;
-export const TP1_R = 1.3;
-export const TP2_R = 3.0;
-/** Минимальный lock после TP1 (дальше может трейлить бэктест) */
-export const PARTIAL_LOCK_R = 0.5;
+export const TP1_FRACTION = 0.5;
+export const TP1_R = 1.2;
+export const TP2_R = 2.5;
+export const PARTIAL_LOCK_R = 0.2;
 
-/** Мин./макс. ширина стопа от цены */
 const MIN_STOP_DISTANCE_RATE = 0.005;
 const MAX_STOP_DISTANCE_RATE = 0.012;
 
-const MAX_POSITION_FRAC = 0.35;
+const MAX_POSITION_FRAC = 0.3;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 
 const MIN_ADX_TREND = 20;
@@ -37,7 +35,6 @@ const MAX_EXTENSION_FROM_EMA20 = 0.01;
 const TRADING_HOUR_UTC_FROM = 7;
 const TRADING_HOUR_UTC_TO = 15;
 
-/** Минимум 2 лота — partial должен оставлять остаток */
 const MIN_QUANTITY = 2;
 
 export interface Candle {
@@ -63,11 +60,8 @@ export interface StrategySignal {
   sell: boolean;
   side: 'long' | 'short' | 'none';
   stopLossPrice: number | null;
-  /** Частичный тейк */
   takeProfit1Price: number | null;
-  /** Тейк на остаток */
   takeProfit2Price: number | null;
-  /** Совместимость со старым кодом = TP2 */
   takeProfitPrice: number | null;
   tp1Fraction: number;
   positionSize: number | null;
@@ -95,9 +89,6 @@ function isTradingHour(timestamp: number): boolean {
   return hourUtc >= TRADING_HOUR_UTC_FROM && hourUtc < TRADING_HOUR_UTC_TO;
 }
 
-/**
- * Стоп по структуре (свинг ± pad), с жёстким капом по % цены.
- */
 function getStructureStop(params: {
   side: 'long' | 'short';
   highs: number[];
@@ -148,12 +139,7 @@ function calcPositionSize(params: {
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
-  // Кратность 5 удобна для TP1 40% (округление вниз)
-  if (quantity >= 5) {
-    quantity = Math.floor(quantity / 5) * 5;
-  } else if (quantity >= 3 && quantity % 2 === 1) {
-    quantity -= 1;
-  }
+  if (quantity >= 3 && quantity % 2 === 1) quantity -= 1;
 
   const maxQty = Math.floor((balance * MAX_POSITION_FRAC) / price);
   quantity = Math.min(quantity, maxQty);
@@ -254,8 +240,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 }
 
 /**
- * Сигнал стратегии.
- * @param balance — текущий баланс (сайзинг в бэктесте/лайве)
+ * @param balance — текущий баланс для сайзинга
  */
 export function analyzeMarket(
   candles: Candle[],
@@ -330,7 +315,6 @@ export function analyzeMarket(
   const bullCandle = price > lastOpen && bodyPct >= 0.4;
   const bearCandle = price < lastOpen && bodyPct >= 0.4;
 
-  // Pullback: касание EMA, закрытие по тренду (без momentum-chase)
   const touchLong =
     lastLow <= ema20 * 1.006 ||
     lastLow <= ema50 * 1.01 ||
@@ -381,7 +365,6 @@ export function analyzeMarket(
 
   const longSignal =
     regime === 'trend_up' && price > ind.ema200 && (pullbackLong || crossLong);
-
   const shortSignal =
     regime === 'trend_down' && price < ind.ema200 && (pullbackShort || crossShort);
 
@@ -471,9 +454,7 @@ export function analyzeMarket(
       pullbackLong,
       pullbackShort,
       crossLong,
-      crossShort,
-      macdBull,
-      macdBear
+      crossShort
     }
   };
 }
