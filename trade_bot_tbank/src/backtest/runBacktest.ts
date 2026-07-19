@@ -9,7 +9,12 @@ import {
   TP1_R
 } from '../services/strategy';
 
-const DEFAULT_COOLDOWN_CANDLES = 12;
+/** Частота v1: короче пауза после сделки (было 12) */
+const DEFAULT_COOLDOWN_CANDLES = 4;
+
+/** Частота v1: быстрее освобождаем слот (было 120) */
+const DEFAULT_TIME_STOP_BARS = 64;
+
 const DEFAULT_RUNNER_TRAIL_ATR_MULT = RUNNER_TRAIL_ATR_MULT;
 const PROGRESS_LOG_EVERY = 5000;
 
@@ -103,6 +108,21 @@ function parseRunnerTrailAtrMult(value: string | undefined): number {
       `Некорректный runnerTrailAtrMult="${value}", default ${DEFAULT_RUNNER_TRAIL_ATR_MULT}.`
     );
     return DEFAULT_RUNNER_TRAIL_ATR_MULT;
+  }
+
+  return parsed;
+}
+
+function parseTimeStopBars(value: string | undefined): number {
+  if (value == null) return DEFAULT_TIME_STOP_BARS;
+
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.warn(
+      `Некорректный timeStopBars="${value}", default ${DEFAULT_TIME_STOP_BARS}.`
+    );
+    return DEFAULT_TIME_STOP_BARS;
   }
 
   return parsed;
@@ -258,13 +278,19 @@ function printTrades(
 function printUsage() {
   console.log(`
 Использование:
-  npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [runnerTrailAtrMult]
+  npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [runnerTrailAtrMult] [timeStopBars]
+
+Параметры по умолчанию (частота v1):
+  cooldownCandles     = ${DEFAULT_COOLDOWN_CANDLES}
+  runnerTrailAtrMult  = ${DEFAULT_RUNNER_TRAIL_ATR_MULT}
+  timeStopBars        = ${DEFAULT_TIME_STOP_BARS}
 
 Примеры:
   npm run backtest -- ./src/backtest/data/SBER_15m.json SBER
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 2.5
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 3.0
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4 2.5
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4 2.5 64
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 6 2.5 48
 `);
 }
 
@@ -275,7 +301,8 @@ function main() {
     inputPathArg,
     symbolArg,
     cooldownCandlesArg,
-    runnerTrailAtrMultArg
+    runnerTrailAtrMultArg,
+    timeStopBarsArg
   ] = process.argv;
 
   if (!inputPathArg || !symbolArg) {
@@ -285,6 +312,7 @@ function main() {
 
   const cooldownCandles = parseCooldownCandles(cooldownCandlesArg);
   const runnerTrailAtrMult = parseRunnerTrailAtrMult(runnerTrailAtrMultArg);
+  const timeStopBars = parseTimeStopBars(timeStopBarsArg);
 
   const absolutePath = path.resolve(process.cwd(), inputPathArg);
 
@@ -340,8 +368,13 @@ function main() {
   console.log(
     `Модель выхода:         TP1 ${formatNumber(TP1_FRACTION * 100, 0)}%@${formatNumber(TP1_R, 1)}R → lock ${formatNumber(PARTIAL_LOCK_R, 1)}R → ATR trail x${formatNumber(runnerTrailAtrMult, 2)}`
   );
+  console.log(
+    `Модель входа:          частота v1 (pullback, ADX≥18, soft RSI/body/touch)`
+  );
   console.log(`Лимит входов в день:   выкл.`);
-  console.log(`Time-stop / abort:     120 бар / выкл.`);
+  console.log(
+    `Time-stop / abort:     ${timeStopBars} бар / выкл.`
+  );
   console.log(`Кап стопа:             ≤ 1.2% цены`);
   console.log(`Runner ATR mult:       ${formatNumber(runnerTrailAtrMult, 2)}`);
 
@@ -369,7 +402,7 @@ function main() {
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
       maxTradesPerDay: 0,
-      timeStopBars: 64,
+      timeStopBars,
       earlyAbortBars: 0,
       earlyAbortMinR: 0.25,
       runnerTrailAtrMult
