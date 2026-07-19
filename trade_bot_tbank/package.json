@@ -7,8 +7,8 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "backtest": "tsx src/backtest/runBacktest.ts",
-    "download:candles": "tsx src/backtest/downloadCandles.ts",
+    "backtest": "node node_modules/tsx/dist/cli.mjs src/backtest/runBacktest.ts",
+    "download:candles": "node node_modules/tsx/dist/cli.mjs src/backtest/downloadCandles.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
