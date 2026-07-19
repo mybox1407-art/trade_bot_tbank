@@ -3,33 +3,18 @@ import path from 'node:path';
 import { runStrategyBacktest } from './strategyBacktest';
 import { Candle } from '../services/strategy';
 
-/**
- * Пауза после любой закрытой сделки (свечи).
- * Можно переопределить 4-м аргументом CLI.
- */
-const DEFAULT_COOLDOWN_CANDLES = 6;
-
-/** Как часто печатать прогресс (0 = выкл.). */
+const DEFAULT_COOLDOWN_CANDLES = 12;
 const PROGRESS_LOG_EVERY = 5000;
 
-/** ANSI-цвета для терминала */
 const ANSI = {
   reset: '\x1b[0m',
-  bold: '\x1b[1m',
   green: '\x1b[32m',
   red: '\x1b[31m',
-  yellow: '\x1b[33m',
-  cyan: '\x1b[36m',
-  dim: '\x1b[2m'
+  yellow: '\x1b[33m'
 } as const;
 
-/**
- * Окраска строки. Если stdout не TTY — без escape-кодов.
- */
 function colorize(text: string, color: keyof typeof ANSI): string {
-  if (!process.stdout.isTTY) {
-    return text;
-  }
+  if (!process.stdout.isTTY) return text;
   return `${ANSI[color]}${text}${ANSI.reset}`;
 }
 
@@ -40,9 +25,7 @@ function toNumber(value: unknown): number {
 
 function isValidCandle(candidate: unknown): candidate is Candle {
   if (!candidate || typeof candidate !== 'object') return false;
-
   const item = candidate as Record<string, unknown>;
-
   return (
     Number.isFinite(toNumber(item.time)) &&
     Number.isFinite(toNumber(item.open)) &&
@@ -54,15 +37,11 @@ function isValidCandle(candidate: unknown): candidate is Candle {
 }
 
 function normalizeCandles(raw: unknown): Candle[] {
-  if (!Array.isArray(raw)) {
-    throw new Error('JSON должен содержать массив свечей.');
-  }
-
+  if (!Array.isArray(raw)) throw new Error('JSON должен содержать массив свечей.');
   const candles: Candle[] = raw.map((item, index) => {
     if (!isValidCandle(item)) {
       throw new Error(`Некорректная свеча в массиве, индекс ${index}.`);
     }
-
     return {
       time: toNumber(item.time),
       open: toNumber(item.open),
@@ -72,7 +51,6 @@ function normalizeCandles(raw: unknown): Candle[] {
       volume: toNumber(item.volume)
     };
   });
-
   return candles.sort((a, b) => a.time - b.time);
 }
 
@@ -88,48 +66,28 @@ function formatDate(ts: number): string {
 }
 
 function parseCooldownCandles(value: string | undefined): number {
-  if (value == null) {
-    return DEFAULT_COOLDOWN_CANDLES;
-  }
-
+  if (value == null) return DEFAULT_COOLDOWN_CANDLES;
   const parsed = Number(value);
-
   if (!Number.isInteger(parsed) || parsed < 0) {
     console.warn(
-      `Некорректный cooldownCandles="${value}", будет использовано значение по умолчанию ${DEFAULT_COOLDOWN_CANDLES}.`
+      `Некорректный cooldownCandles="${value}", default ${DEFAULT_COOLDOWN_CANDLES}.`
     );
     return DEFAULT_COOLDOWN_CANDLES;
   }
-
   return parsed;
 }
 
 function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) {
-    return 'неизвестно';
-  }
-
-  if (seconds < 60) {
-    return `${Math.round(seconds)} сек`;
-  }
-
+  if (!Number.isFinite(seconds) || seconds < 0) return 'неизвестно';
+  if (seconds < 60) return `${Math.round(seconds)} сек`;
   const minutes = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
-
-  if (minutes < 60) {
-    return `${minutes} мин ${secs} сек`;
-  }
-
+  if (minutes < 60) return `${minutes} мин ${secs} сек`;
   const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-
-  return `${hours} ч ${mins} мин`;
+  return `${hours} ч ${minutes % 60} мин`;
 }
 
-function estimateBacktestTime(candlesCount: number): {
-  minSec: number;
-  maxSec: number;
-} {
+function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: number } {
   if (candlesCount <= 5000) return { minSec: 5, maxSec: 20 };
   if (candlesCount <= 15000) return { minSec: 15, maxSec: 60 };
   if (candlesCount <= 30000) return { minSec: 30, maxSec: 120 };
@@ -137,12 +95,8 @@ function estimateBacktestTime(candlesCount: number): {
   return { minSec: 180, maxSec: 600 };
 }
 
-/**
- * Итоги: плюс — зелёный, минус — красный.
- */
 function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   const s = result.summary;
-
   const netColor = s.netProfit > 0 ? 'green' : s.netProfit < 0 ? 'red' : 'yellow';
   const retColor = s.returnPct > 0 ? 'green' : s.returnPct < 0 ? 'red' : 'yellow';
   const pfColor =
@@ -154,22 +108,12 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   console.log(`Побед:                 ${colorize(String(s.wins), 'green')}`);
   console.log(`Поражений:             ${colorize(String(s.losses), 'red')}`);
   console.log(`Win rate:              ${formatNumber(s.winRate * 100, 2)}%`);
-  console.log(
-    `Gross profit:          ${colorize(formatNumber(s.grossProfit, 2), 'green')}`
-  );
-  console.log(
-    `Gross loss:            ${colorize(formatNumber(s.grossLoss, 2), 'red')}`
-  );
-  console.log(
-    `Net profit:            ${colorize(formatNumber(s.netProfit, 2), netColor)}`
-  );
+  console.log(`Gross profit:          ${colorize(formatNumber(s.grossProfit, 2), 'green')}`);
+  console.log(`Gross loss:            ${colorize(formatNumber(s.grossLoss, 2), 'red')}`);
+  console.log(`Net profit:            ${colorize(formatNumber(s.netProfit, 2), netColor)}`);
   console.log(`Avg net pnl:           ${formatNumber(s.avgNetPnl, 2)}`);
-  console.log(
-    `Avg win:               ${colorize(formatNumber(s.avgWin, 2), 'green')}`
-  );
-  console.log(
-    `Avg loss:              ${colorize(formatNumber(s.avgLoss, 2), 'red')}`
-  );
+  console.log(`Avg win:               ${colorize(formatNumber(s.avgWin, 2), 'green')}`);
+  console.log(`Avg loss:              ${colorize(formatNumber(s.avgLoss, 2), 'red')}`);
   console.log(
     `Profit factor:         ${colorize(
       Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity',
@@ -179,32 +123,21 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   console.log(`Стартовый баланс:      ${formatNumber(s.startBalance, 2)}`);
   console.log(`Финальный баланс:      ${formatNumber(s.endBalance, 2)}`);
   console.log(
-    `Доходность:            ${colorize(
-      formatNumber(s.returnPct * 100, 2) + '%',
-      retColor
-    )}`
+    `Доходность:            ${colorize(formatNumber(s.returnPct * 100, 2) + '%', retColor)}`
   );
   console.log(`Макс. просадка:        ${formatNumber(s.maxDrawdownAbs, 2)}`);
-  console.log(
-    `Макс. просадка %:      ${formatNumber(s.maxDrawdownPct * 100, 2)}%`
-  );
+  console.log(`Макс. просадка %:      ${formatNumber(s.maxDrawdownPct * 100, 2)}%`);
 }
 
-/**
- * Печать ног сделок (partial + full).
- * Прибыль — зелёный, убыток — красный, ноль — жёлтый.
- */
 function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: number) {
   const all = result.trades;
   const trades = limit != null && limit > 0 ? all.slice(-limit) : all;
-
   const title =
     limit != null && limit > 0 && limit < all.length
       ? `ПОСЛЕДНИЕ ${trades.length} ИЗ ${all.length} НОГ`
       : `ВСЕ НОГИ СДЕЛОК (${trades.length})`;
 
   console.log(`\n========== ${title} ==========`);
-
   if (!trades.length) {
     console.log('Сделок нет.');
     return;
@@ -216,7 +149,6 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
       limit != null && limit > 0 && limit < all.length
         ? all.length - trades.length + i + 1
         : i + 1;
-
     const line = [
       `#${num}`,
       `Открыта: ${formatDate(trade.openedAt)}`,
@@ -235,13 +167,9 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
       `Bars: ${trade.barsHeld}`
     ].join(' | ');
 
-    if (trade.netPnl > 0) {
-      console.log(colorize(line, 'green'));
-    } else if (trade.netPnl < 0) {
-      console.log(colorize(line, 'red'));
-    } else {
-      console.log(colorize(line, 'yellow'));
-    }
+    if (trade.netPnl > 0) console.log(colorize(line, 'green'));
+    else if (trade.netPnl < 0) console.log(colorize(line, 'red'));
+    else console.log(colorize(line, 'yellow'));
   }
 }
 
@@ -251,14 +179,12 @@ function printUsage() {
   npm run backtest -- <path-to-json> <symbol> [cooldownCandles]
 
 Пример:
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 6
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
 `);
 }
 
 function main() {
   const [, , inputPathArg, symbolArg, cooldownCandlesArg] = process.argv;
-
   if (!inputPathArg || !symbolArg) {
     printUsage();
     process.exit(1);
@@ -266,39 +192,30 @@ function main() {
 
   const cooldownCandles = parseCooldownCandles(cooldownCandlesArg);
   const absolutePath = path.resolve(process.cwd(), inputPathArg);
-
   if (!fs.existsSync(absolutePath)) {
     console.error(`Файл не найден: ${absolutePath}`);
     process.exit(1);
   }
 
-  const fileContent = fs.readFileSync(absolutePath, 'utf-8');
-
   let rawJson: unknown;
-
   try {
-    rawJson = JSON.parse(fileContent);
-  } catch (error) {
-    console.error('Не удалось распарсить JSON.');
-    console.error(error);
+    rawJson = JSON.parse(fs.readFileSync(absolutePath, 'utf-8'));
+  } catch (e) {
+    console.error('Не удалось распарсить JSON.', e);
     process.exit(1);
   }
 
   let candles: Candle[];
-
   try {
     candles = normalizeCandles(rawJson);
-  } catch (error) {
-    console.error('Ошибка в структуре данных свечей.');
-    console.error(error);
+  } catch (e) {
+    console.error('Ошибка структуры свечей.', e);
     process.exit(1);
     return;
   }
 
   if (candles.length < 300) {
-    console.warn(
-      `Предупреждение: свечей всего ${candles.length}. Для стратегии с EMA200 и warmup лучше иметь заметно больше истории.`
-    );
+    console.warn(`Мало свечей: ${candles.length}.`);
   }
 
   const estimated = estimateBacktestTime(candles.length);
@@ -319,33 +236,24 @@ function main() {
     )}`
   );
   console.log(`Лог прогресса:         каждые ${PROGRESS_LOG_EVERY} свечей`);
-  console.log(`Риск на сделку:        2% (MAX_RISK_PER_TRADE в strategy.ts)`);
-  console.log(`Модель выхода:         TP1 40%@1.3R → lock 0.5R + trail 1.2R → TP2@3R`);
+  console.log(`Риск на сделку:        1%`);
+  console.log(`Модель выхода:         TP1 50%@1.2R → lock 0.2R → TP2@2.5R (без trail)`);
   console.log(`Лимит входов в день:   выкл.`);
-  console.log(`Time-stop / abort:     80 бар / выкл.`);
+  console.log(`Time-stop / abort:     120 бар / выкл.`);
   console.log(`Кап стопа:             ≤ 1.2% цены`);
 
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
-    const elapsedSec = (Date.now() - startedAt) / 1000;
     console.log(
-      `[${new Date().toISOString()}] Бэктест выполняется... прошло ${formatDuration(
-        elapsedSec
+      `[${new Date().toISOString()}] Бэктест... ${formatDuration(
+        (Date.now() - startedAt) / 1000
       )}`
     );
   }, 15000);
 
   let result: ReturnType<typeof runStrategyBacktest>;
-
   try {
-    const progressMarkers = Math.max(
-      1,
-      Math.floor(candles.length / PROGRESS_LOG_EVERY)
-    );
-
     console.log(`Прогресс:              0/${candles.length} свечей`);
-    console.log(`Ожидаемое число логов: ~ ${progressMarkers}`);
-
     result = runStrategyBacktest(symbolArg, candles, {
       startingBalance: 50000,
       commissionRate: 0.0005,
@@ -355,20 +263,19 @@ function main() {
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
       maxTradesPerDay: 0,
-      timeStopBars: 80,
+      timeStopBars: 120,
       earlyAbortBars: 0,
       earlyAbortMinR: 0.25,
-      runnerTrailR: 1.2
+      runnerTrailR: 0
     });
   } finally {
     clearInterval(heartbeat);
   }
 
-  const totalElapsedSec = (Date.now() - startedAt) / 1000;
-
   console.log('\n========== ВРЕМЯ ВЫПОЛНЕНИЯ ==========');
-  console.log(`Фактическое время:     ${formatDuration(totalElapsedSec)}`);
-
+  console.log(
+    `Фактическое время:     ${formatDuration((Date.now() - startedAt) / 1000)}`
+  );
   printSummary(result);
   printTrades(result);
 }
