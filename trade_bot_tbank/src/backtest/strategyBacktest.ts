@@ -10,24 +10,23 @@ export interface BacktestOptions {
   warmupCandles?: number;
   onePositionAtTime?: boolean;
   /**
-   * Если на одной свече и SL и TP — считаем стоп.
+   * Если на одной свече задеты и SL, и TP — считаем, что сработал стоп.
    */
   conservativeIntrabarExecution?: boolean;
-  /** Пауза после убытка / стопа (свечи). */
+  /** Пауза после убытка / стопа (в свечах). */
   cooldownCandles?: number;
   progressLogEvery?: number;
 
   /**
    * Когда цена прошла moveToBreakevenR * R в плюс —
-   * переносим стоп в безубыток (entry ± commission buffer).
+   * переносим стоп в зону lock-in (entry ± 0.3R, не ниже комиссии).
    * 0 = выключено.
    */
   moveToBreakevenR?: number;
 
   /**
-   * После breakeven: трейлинг-стоп на trailAtrMult * ATR от экстремума.
-   * 0 = только BE без трейла.
-   * ATR берём грубо как initialR (stop distance при входе).
+   * После lock-in: трейлинг-стоп на trailAfterBreakevenR * R от экстремума.
+   * 0 = только lock-in, без трейла (рекомендуется, пока TP не начнут стабильно браться).
    */
   trailAfterBreakevenR?: number;
 }
@@ -37,16 +36,17 @@ interface OpenPosition {
   regime: MarketRegime | string;
   openedAt: number;
   entryPrice: number;
-  /** Текущий стоп (может двигаться). */
+  /** Текущий стоп (может двигаться после lock-in / трейла). */
   stopLossPrice: number;
-  /** Исходный стоп — для расчёта R. */
+  /** Исходный стоп — для расчёта 1R. */
   initialStopLossPrice: number;
   takeProfitPrice: number;
   quantity: number;
   positionSize: number;
   balanceBefore: number;
-  /** 1R в цене (расстояние entry → initial stop). */
+  /** 1R в цене: |entry − initial stop|. */
   initialR: number;
+  /** Уже перенесли стоп в lock-in. */
   breakevenMoved: boolean;
 }
 
@@ -98,7 +98,10 @@ export interface BacktestResult {
   options: Required<BacktestOptions>;
   trades: BacktestTrade[];
   summary: BacktestSummary;
-  equityCurve: Array<{ time: number; balance: number }>;
+  equityCurve: Array<{
+    time: number;
+    balance: number;
+  }>;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -181,8 +184,12 @@ function tryOpenPosition(params: {
 }
 
 /**
- * Двигаем стоп: breakeven после N*R, затем опциональный трейл.
- * buffer — небольшой запас на комиссию (в цене).
+ * Управление стопом после открытия:
+ * 1) Когда цена прошла moveToBreakevenR * R в плюс —
+ *    переносим стоп в lock-in: entry ± max(комиссия, 0.3R).
+ *    Так фиксируем небольшой плюс, но не режем тренд раньше TP.
+ * 2) Если trailAfterBreakevenR > 0 — дальше трейлим от экстремума,
+ *    не опуская стоп ниже lock-in.
  */
 function updateTrailingStop(params: {
   position: OpenPosition;
@@ -202,31 +209,38 @@ function updateTrailingStop(params: {
   if (moveToBreakevenR <= 0) return;
 
   const r = position.initialR;
-  // Запас на round-trip комиссию в цене, чтобы BE ≈ 0 net
-  const buffer = position.entryPrice * commissionRate * 2.2;
+  if (r <= 0) return;
+
+  // Запас на round-trip комиссию + минимум 0.3R прибыли в стопе
+  const commBuffer = position.entryPrice * commissionRate * 2.2;
+  const lockIn = Math.max(commBuffer, r * 0.3);
 
   if (position.side === 'long') {
     const favorable = candle.high - position.entryPrice;
 
+    // Перенос в lock-in только после достаточного хода в плюс
     if (!position.breakevenMoved && favorable >= moveToBreakevenR * r) {
-      const beStop = position.entryPrice + buffer;
+      const beStop = position.entryPrice + lockIn;
       if (beStop > position.stopLossPrice) {
         position.stopLossPrice = beStop;
       }
       position.breakevenMoved = true;
     }
 
+    // Опциональный трейл после lock-in
     if (position.breakevenMoved && trailAfterBreakevenR > 0) {
       const trailStop = candle.high - trailAfterBreakevenR * r;
-      if (trailStop > position.stopLossPrice) {
-        position.stopLossPrice = trailStop;
+      const floor = position.entryPrice + lockIn;
+      const next = Math.max(trailStop, floor);
+      if (next > position.stopLossPrice) {
+        position.stopLossPrice = next;
       }
     }
   } else {
     const favorable = position.entryPrice - candle.low;
 
     if (!position.breakevenMoved && favorable >= moveToBreakevenR * r) {
-      const beStop = position.entryPrice - buffer;
+      const beStop = position.entryPrice - lockIn;
       if (beStop < position.stopLossPrice) {
         position.stopLossPrice = beStop;
       }
@@ -235,8 +249,10 @@ function updateTrailingStop(params: {
 
     if (position.breakevenMoved && trailAfterBreakevenR > 0) {
       const trailStop = candle.low + trailAfterBreakevenR * r;
-      if (trailStop < position.stopLossPrice) {
-        position.stopLossPrice = trailStop;
+      const ceiling = position.entryPrice - lockIn;
+      const next = Math.min(trailStop, ceiling);
+      if (next < position.stopLossPrice) {
+        position.stopLossPrice = next;
       }
     }
   }
@@ -252,10 +268,11 @@ function checkExitOnCandle(params: {
 } | null {
   const { position, candle, conservativeIntrabarExecution } = params;
 
+  // Считаем выход «breakeven», если стоп близко к входу (lock-in / комиссия)
   const stopIsBreakeven =
     position.breakevenMoved &&
     Math.abs(position.stopLossPrice - position.entryPrice) <
-      position.entryPrice * 0.004;
+      position.entryPrice * 0.008;
 
   if (position.side === 'long') {
     const stopHit = candle.low <= position.stopLossPrice;
@@ -441,6 +458,9 @@ function buildSummary(params: {
   };
 }
 
+/**
+ * Основной прогон бэктеста по одному инструменту.
+ */
 export function runStrategyBacktest(
   symbol: string,
   candles: Candle[],
@@ -454,10 +474,9 @@ export function runStrategyBacktest(
     conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true,
     cooldownCandles: options.cooldownCandles ?? 6,
     progressLogEvery: options.progressLogEvery ?? 5000,
-    // После 1R в плюс — стоп в BE
-    moveToBreakevenR: options.moveToBreakevenR ?? 1.0,
-    // После BE — трейл на 1.2R от экстремума (0 = только BE)
-    trailAfterBreakevenR: options.trailAfterBreakevenR ?? 1.2
+    // По умолчанию: lock-in после 1.6R, трейл выключен — чтобы TP успевали срабатывать
+    moveToBreakevenR: options.moveToBreakevenR ?? 1.6,
+    trailAfterBreakevenR: options.trailAfterBreakevenR ?? 0
   };
 
   if (!Array.isArray(candles) || candles.length === 0) {
@@ -528,7 +547,7 @@ export function runStrategyBacktest(
     }
 
     if (openPosition) {
-      // 1) Сначала двигаем стоп по high/low текущей свечи
+      // 1) Сначала двигаем стоп (lock-in / трейл) по high/low свечи
       updateTrailingStop({
         position: openPosition,
         candle: currentCandle,
@@ -537,7 +556,7 @@ export function runStrategyBacktest(
         commissionRate: resolvedOptions.commissionRate
       });
 
-      // 2) Потом проверяем выход (уже с новым стопом)
+      // 2) Затем проверяем выход уже с обновлённым стопом
       const exit = checkExitOnCandle({
         position: openPosition,
         candle: currentCandle,
@@ -560,6 +579,7 @@ export function runStrategyBacktest(
         trades.push(trade);
         equityCurve.push({ time: currentCandle.time, balance: round(balance) });
 
+        // Пауза после полного стопа или любого убытка
         if (trade.closeReason === 'stop_loss' || trade.netPnl <= 0) {
           cooldownRemaining = resolvedOptions.cooldownCandles;
         }
@@ -591,6 +611,7 @@ export function runStrategyBacktest(
     }
   }
 
+  // Принудительно закрываем хвост истории по close последней свечи
   if (openPosition) {
     const lastCandle = sortedCandles[sortedCandles.length - 1];
     const trade = closePosition({
