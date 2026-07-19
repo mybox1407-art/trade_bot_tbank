@@ -1,7 +1,7 @@
 cd ~
-rm -rf trade_bot_tbank
+rm -rf trade_bot_tbank/trade_bot_tbank
 git clone https://github.com/mybox1407-art/trade_bot_tbank.git
-cd trade_bot_tbank
+cd trade_bot_tbank/trade_bot_tbank
 
 
 docker compose up -d --build
