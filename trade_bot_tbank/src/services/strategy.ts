@@ -4,26 +4,28 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-export const MAX_RISK_PER_TRADE = 0.01;
+/** 2% риска на сделку — при DD ~0.5% на 1% есть запас для масштаба */
+export const MAX_RISK_PER_TRADE = 0.02;
 
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 
 /**
- * Модель выхода (бэктест должен уметь partial close):
+ * Модель выхода (бэктест — partial close):
  * - TP1: доля позиции @ TP1_R
- * - остаток: стоп → entry ± PARTIAL_LOCK_R * R, цель TP2_R
+ * - остаток: стоп → entry ± PARTIAL_LOCK_R * R, далее трейл в бэктесте, цель TP2_R
  */
-export const TP1_FRACTION = 0.5;
-export const TP1_R = 1.2;
-export const TP2_R = 2.5;
-export const PARTIAL_LOCK_R = 0.2;
+export const TP1_FRACTION = 0.4;
+export const TP1_R = 1.3;
+export const TP2_R = 3.0;
+/** Минимальный lock после TP1 (дальше может трейлить бэктест) */
+export const PARTIAL_LOCK_R = 0.5;
 
-/** Мин./макс. ширина стопа от цены (кап 1.2% режет огромные −R) */
+/** Мин./макс. ширина стопа от цены */
 const MIN_STOP_DISTANCE_RATE = 0.005;
 const MAX_STOP_DISTANCE_RATE = 0.012;
 
-const MAX_POSITION_FRAC = 0.3;
+const MAX_POSITION_FRAC = 0.35;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 
 const MIN_ADX_TREND = 20;
@@ -35,7 +37,7 @@ const MAX_EXTENSION_FROM_EMA20 = 0.01;
 const TRADING_HOUR_UTC_FROM = 7;
 const TRADING_HOUR_UTC_TO = 15;
 
-/** Минимум 2 лота — чтобы partial 50% был целым */
+/** Минимум 2 лота — partial должен оставлять остаток */
 const MIN_QUANTITY = 2;
 
 export interface Candle {
@@ -146,8 +148,12 @@ function calcPositionSize(params: {
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
-  // Чётное qty — удобнее делить 50/50 на TP1
-  if (quantity >= 3 && quantity % 2 === 1) quantity -= 1;
+  // Кратность 5 удобна для TP1 40% (округление вниз)
+  if (quantity >= 5) {
+    quantity = Math.floor(quantity / 5) * 5;
+  } else if (quantity >= 3 && quantity % 2 === 1) {
+    quantity -= 1;
+  }
 
   const maxQty = Math.floor((balance * MAX_POSITION_FRAC) / price);
   quantity = Math.min(quantity, maxQty);
@@ -249,7 +255,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 
 /**
  * Сигнал стратегии.
- * @param balance — текущий баланс (для сайзинга в бэктесте/лайве)
+ * @param balance — текущий баланс (сайзинг в бэктесте/лайве)
  */
 export function analyzeMarket(
   candles: Candle[],
@@ -324,7 +330,7 @@ export function analyzeMarket(
   const bullCandle = price > lastOpen && bodyPct >= 0.4;
   const bearCandle = price < lastOpen && bodyPct >= 0.4;
 
-  // Pullback: касание EMA, закрытие обратно по тренду (без momentum-chase)
+  // Pullback: касание EMA, закрытие по тренду (без momentum-chase)
   const touchLong =
     lastLow <= ema20 * 1.006 ||
     lastLow <= ema50 * 1.01 ||
@@ -374,14 +380,10 @@ export function analyzeMarket(
     notExtShort;
 
   const longSignal =
-    regime === 'trend_up' &&
-    price > ind.ema200 &&
-    (pullbackLong || crossLong);
+    regime === 'trend_up' && price > ind.ema200 && (pullbackLong || crossLong);
 
   const shortSignal =
-    regime === 'trend_down' &&
-    price < ind.ema200 &&
-    (pullbackShort || crossShort);
+    regime === 'trend_down' && price < ind.ema200 && (pullbackShort || crossShort);
 
   if (!longSignal && !shortSignal) {
     return {
@@ -413,7 +415,6 @@ export function analyzeMarket(
   const initialR = Math.abs(price - stopLossPrice);
   const stopPct = initialR / price;
 
-  // Кап стопа: слишком узкий/широкий — пас
   if (
     initialR <= 0 ||
     stopPct < MIN_STOP_DISTANCE_RATE ||
@@ -425,7 +426,6 @@ export function analyzeMarket(
     };
   }
 
-  // TP от R — предсказуемый RR (partial + runner)
   const takeProfit1Price =
     side === 'long' ? price + TP1_R * initialR : price - TP1_R * initialR;
   const takeProfit2Price =
