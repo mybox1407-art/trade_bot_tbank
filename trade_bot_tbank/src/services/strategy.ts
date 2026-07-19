@@ -4,71 +4,74 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-/** 1% — лучший PF/DD на этом отрезке; 2% только раздул убытки */
+/** 1% на бэктесте одной бумаги; на портфеле лучше 0.25–0.5% */
 export const MAX_RISK_PER_TRADE = 0.01;
 
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 
 // ============================================================================
-// ВЫХОД ИЗ ПОЗИЦИИ
+// ВЫХОД ИЗ ПОЗИЦИИ (Priority #1 — зафиксирован)
 // ============================================================================
 /**
- * Новый базовый вариант для проверки:
- *
- * - TP1: закрыть 25% позиции на 1.5R;
- * - после TP1: защитить остаток минимум на +0.1R;
- * - остаток позиции вести ATR-трейлингом в strategyBacktest.ts;
- * - фиксированный TP2 отключён, чтобы не обрезать сильные тренды.
- *
- * Важно: эти параметры надо проверить отдельно на out-of-sample,
- * а не считать финальными до бэктестов по нескольким тикерам.
+ * TP1 25% @ 1.5R → lock 0.1R → ATR-trail runner.
+ * Фиксированный TP2 отключён.
  */
 export const TP1_FRACTION = 0.25;
 export const TP1_R = 1.5;
-
-/**
- * Фиксированного TP2 больше нет.
- * Поле takeProfit2Price сохраняется в интерфейсе ради совместимости,
- * но возвращается как null.
- */
 export const TP2_R = 0;
-
-/**
- * После TP1 остаток защищается выше/ниже точки входа на 0.1R.
- * Реальный итог всё равно должен покрывать комиссии, которые учитываются
- * в расчёте размера позиции и в бэктестере.
- */
 export const PARTIAL_LOCK_R = 0.1;
-
-/**
- * Множитель ATR для runner после TP1.
- * Используется в strategyBacktest.ts при обновлении trailing stop.
- *
- * Для long:
- *   stop = highestHighSinceEntry - ATR(14) * RUNNER_TRAIL_ATR_MULT
- *
- * Для short:
- *   stop = lowestLowSinceEntry + ATR(14) * RUNNER_TRAIL_ATR_MULT
- */
 export const RUNNER_TRAIL_ATR_MULT = 2.5;
 
+// ============================================================================
+// СТОП / САЙЗИНГ
+// ============================================================================
 const MIN_STOP_DISTANCE_RATE = 0.005;
 const MAX_STOP_DISTANCE_RATE = 0.012;
 
 const MAX_POSITION_FRAC = 0.3;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
+const MIN_QUANTITY = 2;
 
-const MIN_ADX_TREND = 20;
+// ============================================================================
+// ЧАСТОТА v1 — более мягкие фильтры входа
+// ============================================================================
+/** Было 20 — реже давал trend_up/trend_down */
+const MIN_ADX_TREND = 18;
+
+/** Было 0.01 — отсекало нормальные откаты */
+const MAX_EXTENSION_FROM_EMA20 = 0.015;
+
 const STOP_STRUCTURE_LOOKBACK = 10;
 const STOP_SWING_PAD_ATR = 0.25;
-const MAX_EXTENSION_FROM_EMA20 = 0.01;
+
+/**
+ * Минимальная «полнотелость» сигнальной свечи.
+ * Было 0.4 — слишком строго для 15m.
+ */
+const MIN_BODY_PCT = 0.25;
+
+/** RSI long: было 42..68 */
+const RSI_LONG_MIN = 38;
+const RSI_LONG_MAX = 72;
+
+/** RSI short: было 32..58 */
+const RSI_SHORT_MIN = 28;
+const RSI_SHORT_MAX = 62;
+
+/**
+ * Допуск касания EMA (шире, чем раньше).
+ * long: low может чуть проколоть EMA20/50
+ * short: high может чуть проколоть EMA20/50
+ */
+const EMA20_TOUCH_LONG = 1.01;
+const EMA50_TOUCH_LONG = 1.015;
+const EMA20_TOUCH_SHORT = 0.99;
+const EMA50_TOUCH_SHORT = 0.985;
 
 /** 10:00–18:00 МСК = 07:00–15:00 UTC */
 const TRADING_HOUR_UTC_FROM = 7;
 const TRADING_HOUR_UTC_TO = 15;
-
-const MIN_QUANTITY = 2;
 
 export interface Candle {
   time: number;
@@ -94,14 +97,9 @@ export interface StrategySignal {
   side: 'long' | 'short' | 'none';
   stopLossPrice: number | null;
   takeProfit1Price: number | null;
-
-  /**
-   * Теперь всегда null: выход runner выполняется по ATR-trailing stop.
-   * Оставлено ради обратной совместимости с существующим бэктестером.
-   */
+  /** Всегда null — runner по ATR-trail */
   takeProfit2Price: number | null;
   takeProfitPrice: number | null;
-
   tp1Fraction: number;
   positionSize: number | null;
   quantity: number | null;
@@ -147,36 +145,16 @@ function getStructureStop(params: {
 
   if (side === 'long') {
     let stop = recentLow - pad;
-
-    if (price - stop < minDist) {
-      stop = price - minDist;
-    }
-
-    if (price - stop > maxDist) {
-      stop = price - maxDist;
-    }
-
-    if (stop >= price) {
-      stop = price - minDist;
-    }
-
+    if (price - stop < minDist) stop = price - minDist;
+    if (price - stop > maxDist) stop = price - maxDist;
+    if (stop >= price) stop = price - minDist;
     return stop;
   }
 
   let stop = recentHigh + pad;
-
-  if (stop - price < minDist) {
-    stop = price + minDist;
-  }
-
-  if (stop - price > maxDist) {
-    stop = price + maxDist;
-  }
-
-  if (stop <= price) {
-    stop = price + minDist;
-  }
-
+  if (stop - price < minDist) stop = price + minDist;
+  if (stop - price > maxDist) stop = price + maxDist;
+  if (stop <= price) stop = price + minDist;
   return stop;
 }
 
@@ -185,39 +163,24 @@ function calcPositionSize(params: {
   stopLossPrice: number;
   riskCapital: number;
   balance: number;
-}): {
-  quantity: number | null;
-  positionSize: number | null;
-} {
+}): { quantity: number | null; positionSize: number | null } {
   const { price, stopLossPrice, riskCapital, balance } = params;
   const stopDist = Math.abs(price - stopLossPrice);
 
   if (stopDist <= 0 || price <= 0) {
-    return {
-      quantity: null,
-      positionSize: null
-    };
+    return { quantity: null, positionSize: null };
   }
 
   const commPerShare = price * ROUND_TRIP_COMMISSION_RATE;
   const riskPerShare = stopDist + commPerShare;
 
   if (commPerShare / riskPerShare > MAX_COMMISSION_SHARE_OF_RISK) {
-    return {
-      quantity: null,
-      positionSize: null
-    };
+    return { quantity: null, positionSize: null };
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
 
-  /**
-   * TP1 закрывает 25%. Чтобы не иметь проблем с дробными акциями,
-   * желательно иметь количество, кратное 4.
-   *
-   * Если объём слишком маленький, ниже остаётся безопасный fallback:
-   * первая часть будет минимум одной акцией, остаток — минимум одной.
-   */
+  // TP1 = 25% → желательно кратность 4
   if (quantity >= 4) {
     quantity -= quantity % 4;
   }
@@ -226,16 +189,10 @@ function calcPositionSize(params: {
   quantity = Math.min(quantity, maxQty);
 
   if (quantity < MIN_QUANTITY) {
-    return {
-      quantity: null,
-      positionSize: null
-    };
+    return { quantity: null, positionSize: null };
   }
 
-  return {
-    quantity,
-    positionSize: quantity * price
-  };
+  return { quantity, positionSize: quantity * price };
 }
 
 export function detectMarketRegime(candles: Candle[]) {
@@ -244,40 +201,12 @@ export function detectMarketRegime(candles: Candle[]) {
   const lows = candles.map(c => c.low);
   const volumes = candles.map(c => c.volume);
 
-  const atr = ATR.calculate({
-    period: 14,
-    high: highs,
-    low: lows,
-    close: closes
-  });
-
-  const adx = ADX.calculate({
-    period: 14,
-    high: highs,
-    low: lows,
-    close: closes
-  });
-
-  const ema20 = EMA.calculate({
-    period: 20,
-    values: closes
-  });
-
-  const ema50 = EMA.calculate({
-    period: 50,
-    values: closes
-  });
-
-  const ema200 = EMA.calculate({
-    period: 200,
-    values: closes
-  });
-
-  const bb = BollingerBands.calculate({
-    period: 20,
-    values: closes,
-    stdDev: 2
-  });
+  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const adx = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const ema20 = EMA.calculate({ period: 20, values: closes });
+  const ema50 = EMA.calculate({ period: 50, values: closes });
+  const ema200 = EMA.calculate({ period: 200, values: closes });
+  const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
 
   if (
     atr.length < 2 ||
@@ -287,18 +216,13 @@ export function detectMarketRegime(candles: Candle[]) {
     ema200.length < 1 ||
     bb.length < 1
   ) {
-    return {
-      regime: 'unknown' as MarketRegime,
-      ready: false,
-      indicators: null
-    };
+    return { regime: 'unknown' as MarketRegime, ready: false, indicators: null };
   }
 
   const lastClose = last(closes);
   const lastAtr = last(atr);
   const lastAdx = last(adx);
   const prevAdx = prev(adx);
-
   const lastEma20 = last(ema20);
   const lastEma50 = last(ema50);
   const lastEma200 = last(ema200);
@@ -306,45 +230,25 @@ export function detectMarketRegime(candles: Candle[]) {
 
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
-
   const adxRising = lastAdx.adx > prevAdx.adx;
+
+  // Частота v1: ADX >= 18 и (растёт ИЛИ уже >= 22)
   const adxOk =
     lastAdx.adx >= MIN_ADX_TREND &&
-    (adxRising || lastAdx.adx >= 26);
+    (adxRising || lastAdx.adx >= 22);
 
-  const stackUp =
-    lastEma20 > lastEma50 &&
-    lastEma50 > lastEma200;
-
-  const stackDown =
-    lastEma20 < lastEma50 &&
-    lastEma50 < lastEma200;
+  const stackUp = lastEma20 > lastEma50 && lastEma50 > lastEma200;
+  const stackDown = lastEma20 < lastEma50 && lastEma50 < lastEma200;
 
   const highVolatility = atrPct > 0.028 || bbWidth > 0.13;
-
-  const trendUp =
-    !highVolatility &&
-    lastClose > lastEma200 &&
-    stackUp &&
-    adxOk;
-
-  const trendDown =
-    !highVolatility &&
-    lastClose < lastEma200 &&
-    stackDown &&
-    adxOk;
+  const trendUp = !highVolatility && lastClose > lastEma200 && stackUp && adxOk;
+  const trendDown = !highVolatility && lastClose < lastEma200 && stackDown && adxOk;
 
   let regime: MarketRegime = 'unknown';
-
-  if (highVolatility) {
-    regime = 'high_volatility';
-  } else if (trendUp) {
-    regime = 'trend_up';
-  } else if (trendDown) {
-    regime = 'trend_down';
-  } else if (lastAdx.adx < 18) {
-    regime = 'range';
-  }
+  if (highVolatility) regime = 'high_volatility';
+  else if (trendUp) regime = 'trend_up';
+  else if (trendDown) regime = 'trend_down';
+  else if (lastAdx.adx < 18) regime = 'range';
 
   return {
     regime,
@@ -382,14 +286,12 @@ function emptySignal(
     quantity: null,
     regime,
     initialR: null,
-    indicators: {
-      ready: false
-    }
+    indicators: { ready: false }
   };
 }
 
 /**
- * @param balance — текущий баланс для сайзинга.
+ * @param balance — текущий баланс для сайзинга
  */
 export function analyzeMarket(
   candles: Candle[],
@@ -402,6 +304,7 @@ export function analyzeMarket(
 
   const regimeInfo = detectMarketRegime(candles);
 
+  // MACD оставлен для диагностики в indicators, но НЕ обязателен для входа (частота v1)
   const macd = MACD.calculate({
     values: closes,
     fastPeriod: 12,
@@ -411,17 +314,8 @@ export function analyzeMarket(
     SimpleMASignal: false
   });
 
-  const rsi = RSI.calculate({
-    period: 14,
-    values: closes
-  });
-
-  const atr = ATR.calculate({
-    period: 14,
-    high: highs,
-    low: lows,
-    close: closes
-  });
+  const rsi = RSI.calculate({ period: 14, values: closes });
+  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
 
   if (
     !regimeInfo.ready ||
@@ -451,26 +345,14 @@ export function analyzeMarket(
   if (!isTradingHour(last(candles).time) || regime === 'high_volatility') {
     return {
       ...emptySignal(price, regime),
-      indicators: {
-        ready: true,
-        skipped: true,
-        regime,
-        lastAtr
-      }
+      indicators: { ready: true, skipped: true, regime, lastAtr }
     };
   }
 
   const ema20 = Number(ind.ema20);
   const ema50 = Number(ind.ema50);
+  const ema200 = Number(ind.ema200);
   const extension = (price - ema20) / price;
-
-  const macdCrossUp =
-    prevMacd.MACD! < prevMacd.signal! &&
-    lastMacd.MACD! > lastMacd.signal!;
-
-  const macdCrossDown =
-    prevMacd.MACD! > prevMacd.signal! &&
-    lastMacd.MACD! < lastMacd.signal!;
 
   const macdBull =
     lastMacd.MACD! > lastMacd.signal! &&
@@ -483,77 +365,58 @@ export function analyzeMarket(
   const candleRange = Math.max(lastHigh - lastLow, 1e-9);
   const bodyPct = Math.abs(price - lastOpen) / candleRange;
 
-  const bullCandle =
-    price > lastOpen &&
-    bodyPct >= 0.4;
+  const bullCandle = price > lastOpen && bodyPct >= MIN_BODY_PCT;
+  const bearCandle = price < lastOpen && bodyPct >= MIN_BODY_PCT;
 
-  const bearCandle =
-    price < lastOpen &&
-    bodyPct >= 0.4;
-
+  // --- touch (шире) ---
   const touchLong =
-    lastLow <= ema20 * 1.006 ||
-    lastLow <= ema50 * 1.01 ||
-    (prevPrice <= ema20 * 1.006 && lastLow <= ema20 * 1.01);
+    lastLow <= ema20 * EMA20_TOUCH_LONG ||
+    lastLow <= ema50 * EMA50_TOUCH_LONG ||
+    (prevPrice <= ema20 * EMA20_TOUCH_LONG && lastLow <= ema20 * 1.012);
 
   const touchShort =
-    lastHigh >= ema20 * 0.994 ||
-    lastHigh >= ema50 * 0.99 ||
-    (prevPrice >= ema20 * 0.994 && lastHigh >= ema20 * 0.99);
+    lastHigh >= ema20 * EMA20_TOUCH_SHORT ||
+    lastHigh >= ema50 * EMA50_TOUCH_SHORT ||
+    (prevPrice >= ema20 * EMA20_TOUCH_SHORT && lastHigh >= ema20 * 0.988);
 
   const notExtLong =
-    extension > -0.003 &&
-    extension < MAX_EXTENSION_FROM_EMA20;
+    extension > -0.004 && extension < MAX_EXTENSION_FROM_EMA20;
 
   const notExtShort =
-    extension < 0.003 &&
-    extension > -MAX_EXTENSION_FROM_EMA20;
+    extension < 0.004 && extension > -MAX_EXTENSION_FROM_EMA20;
 
+  /**
+   * Частота v1: основной сетап — pullback.
+   * MACD-cross убран из обязательных условий (он сильно резал число сделок).
+   * macdBull/macdBear остаются мягким подтверждением направления.
+   */
   const pullbackLong =
     touchLong &&
     bullCandle &&
-    price >= ema20 * 0.997 &&
+    price >= ema20 * 0.995 &&
     macdBull &&
-    lastRsi > 42 &&
-    lastRsi < 68 &&
+    lastRsi > RSI_LONG_MIN &&
+    lastRsi < RSI_LONG_MAX &&
     notExtLong;
 
   const pullbackShort =
     touchShort &&
     bearCandle &&
-    price <= ema20 * 1.003 &&
+    price <= ema20 * 1.005 &&
     macdBear &&
-    lastRsi < 58 &&
-    lastRsi > 32 &&
-    notExtShort;
-
-  const crossLong =
-    macdCrossUp &&
-    touchLong &&
-    bullCandle &&
-    price > ema20 &&
-    lastRsi > 42 &&
-    lastRsi < 68 &&
-    notExtLong;
-
-  const crossShort =
-    macdCrossDown &&
-    touchShort &&
-    bearCandle &&
-    price < ema20 &&
-    lastRsi < 58 &&
-    lastRsi > 32 &&
+    lastRsi < RSI_SHORT_MAX &&
+    lastRsi > RSI_SHORT_MIN &&
     notExtShort;
 
   const longSignal =
     regime === 'trend_up' &&
-    price > Number(ind.ema200) &&
-    (pullbackLong || crossLong);
+    price > ema200 &&
+    pullbackLong;
 
   const shortSignal =
     regime === 'trend_down' &&
-    price < Number(ind.ema200) &&
-    (pullbackShort || crossShort);
+    price < ema200 &&
+    pullbackShort;
 
   if (!longSignal && !shortSignal) {
     return {
@@ -563,18 +426,21 @@ export function analyzeMarket(
         lastAtr,
         lastRsi,
         extension,
+        bodyPct,
         longSignal,
         shortSignal,
         pullbackLong,
         pullbackShort,
-        crossLong,
-        crossShort
+        macdBull,
+        macdBear,
+        touchLong,
+        touchShort,
+        freqPatch: 'v1'
       }
     };
   }
 
   const side: 'long' | 'short' = longSignal ? 'long' : 'short';
-
   const atrPct = Number(ind.atrPct);
   const atrStopMult = atrPct > 0.015 ? 1.6 : 1.45;
 
@@ -601,7 +467,8 @@ export function analyzeMarket(
         ready: true,
         lastAtr,
         reject: 'stop_distance',
-        stopPct
+        stopPct,
+        freqPatch: 'v1'
       }
     };
   }
@@ -611,15 +478,9 @@ export function analyzeMarket(
       ? price + TP1_R * initialR
       : price - TP1_R * initialR;
 
-  /**
-   * Fixed TP2 отключён.
-   * Runner должен закрываться по ATR-trailing stop в бэктестере/боевом
-   * исполнителе после того, как TP1 был достигнут.
-   */
   const takeProfit2Price: number | null = null;
 
   const riskCapital = balance * MAX_RISK_PER_TRADE;
-
   const sized = calcPositionSize({
     price,
     stopLossPrice,
@@ -633,7 +494,8 @@ export function analyzeMarket(
       indicators: {
         ready: true,
         lastAtr,
-        reject: 'size'
+        reject: 'size',
+        freqPatch: 'v1'
       }
     };
   }
@@ -658,6 +520,7 @@ export function analyzeMarket(
       atrPct,
       lastRsi,
       extension,
+      bodyPct,
       initialR,
       stopPct,
       tp1: takeProfit1Price,
@@ -666,8 +529,9 @@ export function analyzeMarket(
       runnerTrailAtrMult: RUNNER_TRAIL_ATR_MULT,
       pullbackLong,
       pullbackShort,
-      crossLong,
-      crossShort
+      macdBull,
+      macdBear,
+      freqPatch: 'v1'
     }
   };
 }
