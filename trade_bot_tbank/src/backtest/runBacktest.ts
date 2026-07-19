@@ -9,12 +9,9 @@ import {
   TP1_R
 } from '../services/strategy';
 
-/** Частота v1: короче пауза после сделки (было 12) */
 const DEFAULT_COOLDOWN_CANDLES = 4;
-
-/** Частота v1: быстрее освобождаем слот (было 120) */
+const DEFAULT_COOLDOWN_AFTER_STOP = 12;
 const DEFAULT_TIME_STOP_BARS = 64;
-
 const DEFAULT_RUNNER_TRAIL_ATR_MULT = RUNNER_TRAIL_ATR_MULT;
 const PROGRESS_LOG_EVERY = 5000;
 
@@ -38,7 +35,6 @@ function toNumber(value: unknown): number {
 function isValidCandle(candidate: unknown): candidate is Candle {
   if (!candidate || typeof candidate !== 'object') return false;
   const item = candidate as Record<string, unknown>;
-
   return (
     Number.isFinite(toNumber(item.time)) &&
     Number.isFinite(toNumber(item.open)) &&
@@ -58,7 +54,6 @@ function normalizeCandles(raw: unknown): Candle[] {
     if (!isValidCandle(item)) {
       throw new Error(`Некорректная свеча в массиве, индекс ${index}.`);
     }
-
     return {
       time: toNumber(item.time),
       open: toNumber(item.open),
@@ -83,48 +78,31 @@ function formatDate(ts: number): string {
   return d.toISOString();
 }
 
-function parseCooldownCandles(value: string | undefined): number {
-  if (value == null) return DEFAULT_COOLDOWN_CANDLES;
-
+function parseNonNegInt(
+  value: string | undefined,
+  fallback: number,
+  name: string
+): number {
+  if (value == null) return fallback;
   const parsed = Number(value);
-
   if (!Number.isInteger(parsed) || parsed < 0) {
-    console.warn(
-      `Некорректный cooldownCandles="${value}", default ${DEFAULT_COOLDOWN_CANDLES}.`
-    );
-    return DEFAULT_COOLDOWN_CANDLES;
+    console.warn(`Некорректный ${name}="${value}", default ${fallback}.`);
+    return fallback;
   }
-
   return parsed;
 }
 
-function parseRunnerTrailAtrMult(value: string | undefined): number {
-  if (value == null) return DEFAULT_RUNNER_TRAIL_ATR_MULT;
-
+function parsePositiveNumber(
+  value: string | undefined,
+  fallback: number,
+  name: string
+): number {
+  if (value == null) return fallback;
   const parsed = Number(value);
-
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.warn(
-      `Некорректный runnerTrailAtrMult="${value}", default ${DEFAULT_RUNNER_TRAIL_ATR_MULT}.`
-    );
-    return DEFAULT_RUNNER_TRAIL_ATR_MULT;
+    console.warn(`Некорректный ${name}="${value}", default ${fallback}.`);
+    return fallback;
   }
-
-  return parsed;
-}
-
-function parseTimeStopBars(value: string | undefined): number {
-  if (value == null) return DEFAULT_TIME_STOP_BARS;
-
-  const parsed = Number(value);
-
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    console.warn(
-      `Некорректный timeStopBars="${value}", default ${DEFAULT_TIME_STOP_BARS}.`
-    );
-    return DEFAULT_TIME_STOP_BARS;
-  }
-
   return parsed;
 }
 
@@ -134,7 +112,6 @@ function formatDuration(seconds: number): string {
 
   const minutes = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
-
   if (minutes < 60) return `${minutes} мин ${secs} сек`;
 
   const hours = Math.floor(minutes / 60);
@@ -157,10 +134,8 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
 
   const netColor =
     s.netProfit > 0 ? 'green' : s.netProfit < 0 ? 'red' : 'yellow';
-
   const retColor =
     s.returnPct > 0 ? 'green' : s.returnPct < 0 ? 'red' : 'yellow';
-
   const pfColor =
     s.profitFactor >= 1.2
       ? 'green'
@@ -218,9 +193,7 @@ function printTrades(
 ) {
   const all = result.trades;
   const trades =
-    limit != null && limit > 0
-      ? all.slice(-limit)
-      : all;
+    limit != null && limit > 0 ? all.slice(-limit) : all;
 
   const title =
     limit != null && limit > 0 && limit < all.length
@@ -236,7 +209,6 @@ function printTrades(
 
   for (let i = 0; i < trades.length; i += 1) {
     const trade = trades[i];
-
     const num =
       limit != null && limit > 0 && limit < all.length
         ? all.length - trades.length + i + 1
@@ -265,32 +237,26 @@ function printTrades(
       `Bars: ${trade.barsHeld}`
     ].join(' | ');
 
-    if (trade.netPnl > 0) {
-      console.log(colorize(line, 'green'));
-    } else if (trade.netPnl < 0) {
-      console.log(colorize(line, 'red'));
-    } else {
-      console.log(colorize(line, 'yellow'));
-    }
+    if (trade.netPnl > 0) console.log(colorize(line, 'green'));
+    else if (trade.netPnl < 0) console.log(colorize(line, 'red'));
+    else console.log(colorize(line, 'yellow'));
   }
 }
 
 function printUsage() {
   console.log(`
 Использование:
-  npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [runnerTrailAtrMult] [timeStopBars]
+  npm run backtest -- <path-to-json> <symbol> [cooldown] [trailAtr] [timeStop] [cooldownAfterStop]
 
-Параметры по умолчанию (частота v1):
-  cooldownCandles     = ${DEFAULT_COOLDOWN_CANDLES}
+Defaults (частота v1 + smart cooldown):
+  cooldown            = ${DEFAULT_COOLDOWN_CANDLES}
   runnerTrailAtrMult  = ${DEFAULT_RUNNER_TRAIL_ATR_MULT}
   timeStopBars        = ${DEFAULT_TIME_STOP_BARS}
+  cooldownAfterStop   = ${DEFAULT_COOLDOWN_AFTER_STOP}
 
 Примеры:
   npm run backtest -- ./src/backtest/data/SBER_15m.json SBER
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4 2.5
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4 2.5 64
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 6 2.5 48
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4 2.5 64 12
 `);
 }
 
@@ -300,9 +266,10 @@ function main() {
     ,
     inputPathArg,
     symbolArg,
-    cooldownCandlesArg,
-    runnerTrailAtrMultArg,
-    timeStopBarsArg
+    cooldownArg,
+    trailArg,
+    timeStopArg,
+    cooldownAfterStopArg
   ] = process.argv;
 
   if (!inputPathArg || !symbolArg) {
@@ -310,32 +277,46 @@ function main() {
     process.exit(1);
   }
 
-  const cooldownCandles = parseCooldownCandles(cooldownCandlesArg);
-  const runnerTrailAtrMult = parseRunnerTrailAtrMult(runnerTrailAtrMultArg);
-  const timeStopBars = parseTimeStopBars(timeStopBarsArg);
+  const cooldownCandles = parseNonNegInt(
+    cooldownArg,
+    DEFAULT_COOLDOWN_CANDLES,
+    'cooldownCandles'
+  );
+  const runnerTrailAtrMult = parsePositiveNumber(
+    trailArg,
+    DEFAULT_RUNNER_TRAIL_ATR_MULT,
+    'runnerTrailAtrMult'
+  );
+  const timeStopBars = parseNonNegInt(
+    timeStopArg,
+    DEFAULT_TIME_STOP_BARS,
+    'timeStopBars'
+  );
+  const cooldownAfterStopCandles = parseNonNegInt(
+    cooldownAfterStopArg,
+    DEFAULT_COOLDOWN_AFTER_STOP,
+    'cooldownAfterStopCandles'
+  );
 
   const absolutePath = path.resolve(process.cwd(), inputPathArg);
-
   if (!fs.existsSync(absolutePath)) {
     console.error(`Файл не найден: ${absolutePath}`);
     process.exit(1);
   }
 
   let rawJson: unknown;
-
   try {
     rawJson = JSON.parse(fs.readFileSync(absolutePath, 'utf-8'));
-  } catch (error) {
-    console.error('Не удалось распарсить JSON.', error);
+  } catch (e) {
+    console.error('Не удалось распарсить JSON.', e);
     process.exit(1);
   }
 
   let candles: Candle[];
-
   try {
     candles = normalizeCandles(rawJson);
-  } catch (error) {
-    console.error('Ошибка структуры свечей.', error);
+  } catch (e) {
+    console.error('Ошибка структуры свечей.', e);
     process.exit(1);
     return;
   }
@@ -356,7 +337,10 @@ function main() {
     )}`
   );
   console.log(
-    `Cooldown после сделки:  ${cooldownCandles} свеч. (после любой)`
+    `Cooldown base:          ${cooldownCandles} (после TP/trail/time_stop)`
+  );
+  console.log(
+    `Cooldown after stop:    ${cooldownAfterStopCandles} (после stop_loss/early_abort)`
   );
   console.log(
     `Оценка времени:        ~ ${formatDuration(estimated.minSec)} - ${formatDuration(
@@ -372,14 +356,11 @@ function main() {
     `Модель входа:          частота v1 (pullback, ADX≥18, soft RSI/body/touch)`
   );
   console.log(`Лимит входов в день:   выкл.`);
-  console.log(
-    `Time-stop / abort:     ${timeStopBars} бар / выкл.`
-  );
+  console.log(`Time-stop / abort:     ${timeStopBars} бар / выкл.`);
   console.log(`Кап стопа:             ≤ 1.2% цены`);
   console.log(`Runner ATR mult:       ${formatNumber(runnerTrailAtrMult, 2)}`);
 
   const startedAt = Date.now();
-
   const heartbeat = setInterval(() => {
     console.log(
       `[${new Date().toISOString()}] Бэктест... ${formatDuration(
@@ -389,10 +370,8 @@ function main() {
   }, 15000);
 
   let result: ReturnType<typeof runStrategyBacktest>;
-
   try {
     console.log(`Прогресс:              0/${candles.length} свечей`);
-
     result = runStrategyBacktest(symbolArg, candles, {
       startingBalance: 50000,
       commissionRate: 0.0005,
@@ -400,6 +379,7 @@ function main() {
       onePositionAtTime: true,
       conservativeIntrabarExecution: true,
       cooldownCandles,
+      cooldownAfterStopCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
       maxTradesPerDay: 0,
       timeStopBars,
