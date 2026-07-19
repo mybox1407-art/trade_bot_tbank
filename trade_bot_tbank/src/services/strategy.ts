@@ -5,6 +5,12 @@ const MAX_RISK_PER_TRADE = 0.01;
 
 const MIN_ADX_TREND = 20;
 const MIN_ADX_RANGE = 18;
+
+/**
+ * Порог сжатия BB для breakout_watch.
+ * На 15m breakout_watch отключён полностью (см. analyzeMarket),
+ * константа сохранена для будущего использования на старших ТФ.
+ */
 const BB_SQUEEZE_THRESHOLD = 0.05;
 
 const COMMISSION_RATE = 0.003; // 0.3% за одну сторону сделки
@@ -13,7 +19,26 @@ const MIN_NET_PROFIT_BUFFER_RATE = 0.001; // 0.1% запас поверх round-
 const MIN_TP_ATR_MULTIPLIER = 0.5;
 
 const STRUCTURE_LOOKBACK = 10;
-const MIN_EXPECTED_NET_MOVE_RATE = 0.002; // минимум 0.2% чистого движения после комиссии
+
+/**
+ * Повышен с 0.002 до 0.003: на 15m ATR SBER ~0.2% и нам нужен
+ * реальный запас поверх 0.6% round-trip комиссии.
+ */
+const MIN_EXPECTED_NET_MOVE_RATE = 0.003;
+
+/**
+ * Кулдаун после стоп-лосса: 6 свечей × 15m = 90 минут.
+ * Предотвращает серию встречных сделок в пилообразном рынке.
+ */
+const LOSS_COOLDOWN_CANDLES = 6;
+
+/**
+ * Торговые часы MOEX (UTC): 07:00–15:00 = 10:00–18:00 МСК.
+ * Первый час после открытия (07:00–08:00 UTC) и вечерняя сессия
+ * дают повышенный процент ложных пробоев на 15m.
+ */
+const TRADING_HOUR_START_UTC = 7;
+const TRADING_HOUR_END_UTC = 15;
 
 export interface Candle {
   time: number;
@@ -45,26 +70,47 @@ type RegimeIndicators = {
   avgVol20: number;
 };
 
+/**
+ * Внутреннее состояние кулдауна.
+ * В live-боте хранится в памяти процесса / БД.
+ * В бэктесте передаётся через параметр analyzeMarket.
+ */
+export interface StrategyState {
+  cooldownCandlesLeft: number;
+}
+
 function last<T>(arr: T[]): T {
   return arr[arr.length - 1];
 }
 
 function prev<T>(arr: T[]): T {
-  return arr[arr.length - 2];
-}
+  return arr[arr.length - 2];\n}
 
 function mean(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
+/**
+ * Порог объёма повышен до 1.5× для отсева мелких всплесков.
+ */
 function getVolumeSpike(volumes: number[], avgVol20: number): boolean {
   const v = volumes[volumes.length - 1] ?? 0;
-  return v >= avgVol20 * 1.1;
+  return v >= avgVol20 * 1.5;
+}
+
+/**
+ * Проверка торгового окна по UTC-часу последней свечи.
+ * Возвращает false за пределами 07:00–15:00 UTC.
+ */
+function isWithinTradingHours(candleTimeMs: number): boolean {
+  const hour = new Date(candleTimeMs).getUTCHours();
+  return hour >= TRADING_HOUR_START_UTC && hour < TRADING_HOUR_END_UTC;
 }
 
 /**
  * ATR-множители под режим рынка.
- * В тренде и в breakout делаем стопы шире, чтобы не выбивало рыночным шумом.
+ * В тренде делаем стопы шире, чтобы не выбивало рыночным шумом.
+ * breakout_watch на 15m отключён, множители оставлены для старших ТФ.
  */
 function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
   const highVol = atrPct > 0.02;
@@ -82,6 +128,47 @@ function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
   }
 
   return { stop: 0, target: 0 };
+}
+
+/**
+ * Структурный стоп: за ближайший swing-low (для лонга)
+ * или swing-high (для шорта) последних STRUCTURE_LOOKBACK свечей.
+ * Если структурный стоп оказался слишком близко (< 0.5×ATR от цены),
+ * используем ATR-стоп как минимум.
+ */
+function getStructuralStop(params: {
+  side: 'long' | 'short';
+  highs: number[];
+  lows: number[];
+  price: number;
+  lastAtr: number;
+  atrStopMultiplier: number;
+}): number {
+  const { side, highs, lows, price, lastAtr, atrStopMultiplier } = params;
+
+  const recentHigh = Math.max(...highs.slice(-STRUCTURE_LOOKBACK));
+  const recentLow = Math.min(...lows.slice(-STRUCTURE_LOOKBACK));
+
+  const minStopDistance = lastAtr * 0.5;
+  const atrStop = lastAtr * atrStopMultiplier;
+
+  if (side === 'long') {
+    const structStop = recentLow;
+    const distanceFromPrice = price - structStop;
+    if (distanceFromPrice < minStopDistance) {
+      return price - atrStop;
+    }
+    // Не ставим стоп дальше ATR-множителя — иначе риск на сделку вырастет
+    return Math.max(structStop, price - atrStop);
+  }
+
+  // short
+  const structStop = recentHigh;
+  const distanceFromPrice = structStop - price;
+  if (distanceFromPrice < minStopDistance) {
+    return price + atrStop;
+  }
+  return Math.min(structStop, price + atrStop);
 }
 
 /**
@@ -118,7 +205,6 @@ function normalizeTakeProfit(params: {
 
 /**
  * Считает ожидаемое движение до тейка после вычета round-trip комиссии.
- * Нужен, чтобы не открывать сделки, в которых чистый потенциал слишком мал.
  */
 function expectedNetMove(params: {
   side: 'long' | 'short' | 'none';
@@ -128,36 +214,22 @@ function expectedNetMove(params: {
   const { side, price, takeProfitPrice } = params;
 
   if (side === 'none' || takeProfitPrice == null || price <= 0) {
-    return {
-      grossMove: 0,
-      netMove: 0,
-      netMoveRate: 0
-    };
+    return { grossMove: 0, netMove: 0, netMoveRate: 0 };
   }
 
   const grossMove =
-    side === 'long'
-      ? takeProfitPrice - price
-      : price - takeProfitPrice;
+    side === 'long' ? takeProfitPrice - price : price - takeProfitPrice;
 
   const commissionCost = price * ROUND_TRIP_COMMISSION_RATE;
   const netMove = grossMove - commissionCost;
   const netMoveRate = netMove / price;
 
-  return {
-    grossMove,
-    netMove,
-    netMoveRate
-  };
+  return { grossMove, netMove, netMoveRate };
 }
 
 /**
- * Структурная цель по ближайшей локальной структуре.
- * Для long — ориентир на локальный максимум последних N свечей.
- * Для short — ориентир на локальный минимум последних N свечей.
- *
- * Дополнительно не даем structureTarget быть слишком близко,
- * поэтому сравниваем с базовой целью 1.5 ATR.
+ * Структурная цель по ближайшему локальному экстремуму.
+ * Для long — локальный максимум. Для short — локальный минимум.
  */
 function getStructureTarget(params: {
   side: 'long' | 'short' | 'none';
@@ -168,9 +240,7 @@ function getStructureTarget(params: {
 }) {
   const { side, highs, lows, price, lastAtr } = params;
 
-  if (side === 'none') {
-    return null;
-  }
+  if (side === 'none') return null;
 
   const recentHigh = Math.max(...highs.slice(-STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STRUCTURE_LOOKBACK));
@@ -187,8 +257,7 @@ function getStructureTarget(params: {
 }
 
 /**
- * Защитная проверка, чтобы уровни выхода не оказались
- * "перевернутыми" относительно цены входа.
+ * Защитная проверка: уровни выхода не должны быть «перевёрнуты».
  */
 function validateExitLevels(params: {
   side: 'long' | 'short' | 'none';
@@ -210,7 +279,6 @@ function validateExitLevels(params: {
     if (stopLossPrice == null || stopLossPrice >= price) {
       stopLossPrice = price - fallbackStopDistance;
     }
-
     if (takeProfitPrice == null || takeProfitPrice <= price) {
       takeProfitPrice = price + fallbackTakeDistance;
     }
@@ -220,7 +288,6 @@ function validateExitLevels(params: {
     if (stopLossPrice == null || stopLossPrice <= price) {
       stopLossPrice = price + fallbackStopDistance;
     }
-
     if (takeProfitPrice == null || takeProfitPrice >= price) {
       takeProfitPrice = price - fallbackTakeDistance;
     }
@@ -320,11 +387,25 @@ export function detectMarketRegime(candles: Candle[]) {
   };
 }
 
-export function analyzeMarket(candles: Candle[]) {
+const NO_TRADE = {
+  buy: false,
+  sell: false,
+  side: 'none' as const,
+  takeProfitPrice: null,
+  stopLossPrice: null,
+  positionSize: null,
+  quantity: null,
+};
+
+export function analyzeMarket(
+  candles: Candle[],
+  state: StrategyState = { cooldownCandlesLeft: 0 }
+) {
   const closes = candles.map(c => c.close);
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
   const opens = candles.map(c => c.open);
+  const volumes = candles.map(c => c.volume);
 
   const regimeInfo = detectMarketRegime(candles);
 
@@ -341,6 +422,9 @@ export function analyzeMarket(candles: Candle[]) {
   const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
   const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
 
+  const lastCandle = candles[candles.length - 1];
+  const price = last(closes);
+
   if (
     !regimeInfo.ready ||
     !regimeInfo.indicators ||
@@ -351,20 +435,36 @@ export function analyzeMarket(candles: Candle[]) {
     candles.length < 2
   ) {
     return {
-      price: closes[closes.length - 1],
-      buy: false,
-      sell: false,
-      side: 'none' as 'long' | 'short' | 'none',
-      takeProfitPrice: null,
-      stopLossPrice: null,
-      positionSize: null,
-      quantity: null,
+      price,
+      ...NO_TRADE,
       regime: 'unknown' as MarketRegime,
+      cooldownCandlesLeft: state.cooldownCandlesLeft,
       indicators: { ready: false }
     };
   }
 
-  const price = last(closes);
+  // ── Фильтр 1: торговые часы 07:00–15:00 UTC (10:00–18:00 МСК) ──
+  if (!isWithinTradingHours(lastCandle.time)) {
+    return {
+      price,
+      ...NO_TRADE,
+      regime: regimeInfo.regime,
+      cooldownCandlesLeft: state.cooldownCandlesLeft,
+      indicators: { ready: true, skippedReason: 'outside_trading_hours' }
+    };
+  }
+
+  // ── Фильтр 2: кулдаун после стоп-лосса ──
+  if (state.cooldownCandlesLeft > 0) {
+    return {
+      price,
+      ...NO_TRADE,
+      regime: regimeInfo.regime,
+      cooldownCandlesLeft: state.cooldownCandlesLeft,
+      indicators: { ready: true, skippedReason: 'cooldown_active' }
+    };
+  }
+
   const prevPrice = prev(closes);
 
   const lastMacd = last(macd);
@@ -423,30 +523,45 @@ export function analyzeMarket(candles: Candle[]) {
     bodyPctOfRange >= 0.55 &&
     lastAtr >= prevAtr;
 
+  // ── trend_up ──
   if (regime === 'trend_up' && macdCrossUp && rsiBull && price > regimeIndicators.ema200) {
     side = 'long';
     buy = true;
 
-    stopLossPrice = price - lastAtr * atrMultipliers.stop;
+    stopLossPrice = getStructuralStop({
+      side,
+      highs,
+      lows,
+      price,
+      lastAtr,
+      atrStopMultiplier: atrMultipliers.stop
+    });
 
     const atrTarget = price + lastAtr * atrMultipliers.target;
     const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
-
     takeProfitPrice = Math.max(atrTarget, structureTarget ?? atrTarget);
   }
 
+  // ── trend_down ──
   if (regime === 'trend_down' && macdCrossDown && rsiBear && price < regimeIndicators.ema200) {
     side = 'short';
     sell = true;
 
-    stopLossPrice = price + lastAtr * atrMultipliers.stop;
+    stopLossPrice = getStructuralStop({
+      side,
+      highs,
+      lows,
+      price,
+      lastAtr,
+      atrStopMultiplier: atrMultipliers.stop
+    });
 
     const atrTarget = price - lastAtr * atrMultipliers.target;
     const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
-
     takeProfitPrice = Math.min(atrTarget, structureTarget ?? atrTarget);
   }
 
+  // ── range ──
   if (regime === 'range') {
     const longSetup = price <= lastBb.lower && lastRsi <= 30;
     const shortSetup = price >= lastBb.upper && lastRsi >= 70;
@@ -455,7 +570,14 @@ export function analyzeMarket(candles: Candle[]) {
       side = 'long';
       buy = true;
 
-      stopLossPrice = price - lastAtr * atrMultipliers.stop;
+      stopLossPrice = getStructuralStop({
+        side,
+        highs,
+        lows,
+        price,
+        lastAtr,
+        atrStopMultiplier: atrMultipliers.stop
+      });
 
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
       takeProfitPrice = Math.max(lastBb.middle, structureTarget ?? lastBb.middle);
@@ -463,47 +585,26 @@ export function analyzeMarket(candles: Candle[]) {
       side = 'short';
       sell = true;
 
-      stopLossPrice = price + lastAtr * atrMultipliers.stop;
+      stopLossPrice = getStructuralStop({
+        side,
+        highs,
+        lows,
+        price,
+        lastAtr,
+        atrStopMultiplier: atrMultipliers.stop
+      });
 
       const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
       takeProfitPrice = Math.min(lastBb.middle, structureTarget ?? lastBb.middle);
     }
   }
 
-  if (regime === 'breakout_watch') {
-    const breakoutUp =
-      bullishBreakClose &&
-      lastRsi > 56 &&
-      prevRsi <= 60;
+  // ── breakout_watch: ОТКЛЮЧЁН на 15m ──
+  // На 15-минутных свечах режим генерирует избыточный шум и ложные пробои.
+  // Включать только при переходе на 1h+.
+  // if (regime === 'breakout_watch') { ... }
 
-    const breakoutDown =
-      bearishBreakClose &&
-      lastRsi < 44 &&
-      prevRsi >= 40;
-
-    if (breakoutUp) {
-      side = 'long';
-      buy = true;
-
-      stopLossPrice = price - lastAtr * atrMultipliers.stop;
-
-      const atrTarget = price + lastAtr * atrMultipliers.target;
-      const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
-
-      takeProfitPrice = Math.max(atrTarget, structureTarget ?? atrTarget);
-    } else if (breakoutDown) {
-      side = 'short';
-      sell = true;
-
-      stopLossPrice = price + lastAtr * atrMultipliers.stop;
-
-      const atrTarget = price - lastAtr * atrMultipliers.target;
-      const structureTarget = getStructureTarget({ side, highs, lows, price, lastAtr });
-
-      takeProfitPrice = Math.min(atrTarget, structureTarget ?? atrTarget);
-    }
-  }
-
+  // ── high_volatility: нет сделок ──
   if (regime === 'high_volatility') {
     buy = false;
     sell = false;
@@ -512,12 +613,7 @@ export function analyzeMarket(candles: Candle[]) {
     stopLossPrice = null;
   }
 
-  takeProfitPrice = normalizeTakeProfit({
-    side,
-    price,
-    takeProfitPrice,
-    lastAtr
-  });
+  takeProfitPrice = normalizeTakeProfit({ side, price, takeProfitPrice, lastAtr });
 
   ({ stopLossPrice, takeProfitPrice } = validateExitLevels({
     side,
@@ -527,18 +623,11 @@ export function analyzeMarket(candles: Candle[]) {
     lastAtr
   }));
 
-  const netMoveCheck = expectedNetMove({
-    side,
-    price,
-    takeProfitPrice
-  });
+  const netMoveCheck = expectedNetMove({ side, price, takeProfitPrice });
 
   if (
     side !== 'none' &&
-    (
-      netMoveCheck.netMove <= 0 ||
-      netMoveCheck.netMoveRate < MIN_EXPECTED_NET_MOVE_RATE
-    )
+    (netMoveCheck.netMove <= 0 || netMoveCheck.netMoveRate < MIN_EXPECTED_NET_MOVE_RATE)
   ) {
     side = 'none';
     buy = false;
@@ -563,6 +652,14 @@ export function analyzeMarket(candles: Candle[]) {
     positionSize,
     quantity,
     regime,
+    /**
+     * Количество оставшихся свечей кулдауна.
+     * Бэктест должен передавать обновлённое значение обратно в следующий вызов:
+     *   - при stop_loss: state.cooldownCandlesLeft = LOSS_COOLDOWN_CANDLES
+     *   - каждая свеча без позиции: state.cooldownCandlesLeft = Math.max(0, prev - 1)
+     */
+    cooldownCandlesLeft: state.cooldownCandlesLeft,
+    lossCooldownCandles: LOSS_COOLDOWN_CANDLES,
     indicators: {
       macdCrossUp,
       macdCrossDown,
