@@ -2,12 +2,19 @@ export TINVEST_TOKEN=t.JEad0aPyZeL3vpVxMbMYWlHkkZKnt5TPIEqGgbv9z4Avxo_j45AYmw-xD
 
 Получение истории
 
-npm run download:candles -- BBG004730N88 SBER 21
-npm run download:candles -- BBG004730RP0 GAZP 21
-npm run download:candles -- BBG004731354 ROSN 21
-npm run download:candles -- BBG006L8G4H1 YNDX 21
-npm run download:candles -- BBG000R607Y3 IRKT 21
-npm run download:candles -- BBG004S683W7 AFLT 21
+npm run download:candles -- BBG004730N88 SBER 365
+npm run download:candles -- BBG004730RP0 GAZP 365
+npm run download:candles -- BBG004731354 ROSN 365
+npm run download:candles -- BBG000R607Y3 IRKT 365
+npm run download:candles -- BBG004S683W7 AFLT 365
+npm run download:candles -- BBG00A0ZZBC2 SOFL 365
+npm run download:candles -- BBG004S681W1 MTSS 365
+npm run download:candles -- BBG00B3M9V52 T 365
+npm run download:candles -- BBG00475KKY8 NVTK 365
+npm run download:candles -- BBG00B5XQZ97 SMLT 365
+npm run download:candles -- BBG00QZD8W85 OZON 365
+npm run download:candles -- BBG00QSZXH95 VKCO 365
+npm run download:candles -- BBG0041PHZD2 RUAL 365
 
 Запуск теста
 
