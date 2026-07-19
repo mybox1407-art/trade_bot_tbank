@@ -4,46 +4,48 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-export const MAX_RISK_PER_TRADE = 0.01; // 1% = 500 ₽ на сделку ВКЛЮЧАЯ комиссию
+export const MAX_RISK_PER_TRADE = 0.01;
 
-// ============================================================================
-// КОМИССИЯ — тариф «Трейдер» 0.05% (не Инвестор 0.3%!)
-// В runBacktest / strategyBacktest ДОЛЖНО быть то же значение:
-//   commissionRate: COMMISSION_RATE
-// ============================================================================
+// Тариф «Трейдер» 0.05%. В бэктесте: commissionRate: COMMISSION_RATE
 export const COMMISSION_RATE = 0.0005;
-export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2; // 0.1%
+export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 
 const MIN_NET_PROFIT_BUFFER_RATE = 0.0005;
-const MIN_EXPECTED_NET_MOVE_RATE = 0.003; // 0.3% чистого хода до TP
-const MIN_RISK_REWARD_RATIO = 2.0; // net RR после комиссии
-const MIN_STOP_DISTANCE_RATE = 0.004; // стоп ≥ 0.4% цены
-const MAX_STOP_DISTANCE_RATE = 0.02; // стоп ≤ 2%
-const MAX_POSITION_FRAC = 0.35; // не более 35% депозита в одной сделке
-// Комиссия не должна съедать больше 25% бюджета риска
-const MAX_COMMISSION_SHARE_OF_RISK = 0.25;
+const MIN_EXPECTED_NET_MOVE_RATE = 0.0035;
+const MIN_RISK_REWARD_RATIO = 2.0;
+const MIN_STOP_DISTANCE_RATE = 0.0045;
+const MAX_STOP_DISTANCE_RATE = 0.018;
+const MAX_POSITION_FRAC = 0.30;
+const MAX_COMMISSION_SHARE_OF_RISK = 0.22;
 
 // ============================================================================
 // РЕЖИМЫ
 // ============================================================================
-const MIN_ADX_TREND = 20;
-const BB_SQUEEZE_THRESHOLD = 0.055;
+const MIN_ADX_TREND = 22;
+const BB_SQUEEZE_THRESHOLD = 0.05;
 
-// range на 15m — выключен (mean-reversion + комиссия = яд)
 const ENABLE_RANGE_ENTRIES = false;
 const ENABLE_BREAKOUT_ENTRIES = true;
 
-const STRUCTURE_LOOKBACK = 14;
-const STOP_STRUCTURE_LOOKBACK = 8;
-const BREAKOUT_LOOKBACK = 16;
+const STRUCTURE_LOOKBACK = 16;
+const STOP_STRUCTURE_LOOKBACK = 10;
+const BREAKOUT_LOOKBACK = 20;
+const SWING_LOOKBACK = 8;
 
-// 10:00–18:00 МСК = 07:00–15:00 UTC
+// 10:30–17:30 МСК ≈ 07:30–14:30 UTC — режем открытие/закрытие
 const TRADING_HOUR_UTC_FROM = 7;
-const TRADING_HOUR_UTC_TO = 15;
+const TRADING_MINUTE_FROM = 30;
+const TRADING_HOUR_UTC_TO = 14;
+const TRADING_MINUTE_TO = 30;
 
-const VOLUME_SPIKE_MULTIPLIER = 1.3;
-const BREAKOUT_MIN_ATR_DISPLACEMENT = 0.5;
-const BREAKOUT_MIN_BODY_PCT = 0.55;
+const VOLUME_SPIKE_MULTIPLIER = 1.35;
+const BREAKOUT_MIN_ATR_DISPLACEMENT = 0.55;
+const BREAKOUT_MIN_BODY_PCT = 0.6;
+
+// Тренд: не входим если свеча уже улетела от EMA20
+const MAX_EXTENSION_FROM_EMA20 = 0.008; // 0.8%
+// Минимальный отступ стопа за свинг в долях ATR
+const STOP_SWING_PAD_ATR = 0.15;
 
 const MIN_QUANTITY = 1;
 
@@ -95,17 +97,20 @@ function getVolumeSpike(volumes: number[], avgVol20: number): boolean {
   return avgVol20 > 0 && v >= avgVol20 * VOLUME_SPIKE_MULTIPLIER;
 }
 
-/**
- * Множители ATR.
- * target/stop задаёт ГРУБЫЙ RR до комиссии; финальный net RR режется фильтром.
- */
 function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
   const highVol = atrPct > 0.015;
 
   if (regime === 'trend_up' || regime === 'trend_down') {
     return {
-      stop: highVol ? 1.6 : 1.4,
-      target: highVol ? 4.0 : 3.5 // ~2.5R до комиссии
+      stop: highVol ? 1.5 : 1.35,
+      target: highVol ? 4.2 : 3.8
+    };
+  }
+
+  if (regime === 'breakout_watch') {
+    return {
+      stop: highVol ? 1.4 : 1.25,
+      target: highVol ? 4.5 : 4.0
     };
   }
 
@@ -113,19 +118,16 @@ function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
     return { stop: 1.0, target: 2.2 };
   }
 
-  if (regime === 'breakout_watch') {
-    return {
-      stop: highVol ? 1.5 : 1.3,
-      target: highVol ? 4.2 : 3.8
-    };
-  }
-
   return { stop: 0, target: 0 };
 }
 
+/** Торговое окно 10:30–17:30 МСК */
 function isTradingHour(timestamp: number): boolean {
-  const hourUtc = new Date(timestamp).getUTCHours();
-  return hourUtc >= TRADING_HOUR_UTC_FROM && hourUtc < TRADING_HOUR_UTC_TO;
+  const d = new Date(timestamp);
+  const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const from = TRADING_HOUR_UTC_FROM * 60 + TRADING_MINUTE_FROM;
+  const to = TRADING_HOUR_UTC_TO * 60 + TRADING_MINUTE_TO;
+  return minutes >= from && minutes < to;
 }
 
 function expectedNetMove(params: {
@@ -144,18 +146,9 @@ function expectedNetMove(params: {
   const commissionCost = price * ROUND_TRIP_COMMISSION_RATE;
   const netMove = grossMove - commissionCost;
 
-  return {
-    grossMove,
-    netMove,
-    netMoveRate: netMove / price
-  };
+  return { grossMove, netMove, netMoveRate: netMove / price };
 }
 
-/**
- * Net RR с учётом round-trip комиссии на акцию.
- * riskNet  = stopDist + price * rtComm
- * rewardNet = tpDist  - price * rtComm
- */
 function getNetRiskReward(params: {
   side: 'long' | 'short' | 'none';
   price: number;
@@ -179,13 +172,32 @@ function getNetRiskReward(params: {
     return { risk, reward, ratio: 0, stopDist, tpDist, commPerShare };
   }
 
+  return { risk, reward, ratio: reward / risk, stopDist, tpDist, commPerShare };
+}
+
+/** Простая оценка структуры: higher lows / lower highs */
+function getSwingStructure(params: {
+  highs: number[];
+  lows: number[];
+  lookback?: number;
+}) {
+  const lookback = params.lookback ?? SWING_LOOKBACK;
+  const highs = params.highs.slice(-lookback);
+  const lows = params.lows.slice(-lookback);
+  const mid = Math.floor(highs.length / 2);
+
+  const firstHigh = Math.max(...highs.slice(0, mid));
+  const secondHigh = Math.max(...highs.slice(mid));
+  const firstLow = Math.min(...lows.slice(0, mid));
+  const secondLow = Math.min(...lows.slice(mid));
+
   return {
-    risk,
-    reward,
-    ratio: reward / risk,
-    stopDist,
-    tpDist,
-    commPerShare
+    higherHighs: secondHigh > firstHigh,
+    higherLows: secondLow > firstLow,
+    lowerHighs: secondHigh < firstHigh,
+    lowerLows: secondLow < firstLow,
+    bullishStructure: secondLow > firstLow && secondHigh >= firstHigh * 0.998,
+    bearishStructure: secondHigh < firstHigh && secondLow <= firstLow * 1.002
   };
 }
 
@@ -202,16 +214,16 @@ function getStructureTarget(params: {
 
   const recentHigh = Math.max(...highs.slice(-STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STRUCTURE_LOOKBACK));
-  const atrFloor = lastAtr * Math.max(atrTargetMultiplier, 2.5);
+  const atrFloor = lastAtr * Math.max(atrTargetMultiplier, 3.2);
 
   if (side === 'long') {
     const structure =
-      recentHigh > price + lastAtr * 0.8 ? recentHigh : price + atrFloor;
+      recentHigh > price + lastAtr * 1.0 ? recentHigh : price + atrFloor;
     return Math.max(structure, price + atrFloor);
   }
 
   const structure =
-    recentLow < price - lastAtr * 0.8 ? recentLow : price - atrFloor;
+    recentLow < price - lastAtr * 1.0 ? recentLow : price - atrFloor;
   return Math.min(structure, price - atrFloor);
 }
 
@@ -228,22 +240,24 @@ function getStructureStop(params: {
 
   const recentHigh = Math.max(...highs.slice(-STOP_STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STOP_STRUCTURE_LOOKBACK));
+  const pad = lastAtr * STOP_SWING_PAD_ATR;
 
   const minStopDist = Math.max(
     lastAtr * atrStopMultiplier,
     price * MIN_STOP_DISTANCE_RATE
   );
-  const maxStopDist = Math.min(lastAtr * 2.5, price * MAX_STOP_DISTANCE_RATE);
+  const maxStopDist = Math.min(lastAtr * 2.4, price * MAX_STOP_DISTANCE_RATE);
 
   if (side === 'long') {
-    let stop = Math.min(recentLow, price - minStopDist);
+    // Стоп под свинг low с небольшим запасом
+    let stop = recentLow - pad;
     if (price - stop < minStopDist) stop = price - minStopDist;
     if (price - stop > maxStopDist) stop = price - maxStopDist;
     if (stop >= price) stop = price - minStopDist;
     return stop;
   }
 
-  let stop = Math.max(recentHigh, price + minStopDist);
+  let stop = recentHigh + pad;
   if (stop - price < minStopDist) stop = price + minStopDist;
   if (stop - price > maxStopDist) stop = price + maxStopDist;
   if (stop <= price) stop = price + minStopDist;
@@ -285,12 +299,10 @@ function validateExitLevels(params: {
   const { side, price, lastAtr } = params;
   let { stopLossPrice, takeProfitPrice } = params;
 
-  const fallbackStop = Math.max(lastAtr * 1.4, price * MIN_STOP_DISTANCE_RATE);
-  // TP минимум: покрыть комиссию + buffer + 2 * min stop (чтобы RR≈2)
+  const fallbackStop = Math.max(lastAtr * 1.35, price * MIN_STOP_DISTANCE_RATE);
   const fallbackTake = Math.max(
-    lastAtr * 3.5,
-    price * (ROUND_TRIP_COMMISSION_RATE + MIN_NET_PROFIT_BUFFER_RATE) +
-      2 * fallbackStop
+    lastAtr * 3.8,
+    2.2 * fallbackStop + price * ROUND_TRIP_COMMISSION_RATE * 3
   );
 
   if (side === 'long') {
@@ -327,33 +339,22 @@ function normalizeTakeProfit(params: {
   }
 
   const stopDist =
-    stopLossPrice != null
-      ? Math.abs(price - stopLossPrice)
-      : lastAtr * 1.4;
+    stopLossPrice != null ? Math.abs(price - stopLossPrice) : lastAtr * 1.35;
 
+  // tpDist >= RR*(stop+comm) + comm
   const minByRR =
     stopDist * MIN_RISK_REWARD_RATIO +
     price * ROUND_TRIP_COMMISSION_RATE * (1 + MIN_RISK_REWARD_RATIO);
-  // reward - comm >= RR * (stop + comm)
-  // tpDist >= RR*(stop+comm) + comm
-
-  const minByAtr = lastAtr * 2.5;
+  const minByAtr = lastAtr * 3.2;
   const minByComm =
-    price * (ROUND_TRIP_COMMISSION_RATE + MIN_NET_PROFIT_BUFFER_RATE + MIN_EXPECTED_NET_MOVE_RATE);
+    price *
+    (ROUND_TRIP_COMMISSION_RATE + MIN_NET_PROFIT_BUFFER_RATE + MIN_EXPECTED_NET_MOVE_RATE);
   const minDist = Math.max(minByRR, minByAtr, minByComm);
 
   if (side === 'long') return Math.max(takeProfitPrice, price + minDist);
   return Math.min(takeProfitPrice, price - minDist);
 }
 
-/**
- * Размер позиции:
- * qty = riskCapital / (stopDist + price * roundTripComm)
- *
- * Тогда убыток на SL ≈ riskCapital (цена + комиссия).
- * Без этого при узком стопе qty взлетает, notional = весь депозит,
- * комиссия > риска — как в твоём последнем прогоне.
- */
 function calcPositionSize(params: {
   price: number;
   stopLossPrice: number;
@@ -368,9 +369,8 @@ function calcPositionSize(params: {
 
   const commPerShare = price * ROUND_TRIP_COMMISSION_RATE;
   const riskPerShare = stopDist + commPerShare;
-
-  // Доля комиссии в бюджете риска
   const commShare = commPerShare / riskPerShare;
+
   if (commShare > MAX_COMMISSION_SHARE_OF_RISK) {
     return {
       quantity: null,
@@ -380,7 +380,6 @@ function calcPositionSize(params: {
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
-
   const maxQtyByFrac = Math.floor((balance * MAX_POSITION_FRAC) / price);
   quantity = Math.min(quantity, maxQtyByFrac);
 
@@ -414,7 +413,7 @@ export function detectMarketRegime(candles: Candle[]) {
 
   if (
     atr.length < 2 ||
-    adx.length < 2 ||
+    adx.length < 3 ||
     ema20.length < 1 ||
     ema50.length < 1 ||
     ema200.length < 1 ||
@@ -431,6 +430,7 @@ export function detectMarketRegime(candles: Candle[]) {
   const lastAtr = last(atr);
   const lastAdx = last(adx);
   const prevAdx = prev(adx);
+  const prev2Adx = adx[adx.length - 3];
   const lastEma20 = last(ema20);
   const lastEma50 = last(ema50);
   const lastEma200 = last(ema200);
@@ -438,34 +438,30 @@ export function detectMarketRegime(candles: Candle[]) {
 
   const avgVol20 = mean(volumes.slice(-20));
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
-  const adxRising = lastAdx.adx > prevAdx.adx;
+  // ADX растёт хотя бы 2 бара или уже сильный
+  const adxRising =
+    lastAdx.adx > prevAdx.adx && prevAdx.adx >= prev2Adx.adx * 0.98;
   const atrPct = lastAtr / lastClose;
   const compression = bbWidth <= BB_SQUEEZE_THRESHOLD;
 
-  const strongAdx = lastAdx.adx >= 25;
-  const adxOk = lastAdx.adx >= MIN_ADX_TREND && (adxRising || strongAdx);
+  const adxOk =
+    lastAdx.adx >= MIN_ADX_TREND && (adxRising || lastAdx.adx >= 28);
 
-  const trendUp =
-    lastClose > lastEma200 &&
-    lastEma20 > lastEma50 &&
-    lastEma50 > lastEma200 * 0.98 &&
-    adxOk;
+  const emaStackUp = lastEma20 > lastEma50 && lastEma50 > lastEma200;
+  const emaStackDown = lastEma20 < lastEma50 && lastEma50 < lastEma200;
 
-  const trendDown =
-    lastClose < lastEma200 &&
-    lastEma20 < lastEma50 &&
-    lastEma50 < lastEma200 * 1.02 &&
-    adxOk;
+  const trendUp = lastClose > lastEma200 && emaStackUp && adxOk;
+  const trendDown = lastClose < lastEma200 && emaStackDown && adxOk;
 
-  const range = lastAdx.adx < 18 && bbWidth < 0.09;
+  const range = lastAdx.adx < 18 && bbWidth < 0.085;
 
   const breakoutWatch =
     compression &&
-    lastAdx.adx >= 14 &&
-    lastAdx.adx <= 30 &&
+    lastAdx.adx >= 15 &&
+    lastAdx.adx <= 28 &&
     getVolumeSpike(volumes, avgVol20);
 
-  const highVolatility = atrPct > 0.028 || bbWidth > 0.13;
+  const highVolatility = atrPct > 0.025 || bbWidth > 0.12;
 
   let regime: MarketRegime = 'unknown';
   if (highVolatility) regime = 'high_volatility';
@@ -531,23 +527,23 @@ export function analyzeMarket(candles: Candle[]) {
     !regimeInfo.ready ||
     !regimeInfo.indicators ||
     macd.length < 3 ||
-    rsi.length < 2 ||
+    rsi.length < 3 ||
     atr.length < 2 ||
     bb.length < 2 ||
-    candles.length < 3
+    candles.length < 30
   ) {
     return empty;
   }
 
   const price = last(closes);
   const prevPrice = prev(closes);
-  const prev2Price = closes[closes.length - 3];
 
   const lastMacd = last(macd);
   const prevMacd = prev(macd);
 
   const lastRsi = last(rsi);
   const prevRsi = prev(rsi);
+  const prev2Rsi = rsi[rsi.length - 3];
 
   const lastAtr = last(atr);
   const prevAtr = prev(atr);
@@ -562,11 +558,7 @@ export function analyzeMarket(candles: Candle[]) {
   const regimeIndicators = regimeInfo.indicators;
   const regime = regimeInfo.regime;
   const atrMultipliers = getAtrMultipliers(regime, regimeIndicators.atrPct);
-
-  const macdCrossUp =
-    prevMacd.MACD! < prevMacd.signal! && lastMacd.MACD! > lastMacd.signal!;
-  const macdCrossDown =
-    prevMacd.MACD! > prevMacd.signal! && lastMacd.MACD! < lastMacd.signal!;
+  const swing = getSwingStructure({ highs, lows });
 
   const macdBull =
     lastMacd.MACD! > lastMacd.signal! &&
@@ -575,38 +567,98 @@ export function analyzeMarket(candles: Candle[]) {
     lastMacd.MACD! < lastMacd.signal! &&
     (lastMacd.histogram ?? 0) < (prevMacd.histogram ?? 0);
 
-  // --- Pullback в тренде (не ловим хай/лоу) ---
-  // long: цена касалась зоны EMA20..EMA50 и закрылась выше EMA20, MACD+
-  const distEma20 = (price - regimeIndicators.ema20) / price;
-  const touchedEmaZoneLong =
-    lastLow <= regimeIndicators.ema20 * 1.002 ||
-    lastLow <= regimeIndicators.ema50 * 1.005 ||
-    prevPrice <= regimeIndicators.ema20 * 1.005;
-  const pullbackLong =
-    touchedEmaZoneLong &&
-    price > regimeIndicators.ema20 &&
+  const macdCrossUp =
+    prevMacd.MACD! < prevMacd.signal! && lastMacd.MACD! > lastMacd.signal!;
+  const macdCrossDown =
+    prevMacd.MACD! > prevMacd.signal! && lastMacd.MACD! < lastMacd.signal!;
+
+  // --- Качественный pullback (единственный вход в тренд) ---
+  const ema20 = regimeIndicators.ema20;
+  const ema50 = regimeIndicators.ema50;
+  const extension = (price - ema20) / price;
+
+  // Касание зоны EMA20–EMA50 на текущей или предыдущей свече
+  const touchedPullbackZoneLong =
+    lastLow <= ema20 * 1.003 ||
+    lastLow <= ema50 * 1.006 ||
+    prevPrice <= ema20 * 1.004;
+
+  const touchedPullbackZoneShort =
+    lastHigh >= ema20 * 0.997 ||
+    lastHigh >= ema50 * 0.994 ||
+    prevPrice >= ema20 * 0.996;
+
+  // Свеча разворота: закрытие в верхней/нижней половине, тело не доджи
+  const candleRange = Math.max(lastHigh - lastLow, 1e-9);
+  const bodyPctOfRange = Math.abs(price - lastOpen) / candleRange;
+  const closeLocation = (price - lastLow) / candleRange; // 1 = close на high
+
+  const bullishReversalCandle =
     price > lastOpen &&
-    distEma20 < 0.012 && // не далеко от EMA20 (не погоня)
-    macdBull &&
-    lastRsi > 42 &&
-    lastRsi < 68;
+    bodyPctOfRange >= 0.45 &&
+    closeLocation >= 0.6;
 
-  const touchedEmaZoneShort =
-    lastHigh >= regimeIndicators.ema20 * 0.998 ||
-    lastHigh >= regimeIndicators.ema50 * 0.995 ||
-    prevPrice >= regimeIndicators.ema20 * 0.995;
-  const pullbackShort =
-    touchedEmaZoneShort &&
-    price < regimeIndicators.ema20 &&
+  const bearishReversalCandle =
     price < lastOpen &&
-    distEma20 > -0.012 &&
-    macdBear &&
-    lastRsi < 58 &&
-    lastRsi > 32;
+    bodyPctOfRange >= 0.45 &&
+    closeLocation <= 0.4;
 
-  // Альтернатива: свежий MACD cross в сторону тренда
-  const trendLongSignal = pullbackLong || (macdCrossUp && lastRsi > 45 && lastRsi < 70);
-  const trendShortSignal = pullbackShort || (macdCrossDown && lastRsi < 55 && lastRsi > 30);
+  // RSI: был откат и разворачивается (не вход на перегреве)
+  const rsiResetLong =
+    lastRsi > 40 &&
+    lastRsi < 62 &&
+    (prevRsi < lastRsi || prev2Rsi < lastRsi) &&
+    prevRsi < 58;
+
+  const rsiResetShort =
+    lastRsi < 60 &&
+    lastRsi > 38 &&
+    (prevRsi > lastRsi || prev2Rsi > lastRsi) &&
+    prevRsi > 42;
+
+  // Не гонимся за ценой далеко от EMA20
+  const notExtendedLong = extension >= -0.002 && extension <= MAX_EXTENSION_FROM_EMA20;
+  const notExtendedShort = extension <= 0.002 && extension >= -MAX_EXTENSION_FROM_EMA20;
+
+  const pullbackLong =
+    touchedPullbackZoneLong &&
+    bullishReversalCandle &&
+    price > ema20 &&
+    macdBull &&
+    rsiResetLong &&
+    notExtendedLong &&
+    swing.bullishStructure &&
+    regimeIndicators.adxRising;
+
+  const pullbackShort =
+    touchedPullbackZoneShort &&
+    bearishReversalCandle &&
+    price < ema20 &&
+    macdBear &&
+    rsiResetShort &&
+    notExtendedShort &&
+    swing.bearishStructure &&
+    regimeIndicators.adxRising;
+
+  // Запасной вход: только свежий MACD cross + не extended + структура
+  const crossLong =
+    macdCrossUp &&
+    rsiResetLong &&
+    notExtendedLong &&
+    price > ema20 &&
+    swing.higherLows &&
+    bodyPctOfRange >= 0.4;
+
+  const crossShort =
+    macdCrossDown &&
+    rsiResetShort &&
+    notExtendedShort &&
+    price < ema20 &&
+    swing.lowerHighs &&
+    bodyPctOfRange >= 0.4;
+
+  const trendLongSignal = pullbackLong || crossLong;
+  const trendShortSignal = pullbackShort || crossShort;
 
   const riskCapital = STARTING_BALANCE * MAX_RISK_PER_TRADE;
 
@@ -617,10 +669,6 @@ export function analyzeMarket(candles: Candle[]) {
   let stopLossPrice: number | null = null;
   let positionSize: number | null = null;
   let quantity: number | null = null;
-
-  const candleBody = Math.abs(price - lastOpen);
-  const candleRange = Math.max(lastHigh - lastLow, 1e-9);
-  const bodyPctOfRange = candleBody / candleRange;
 
   const longBreakoutDisplacement = getBreakoutDisplacement({
     side: 'long',
@@ -638,49 +686,49 @@ export function analyzeMarket(candles: Candle[]) {
   const shortStructureBreak = getStructureBreak({ side: 'short', highs, lows, price });
   const volumeSpike = getVolumeSpike(volumes, regimeIndicators.avgVol20);
 
+  // Объём текущей свечи не слабее предыдущей (подтверждение)
+  const volOk = volumes[volumes.length - 1] >= volumes[volumes.length - 2] * 0.9;
+
   const bullishBreakClose =
     prevPrice <= prevBb.upper &&
     price > lastBb.upper &&
-    price > lastOpen &&
+    bullishReversalCandle &&
     bodyPctOfRange >= BREAKOUT_MIN_BODY_PCT &&
-    lastAtr >= prevAtr * 0.95 &&
+    lastAtr >= prevAtr &&
     longBreakoutDisplacement.distanceAtr >= BREAKOUT_MIN_ATR_DISPLACEMENT &&
     longStructureBreak.broken &&
-    volumeSpike;
+    volumeSpike &&
+    volOk;
 
   const bearishBreakClose =
     prevPrice >= prevBb.lower &&
     price < lastBb.lower &&
-    price < lastOpen &&
+    bearishReversalCandle &&
     bodyPctOfRange >= BREAKOUT_MIN_BODY_PCT &&
-    lastAtr >= prevAtr * 0.95 &&
+    lastAtr >= prevAtr &&
     shortBreakoutDisplacement.distanceAtr >= BREAKOUT_MIN_ATR_DISPLACEMENT &&
     shortStructureBreak.broken &&
-    volumeSpike;
+    volumeSpike &&
+    volOk;
 
   const baseIndicators = {
     macdCrossUp,
     macdCrossDown,
-    trendLongSignal,
-    trendShortSignal,
     pullbackLong,
     pullbackShort,
+    crossLong,
+    crossShort,
+    trendLongSignal,
+    trendShortSignal,
     lastRsi,
     prevRsi,
     lastAtr,
-    prevAtr,
-    bbUpper: lastBb.upper,
-    bbMiddle: lastBb.middle,
-    bbLower: lastBb.lower,
+    swing,
     bodyPctOfRange,
+    extension,
     bullishBreakClose,
     bearishBreakClose,
     volumeSpike,
-    longBreakoutDisplacement,
-    shortBreakoutDisplacement,
-    longStructureBreak,
-    shortStructureBreak,
-    regimeReady: true,
     regimeIndicators,
     commissionRate: COMMISSION_RATE
   };
@@ -727,7 +775,7 @@ export function analyzeMarket(candles: Candle[]) {
     };
   }
 
-  // ========== TREND UP — pullback / MACD cross ==========
+  // ========== TREND UP ==========
   if (regime === 'trend_up' && trendLongSignal && price > regimeIndicators.ema200) {
     side = 'long';
     buy = true;
@@ -779,30 +827,21 @@ export function analyzeMarket(candles: Candle[]) {
     takeProfitPrice = Math.min(atrTarget, structureTarget ?? atrTarget);
   }
 
-  // ========== RANGE — выключен ==========
-  if (ENABLE_RANGE_ENTRIES && regime === 'range' && side === 'none') {
-    const longReversal = price <= lastBb.lower && lastRsi <= 32 && lastRsi > prevRsi;
-    const shortReversal = price >= lastBb.upper && lastRsi >= 68 && lastRsi < prevRsi;
-
-    if (longReversal) {
-      side = 'long';
-      buy = true;
-      stopLossPrice = price - Math.max(lastAtr * atrMultipliers.stop, price * MIN_STOP_DISTANCE_RATE);
-      takeProfitPrice = Math.max(lastBb.middle, price + lastAtr * atrMultipliers.target);
-    } else if (shortReversal) {
-      side = 'short';
-      sell = true;
-      stopLossPrice = price + Math.max(lastAtr * atrMultipliers.stop, price * MIN_STOP_DISTANCE_RATE);
-      takeProfitPrice = Math.min(lastBb.middle, price - lastAtr * atrMultipliers.target);
-    }
-  }
-
   // ========== BREAKOUT ==========
   if (ENABLE_BREAKOUT_ENTRIES && regime === 'breakout_watch' && side === 'none') {
     const breakoutUp =
-      bullishBreakClose && lastRsi > 52 && lastRsi < 75 && price > regimeIndicators.ema20;
+      bullishBreakClose &&
+      lastRsi > 55 &&
+      lastRsi < 72 &&
+      price > regimeIndicators.ema20 &&
+      macdBull;
+
     const breakoutDown =
-      bearishBreakClose && lastRsi < 48 && lastRsi > 25 && price < regimeIndicators.ema20;
+      bearishBreakClose &&
+      lastRsi < 45 &&
+      lastRsi > 28 &&
+      price < regimeIndicators.ema20 &&
+      macdBear;
 
     if (breakoutUp) {
       side = 'long';
@@ -849,6 +888,9 @@ export function analyzeMarket(candles: Candle[]) {
     }
   }
 
+  // range выключен
+  void ENABLE_RANGE_ENTRIES;
+
   ({ stopLossPrice, takeProfitPrice } = validateExitLevels({
     side,
     price,
@@ -868,7 +910,6 @@ export function analyzeMarket(candles: Candle[]) {
   const netMoveCheck = expectedNetMove({ side, price, takeProfitPrice });
   const netRR = getNetRiskReward({ side, price, stopLossPrice, takeProfitPrice });
 
-  // Жёсткий фильтр: net RR и минимальный ход
   if (
     side !== 'none' &&
     (netMoveCheck.netMoveRate < MIN_EXPECTED_NET_MOVE_RATE ||
@@ -883,7 +924,6 @@ export function analyzeMarket(candles: Candle[]) {
     stopLossPrice = null;
   }
 
-  // --- Сайзинг с комиссией ---
   if (side !== 'none' && stopLossPrice != null) {
     const sized = calcPositionSize({
       price,
