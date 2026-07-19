@@ -15,6 +15,27 @@ const DEFAULT_COOLDOWN_CANDLES = 6;
  */
 const PROGRESS_LOG_EVERY = 5000;
 
+/** ANSI-цвета для терминала */
+const ANSI = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  green: '\x1b[32m',
+  red: '\x1b[31m',
+  yellow: '\x1b[33m',
+  cyan: '\x1b[36m',
+  dim: '\x1b[2m'
+} as const;
+
+/**
+ * Окраска строки. Если stdout не TTY — без escape-кодов.
+ */
+function colorize(text: string, color: keyof typeof ANSI): string {
+  if (!process.stdout.isTTY) {
+    return text;
+  }
+  return `${ANSI[color]}${text}${ANSI.reset}`;
+}
+
 /**
  * Преобразование значения в число.
  */
@@ -133,8 +154,6 @@ function formatDuration(seconds: number): string {
 
 /**
  * Оценка времени выполнения бэктеста по числу свечей.
- * Это грубая эвристика, чтобы пользователь видел,
- * что процесс не завис и примерно сколько можно ждать.
  */
 function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: number } {
   if (candlesCount <= 5000) {
@@ -157,29 +176,41 @@ function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: n
 }
 
 /**
- * Печать итоговой статистики.
+ * Печать итоговой статистики (с цветом net profit / return).
  */
 function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   const s = result.summary;
 
+  const netColor = s.netProfit > 0 ? 'green' : s.netProfit < 0 ? 'red' : 'yellow';
+  const retColor = s.returnPct > 0 ? 'green' : s.returnPct < 0 ? 'red' : 'yellow';
+  const pfColor =
+    s.profitFactor >= 1.2 ? 'green' : s.profitFactor >= 1 ? 'yellow' : 'red';
+
   console.log('\n========== ИТОГИ БЭКТЕСТА ==========');
   console.log(`Инструмент:            ${s.symbol}`);
   console.log(`Сделок:                ${s.tradesCount}`);
-  console.log(`Побед:                 ${s.wins}`);
-  console.log(`Поражений:             ${s.losses}`);
+  console.log(`Побед:                 ${colorize(String(s.wins), 'green')}`);
+  console.log(`Поражений:             ${colorize(String(s.losses), 'red')}`);
   console.log(`Win rate:              ${formatNumber(s.winRate * 100, 2)}%`);
-  console.log(`Gross profit:          ${formatNumber(s.grossProfit, 2)}`);
-  console.log(`Gross loss:            ${formatNumber(s.grossLoss, 2)}`);
-  console.log(`Net profit:            ${formatNumber(s.netProfit, 2)}`);
-  console.log(`Avg net pnl:           ${formatNumber(s.avgNetPnl, 2)}`);
-  console.log(`Avg win:               ${formatNumber(s.avgWin, 2)}`);
-  console.log(`Avg loss:              ${formatNumber(s.avgLoss, 2)}`);
+  console.log(`Gross profit:          ${colorize(formatNumber(s.grossProfit, 2), 'green')}`);
+  console.log(`Gross loss:            ${colorize(formatNumber(s.grossLoss, 2), 'red')}`);
   console.log(
-    `Profit factor:         ${Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity'}`
+    `Net profit:            ${colorize(formatNumber(s.netProfit, 2), netColor)}`
+  );
+  console.log(`Avg net pnl:           ${formatNumber(s.avgNetPnl, 2)}`);
+  console.log(`Avg win:               ${colorize(formatNumber(s.avgWin, 2), 'green')}`);
+  console.log(`Avg loss:              ${colorize(formatNumber(s.avgLoss, 2), 'red')}`);
+  console.log(
+    `Profit factor:         ${colorize(
+      Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity',
+      pfColor
+    )}`
   );
   console.log(`Стартовый баланс:      ${formatNumber(s.startBalance, 2)}`);
   console.log(`Финальный баланс:      ${formatNumber(s.endBalance, 2)}`);
-  console.log(`Доходность:            ${formatNumber(s.returnPct * 100, 2)}%`);
+  console.log(
+    `Доходность:            ${colorize(formatNumber(s.returnPct * 100, 2) + '%', retColor)}`
+  );
   console.log(`Макс. просадка:        ${formatNumber(s.maxDrawdownAbs, 2)}`);
   console.log(`Макс. просадка %:      ${formatNumber(s.maxDrawdownPct * 100, 2)}%`);
 }
@@ -188,11 +219,12 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
  * Печать сделок.
  * Без limit — все сделки.
  * С limit — только последние N.
+ *
+ * Прибыльные — зелёные, убыточные — красные, BE (~0) — жёлтые.
  */
 function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: number) {
   const all = result.trades;
-  const trades =
-    limit != null && limit > 0 ? all.slice(-limit) : all;
+  const trades = limit != null && limit > 0 ? all.slice(-limit) : all;
 
   const title =
     limit != null && limit > 0 && limit < all.length
@@ -213,24 +245,31 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
         ? all.length - trades.length + i + 1
         : i + 1;
 
-    console.log(
-      [
-        `#${num}`,
-        `Открыта: ${formatDate(trade.openedAt)}`,
-        `Закрыта: ${formatDate(trade.closedAt)}`,
-        `Сторона: ${trade.side}`,
-        `Режим: ${trade.regime}`,
-        `Вход: ${formatNumber(trade.entryPrice, 4)}`,
-        `Выход: ${formatNumber(trade.exitPrice, 4)}`,
-        `SL: ${formatNumber(trade.stopLossPrice, 4)}`,
-        `TP: ${formatNumber(trade.takeProfitPrice, 4)}`,
-        `Qty: ${formatNumber(trade.quantity, 0)}`,
-        `Причина: ${trade.closeReason}`,
-        `Net PnL: ${formatNumber(trade.netPnl, 2)}`,
-        `Комиссия: ${formatNumber(trade.totalCommission, 2)}`,
-        `Bars: ${trade.barsHeld}`
-      ].join(' | ')
-    );
+    const line = [
+      `#${num}`,
+      `Открыта: ${formatDate(trade.openedAt)}`,
+      `Закрыта: ${formatDate(trade.closedAt)}`,
+      `Сторона: ${trade.side}`,
+      `Режим: ${trade.regime}`,
+      `Вход: ${formatNumber(trade.entryPrice, 4)}`,
+      `Выход: ${formatNumber(trade.exitPrice, 4)}`,
+      `SL: ${formatNumber(trade.stopLossPrice, 4)}`,
+      `TP: ${formatNumber(trade.takeProfitPrice, 4)}`,
+      `Qty: ${formatNumber(trade.quantity, 0)}`,
+      `Причина: ${trade.closeReason}`,
+      `Net PnL: ${formatNumber(trade.netPnl, 2)}`,
+      `Комиссия: ${formatNumber(trade.totalCommission, 2)}`,
+      `Bars: ${trade.barsHeld}`
+    ].join(' | ');
+
+    // > 0 — win (зелёный), < 0 — loss (красный), ≈0 — BE (жёлтый)
+    if (trade.netPnl > 0) {
+      console.log(colorize(line, 'green'));
+    } else if (trade.netPnl < 0) {
+      console.log(colorize(line, 'red'));
+    } else {
+      console.log(colorize(line, 'yellow'));
+    }
   }
 }
 
@@ -310,11 +349,9 @@ function main() {
     `Оценка времени:        ~ ${formatDuration(estimated.minSec)} - ${formatDuration(estimated.maxSec)}`
   );
   console.log(`Лог прогресса:         каждые ${PROGRESS_LOG_EVERY} свечей`);
+  console.log(`Breakeven после:       1.0 R`);
+  console.log(`Trail после BE:        1.2 R`);
 
-  /**
-   * Простой heartbeat в консоль.
-   * Нужен только чтобы пользователь видел, что процесс жив.
-   */
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
     const elapsedSec = (Date.now() - startedAt) / 1000;
@@ -338,7 +375,11 @@ function main() {
       onePositionAtTime: true,
       conservativeIntrabarExecution: true,
       cooldownCandles,
-      progressLogEvery: PROGRESS_LOG_EVERY
+      progressLogEvery: PROGRESS_LOG_EVERY,
+      // После 1R в плюс — стоп в BE
+      moveToBreakevenR: 1.0,
+      // Затем трейл 1.2R от экстремума (0 = только BE)
+      trailAfterBreakevenR: 1.2
     });
   } finally {
     clearInterval(heartbeat);
@@ -350,7 +391,6 @@ function main() {
   console.log(`Фактическое время:     ${formatDuration(totalElapsedSec)}`);
 
   printSummary(result);
-  // Все сделки + SL / TP / Qty / Bars
   printTrades(result);
 }
 
