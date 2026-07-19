@@ -39,6 +39,13 @@ export interface BacktestOptions {
    * Пока пауза активна, новые входы запрещены.
    */
   cooldownCandles?: number;
+
+  /**
+   * Как часто печатать прогресс в консоль.
+   * Например 5000 = лог каждые 5000 свечей.
+   * 0 или отрицательное значение отключает лог прогресса.
+   */
+  progressLogEvery?: number;
 }
 
 /**
@@ -146,6 +153,31 @@ function toNumber(value: unknown, fallback = 0): number {
 function round(value: number, digits = 8): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+/**
+ * Форматирование продолжительности для логов прогресса.
+ */
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return 'неизвестно';
+  }
+
+  if (seconds < 60) {
+    return `${Math.round(seconds)} сек`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+
+  if (minutes < 60) {
+    return `${minutes} мин ${secs} сек`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+
+  return `${hours} ч ${mins} мин`;
 }
 
 /**
@@ -433,7 +465,8 @@ export function runStrategyBacktest(
     warmupCandles: options.warmupCandles ?? 250,
     onePositionAtTime: options.onePositionAtTime ?? true,
     conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true,
-    cooldownCandles: options.cooldownCandles ?? 4
+    cooldownCandles: options.cooldownCandles ?? 4,
+    progressLogEvery: options.progressLogEvery ?? 5000
   };
 
   if (!Array.isArray(candles) || candles.length === 0) {
@@ -466,9 +499,47 @@ export function runStrategyBacktest(
     { time: sortedCandles[0].time, balance: round(balance) }
   ];
 
+  // Метрики прогресса для долгого прогона
+  const startedAt = Date.now();
+  const totalBarsToProcess = Math.max(sortedCandles.length - resolvedOptions.warmupCandles, 0);
+
   for (let i = resolvedOptions.warmupCandles; i < sortedCandles.length; i++) {
     const visibleCandles = sortedCandles.slice(0, i + 1);
     const currentCandle = sortedCandles[i];
+
+    // Печать реального прогресса по циклу.
+    // Это помогает понять, что бэктест не завис, а действительно работает.
+    if (resolvedOptions.progressLogEvery > 0) {
+      const processedBars = i - resolvedOptions.warmupCandles;
+      const shouldLog =
+        processedBars > 0 &&
+        (
+          processedBars % resolvedOptions.progressLogEvery === 0 ||
+          i === sortedCandles.length - 1
+        );
+
+      if (shouldLog) {
+        const elapsedSec = (Date.now() - startedAt) / 1000;
+        const speed = processedBars / Math.max(elapsedSec, 1e-9);
+        const remainingBars = Math.max(totalBarsToProcess - processedBars, 0);
+        const etaSec = remainingBars / Math.max(speed, 1e-9);
+        const progressPct = totalBarsToProcess > 0
+          ? (processedBars / totalBarsToProcess) * 100
+          : 100;
+
+        console.log(
+          [
+            `[${symbol}]`,
+            `Прогресс: ${processedBars}/${totalBarsToProcess}`,
+            `${round(progressPct, 2)}%`,
+            `Скорость: ${round(speed, 2)} свеч/сек`,
+            `ETA: ${formatDuration(etaSec)}`,
+            `Сделок: ${trades.length}`,
+            `Баланс: ${round(balance, 2)}`
+          ].join(' | ')
+        );
+      }
+    }
 
     // Если есть открытая позиция — сначала проверяем выход
     if (openPosition) {
@@ -495,11 +566,8 @@ export function runStrategyBacktest(
         equityCurve.push({ time: currentCandle.time, balance: round(balance) });
 
         // Если получили стоп или убыточную сделку —
-        // включаем паузу на заданное число свечей
-        if (
-          trade.closeReason === 'stop_loss' ||
-          trade.netPnl <= 0
-        ) {
+        // включаем паузу на заданное число следующих свечей
+        if (trade.closeReason === 'stop_loss' || trade.netPnl <= 0) {
           cooldownRemaining = resolvedOptions.cooldownCandles;
         }
 
