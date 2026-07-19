@@ -7,7 +7,7 @@ import { Candle } from '../services/strategy';
  * Количество свечей паузы после убыточной сделки / стопа.
  * Можно менять через CLI четвертым аргументом.
  */
-const DEFAULT_COOLDOWN_CANDLES = 4;
+const DEFAULT_COOLDOWN_CANDLES = 8;
 
 /**
  * Как часто печатать прогресс в консоль.
