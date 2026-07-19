@@ -312,7 +312,7 @@ function main() {
 
     result = runStrategyBacktest(symbolArg, candles, {
       startingBalance: 50000,
-      commissionRate: 0.003,
+      commissionRate: 0.0005,
       warmupCandles: 250,
       onePositionAtTime: true,
       conservativeIntrabarExecution: true,
