@@ -673,10 +673,9 @@
         workLogBody.innerHTML = `<tr><td colspan="12">Загрузка...</td></tr>`;
 
         try {
-          const res = await fetch('https://n8n.kino-test.ru/webhook/get_signals', {
+          const res = await fetch('https://n8n.kino-test.ru/webhook/get_signals_moex', {
             method: 'POST',
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id_bot: Number(botId) })
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }
           });
 
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
