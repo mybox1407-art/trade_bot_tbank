@@ -4,6 +4,12 @@ import { runStrategyBacktest } from './strategyBacktest';
 import { Candle } from '../services/strategy';
 
 /**
+ * Количество свечей паузы после убыточной сделки / стопа.
+ * Можно менять через CLI четвертым аргументом.
+ */
+const DEFAULT_COOLDOWN_CANDLES = 4;
+
+/**
  * Преобразование значения в число.
  */
 function toNumber(value: unknown): number {
@@ -74,6 +80,27 @@ function formatDate(ts: number): string {
 }
 
 /**
+ * Чтение количества свечей cooldown из CLI.
+ * Если аргумент не передан или некорректен — берем значение по умолчанию.
+ */
+function parseCooldownCandles(value: string | undefined): number {
+  if (value == null) {
+    return DEFAULT_COOLDOWN_CANDLES;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.warn(
+      `Некорректный cooldownCandles="${value}", будет использовано значение по умолчанию ${DEFAULT_COOLDOWN_CANDLES}.`
+    );
+    return DEFAULT_COOLDOWN_CANDLES;
+  }
+
+  return parsed;
+}
+
+/**
  * Печать итоговой статистики.
  */
 function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
@@ -91,7 +118,9 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   console.log(`Avg net pnl:           ${formatNumber(s.avgNetPnl, 2)}`);
   console.log(`Avg win:               ${formatNumber(s.avgWin, 2)}`);
   console.log(`Avg loss:              ${formatNumber(s.avgLoss, 2)}`);
-  console.log(`Profit factor:         ${Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity'}`);
+  console.log(
+    `Profit factor:         ${Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity'}`
+  );
   console.log(`Стартовый баланс:      ${formatNumber(s.startBalance, 2)}`);
   console.log(`Финальный баланс:      ${formatNumber(s.endBalance, 2)}`);
   console.log(`Доходность:            ${formatNumber(s.returnPct * 100, 2)}%`);
@@ -135,10 +164,11 @@ function printLastTrades(result: ReturnType<typeof runStrategyBacktest>, limit =
 function printUsage() {
   console.log(`
 Использование:
-  npm run backtest -- <path-to-json> <symbol>
+  npm run backtest -- <path-to-json> <symbol> [cooldownCandles]
 
 Пример:
   npm run backtest -- ./src/backtest/data/SBER_15m.json SBER
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 4
 `);
 }
 
@@ -146,13 +176,14 @@ function printUsage() {
  * Основная CLI-функция.
  */
 function main() {
-  const [, , inputPathArg, symbolArg] = process.argv;
+  const [, , inputPathArg, symbolArg, cooldownCandlesArg] = process.argv;
 
   if (!inputPathArg || !symbolArg) {
     printUsage();
     process.exit(1);
   }
 
+  const cooldownCandles = parseCooldownCandles(cooldownCandlesArg);
   const absolutePath = path.resolve(process.cwd(), inputPathArg);
 
   if (!fs.existsSync(absolutePath)) {
@@ -194,13 +225,18 @@ function main() {
   console.log(`Инструмент:            ${symbolArg}`);
   console.log(`Свечей загружено:      ${candles.length}`);
   console.log(`Период данных:         ${formatDate(candles[0].time)} -> ${formatDate(candles[candles.length - 1].time)}`);
+  console.log(`Cooldown после убытка: ${cooldownCandles} свеч.`);
 
   const result = runStrategyBacktest(symbolArg, candles, {
     startingBalance: 50000,
     commissionRate: 0.003,
     warmupCandles: 250,
     onePositionAtTime: true,
-    conservativeIntrabarExecution: true
+    conservativeIntrabarExecution: true,
+
+    // Пауза после убыточной сделки / стопа.
+    // Важно: strategyBacktest.ts должен уметь принимать и обрабатывать этот параметр.
+    cooldownCandles
   });
 
   printSummary(result);
