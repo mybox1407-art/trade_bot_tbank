@@ -27,9 +27,17 @@ export interface BacktestOptions {
   maxTradesPerDay?: number;
   /** Закрыть по close, если позиция живёт дольше N свечей. */
   timeStopBars?: number;
-  /** Если через N бар нет earlyAbortMinR * R — выход по close. */
+  /**
+   * Early abort: если через N бар нет earlyAbortMinR * R — выход по close.
+   * 0 = выключено.
+   */
   earlyAbortBars?: number;
   earlyAbortMinR?: number;
+  /**
+   * Трейл остатка после TP1, в единицах R.
+   * 0 = только lock, без трейла.
+   */
+  runnerTrailR?: number;
 }
 
 interface OpenPosition {
@@ -71,7 +79,8 @@ export interface BacktestTrade {
     | 'forced_close'
     | 'time_stop'
     | 'early_abort'
-    | 'breakeven';
+    | 'breakeven'
+    | 'trail_stop';
   grossPnl: number;
   commissionOpen: number;
   commissionClose: number;
@@ -197,6 +206,40 @@ function tryOpenPosition(params: {
   };
 }
 
+/**
+ * После TP1: трейлим стоп остатка от экстремума.
+ * Не опускаем стоп ниже lock (entry ± PARTIAL_LOCK_R * R).
+ */
+function updateRunnerTrail(params: {
+  position: OpenPosition;
+  candle: Candle;
+  trailR: number;
+}): void {
+  const { position, candle, trailR } = params;
+  if (!position.tp1Done || trailR <= 0) return;
+
+  const r = position.initialR;
+  if (r <= 0) return;
+
+  const lock = r * PARTIAL_LOCK_R;
+
+  if (position.side === 'long') {
+    const floor = position.entryPrice + lock;
+    const trailStop = candle.high - trailR * r;
+    const next = Math.max(floor, trailStop);
+    if (next > position.stopLossPrice) {
+      position.stopLossPrice = next;
+    }
+  } else {
+    const ceiling = position.entryPrice - lock;
+    const trailStop = candle.low + trailR * r;
+    const next = Math.min(ceiling, trailStop);
+    if (next < position.stopLossPrice) {
+      position.stopLossPrice = next;
+    }
+  }
+}
+
 function buildTrade(params: {
   symbol: string;
   position: OpenPosition;
@@ -268,6 +311,19 @@ function buildTrade(params: {
 }
 
 /**
+ * Причина закрытия по стопу после TP1: lock ≈ breakeven, дальше — trail.
+ */
+function stopReasonAfterTp1(position: OpenPosition): 'breakeven' | 'trail_stop' {
+  const lockDist = position.initialR * PARTIAL_LOCK_R;
+  const movedFromEntry = Math.abs(position.stopLossPrice - position.entryPrice);
+  // Если стоп ушёл заметно дальше lock — это трейл
+  if (movedFromEntry > lockDist * 1.15) {
+    return 'trail_stop';
+  }
+  return 'breakeven';
+}
+
+/**
  * Выходы на свече: SL, TP1 (partial), TP2.
  * Conservative: при SL+TP на одной свече — SL.
  */
@@ -310,18 +366,16 @@ function processExitsOnCandle(params: {
 
   // SL приоритетнее TP при conservative
   if (hitStop && (hitTp1 || hitTp2) && conservative) {
+    const reason = position.tp1Done
+      ? stopReasonAfterTp1(position)
+      : 'stop_loss';
     const t = buildTrade({
       symbol,
       position,
       qty: position.quantity,
       exitPrice: position.stopLossPrice,
       closedAt: candle.time,
-      closeReason:
-        position.tp1Done &&
-        Math.abs(position.stopLossPrice - position.entryPrice) <
-          position.initialR * 0.5
-          ? 'breakeven'
-          : 'stop_loss',
+      closeReason: reason,
       balanceBeforeClose: balance,
       commissionRate,
       barsHeld,
@@ -374,7 +428,7 @@ function processExitsOnCandle(params: {
     }
   }
 
-  // Если qty=1 и hitTp1 без partial — закрываем целиком по TP1
+  // qty=1 и hitTp1 — закрываем целиком по TP1
   if (hitTp1 && !position.tp1Done && position.quantity === 1) {
     const t = buildTrade({
       symbol,
@@ -406,13 +460,16 @@ function processExitsOnCandle(params: {
       : candle.low <= position.takeProfit2Price;
 
   if (position.quantity > 0 && hitStop2 && hitTp2b && conservative) {
+    const reason = position.tp1Done
+      ? stopReasonAfterTp1(position)
+      : 'stop_loss';
     const t = buildTrade({
       symbol,
       position,
       qty: position.quantity,
       exitPrice: position.stopLossPrice,
       closedAt: candle.time,
-      closeReason: position.tp1Done ? 'breakeven' : 'stop_loss',
+      closeReason: reason,
       balanceBeforeClose: balance,
       commissionRate,
       barsHeld,
@@ -426,13 +483,16 @@ function processExitsOnCandle(params: {
   }
 
   if (position.quantity > 0 && hitStop2) {
+    const reason = position.tp1Done
+      ? stopReasonAfterTp1(position)
+      : 'stop_loss';
     const t = buildTrade({
       symbol,
       position,
       qty: position.quantity,
       exitPrice: position.stopLossPrice,
       closedAt: candle.time,
-      closeReason: position.tp1Done ? 'breakeven' : 'stop_loss',
+      closeReason: reason,
       balanceBeforeClose: balance,
       commissionRate,
       barsHeld,
@@ -493,8 +553,7 @@ function calculateDrawdown(equityCurve: Array<{ time: number; balance: number }>
 }
 
 /**
- * Сводка: группируем ноги одного входа (openedAt+side+entry) —
- * иначе partial раздует число «сделок» и winrate.
+ * Сводка: группируем ноги одного входа (openedAt+side+entry).
  */
 function buildSummary(params: {
   symbol: string;
@@ -560,14 +619,13 @@ export function runStrategyBacktest(
     warmupCandles: options.warmupCandles ?? 250,
     onePositionAtTime: options.onePositionAtTime ?? true,
     conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true,
-    // Пауза после любой сделки (не только убытка)
-    cooldownCandles: options.cooldownCandles ?? 12,
+    cooldownCandles: options.cooldownCandles ?? 6,
     progressLogEvery: options.progressLogEvery ?? 5000,
-    // 0 = без лимита входов в день
     maxTradesPerDay: options.maxTradesPerDay ?? 0,
-    timeStopBars: options.timeStopBars ?? 64,
-    earlyAbortBars: options.earlyAbortBars ?? 16,
-    earlyAbortMinR: options.earlyAbortMinR ?? 0.25
+    timeStopBars: options.timeStopBars ?? 80,
+    earlyAbortBars: options.earlyAbortBars ?? 0,
+    earlyAbortMinR: options.earlyAbortMinR ?? 0.25,
+    runnerTrailR: options.runnerTrailR ?? 1.2
   };
 
   if (!Array.isArray(candles) || candles.length === 0) {
@@ -641,7 +699,14 @@ export function runStrategyBacktest(
     }
 
     if (openPosition) {
-      // Time-stop: слишком долго держим
+      // Трейл runner после TP1 (до проверки выходов)
+      updateRunnerTrail({
+        position: openPosition,
+        candle: currentCandle,
+        trailR: resolvedOptions.runnerTrailR
+      });
+
+      // Time-stop
       if (barsHeld >= resolvedOptions.timeStopBars) {
         const t = buildTrade({
           symbol,
@@ -664,7 +729,7 @@ export function runStrategyBacktest(
         openPositionIndex = -1;
         openCommissionRemaining = false;
       } else if (
-        // Early abort: за N бар нет даже небольшого плюса
+        resolvedOptions.earlyAbortBars > 0 &&
         barsHeld >= resolvedOptions.earlyAbortBars &&
         !openPosition.tp1Done
       ) {
@@ -718,7 +783,6 @@ export function runStrategyBacktest(
         }
 
         if (!result.stillOpen) {
-          // Cooldown после любой полностью закрытой позиции
           cooldownRemaining = resolvedOptions.cooldownCandles;
           openPosition = null;
           openPositionIndex = -1;
@@ -734,7 +798,6 @@ export function runStrategyBacktest(
       continue;
     }
 
-    // Лимит в день только если maxTradesPerDay > 0
     if (resolvedOptions.maxTradesPerDay > 0) {
       const dayKey = utcDateKey(currentCandle.time);
       const usedToday = entriesPerDay.get(dayKey) ?? 0;
@@ -759,7 +822,6 @@ export function runStrategyBacktest(
     }
   }
 
-  // Хвост истории — forced close
   if (openPosition) {
     const lastCandle = sortedCandles[sortedCandles.length - 1];
     const t = buildTrade({
