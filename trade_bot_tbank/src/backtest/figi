@@ -1,4 +1,4 @@
 SBER - BBG004730N88
 
-export TINVEST_TOKEN="твой_токен"
+export TINVEST_TOKEN=t.JEad0aPyZeL3vpVxMbMYWlHkkZKnt5TPIEqGgbv9z4Avxo_j45AYmw-xDgNIsFLmndf61-5VSgM_jX82sYsadw
 npm run download:candles -- BBG004730N88 SBER 21
