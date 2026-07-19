@@ -369,7 +369,7 @@ function main() {
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
       maxTradesPerDay: 0,
-      timeStopBars: 120,
+      timeStopBars: 64,
       earlyAbortBars: 0,
       earlyAbortMinR: 0.25,
       runnerTrailAtrMult
