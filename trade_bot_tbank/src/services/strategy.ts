@@ -9,35 +9,34 @@ export const MAX_RISK_PER_TRADE = 0.01;
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 
-const MIN_NET_PROFIT_BUFFER_RATE = 0.0004;
-const MIN_EXPECTED_NET_MOVE_RATE = 0.003;
-const MIN_RISK_REWARD_RATIO = 1.8;
-const MIN_STOP_DISTANCE_RATE = 0.0055; // чуть шире — меньше выносов за 3–5 баров
-const MAX_STOP_DISTANCE_RATE = 0.02;
-const MAX_POSITION_FRAC = 0.30;
-const MAX_COMMISSION_SHARE_OF_RISK = 0.25;
+/**
+ * Модель выхода (бэктест должен уметь partial close):
+ * - TP1: доля позиции @ TP1_R
+ * - остаток: стоп → entry ± PARTIAL_LOCK_R * R, цель TP2_R
+ */
+export const TP1_FRACTION = 0.5;
+export const TP1_R = 1.2;
+export const TP2_R = 2.5;
+export const PARTIAL_LOCK_R = 0.2;
 
-const MIN_ADX_TREND = 18;
-const BB_SQUEEZE_THRESHOLD = 0.055;
+/** Мин./макс. ширина стопа от цены (кап 1.2% режет огромные −R) */
+const MIN_STOP_DISTANCE_RATE = 0.005;
+const MAX_STOP_DISTANCE_RATE = 0.012;
 
-const ENABLE_RANGE_ENTRIES = false;
-const ENABLE_BREAKOUT_ENTRIES = false;
+const MAX_POSITION_FRAC = 0.3;
+const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 
-const STRUCTURE_LOOKBACK = 14;
-const STOP_STRUCTURE_LOOKBACK = 10; // шире структура стопа
-const BREAKOUT_LOOKBACK = 16;
+const MIN_ADX_TREND = 20;
+const STOP_STRUCTURE_LOOKBACK = 10;
+const STOP_SWING_PAD_ATR = 0.25;
+const MAX_EXTENSION_FROM_EMA20 = 0.01;
 
+/** 10:00–18:00 МСК = 07:00–15:00 UTC */
 const TRADING_HOUR_UTC_FROM = 7;
 const TRADING_HOUR_UTC_TO = 15;
 
-const VOLUME_SPIKE_MULTIPLIER = 1.3;
-const BREAKOUT_MIN_ATR_DISPLACEMENT = 0.5;
-const BREAKOUT_MIN_BODY_PCT = 0.55;
-
-const MAX_EXTENSION_FROM_EMA20 = 0.01;
-const STOP_SWING_PAD_ATR = 0.25;
-
-const MIN_QUANTITY = 1;
+/** Минимум 2 лота — чтобы partial 50% был целым */
+const MIN_QUANTITY = 2;
 
 export interface Candle {
   time: number;
@@ -56,18 +55,25 @@ export type MarketRegime =
   | 'high_volatility'
   | 'unknown';
 
-type RegimeIndicators = {
-  lastClose: number;
-  lastAtr: number;
-  atrPct: number;
-  adx: number;
-  adxRising: boolean;
-  ema20: number;
-  ema50: number;
-  ema200: number;
-  bbWidth: number;
-  avgVol20: number;
-};
+export interface StrategySignal {
+  price: number;
+  buy: boolean;
+  sell: boolean;
+  side: 'long' | 'short' | 'none';
+  stopLossPrice: number | null;
+  /** Частичный тейк */
+  takeProfit1Price: number | null;
+  /** Тейк на остаток */
+  takeProfit2Price: number | null;
+  /** Совместимость со старым кодом = TP2 */
+  takeProfitPrice: number | null;
+  tp1Fraction: number;
+  positionSize: number | null;
+  quantity: number | null;
+  regime: MarketRegime;
+  initialR: number | null;
+  indicators: Record<string, unknown>;
+}
 
 function last<T>(arr: T[]): T {
   return arr[arr.length - 1];
@@ -82,242 +88,43 @@ function mean(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-function getVolumeSpike(volumes: number[], avgVol20: number): boolean {
-  const v = volumes[volumes.length - 1] ?? 0;
-  return avgVol20 > 0 && v >= avgVol20 * VOLUME_SPIKE_MULTIPLIER;
-}
-
-function getAtrMultipliers(regime: MarketRegime, atrPct: number) {
-  const highVol = atrPct > 0.015;
-
-  if (regime === 'trend_up' || regime === 'trend_down') {
-    return {
-      stop: highVol ? 1.7 : 1.5,
-      target: highVol ? 3.6 : 3.2
-    };
-  }
-
-  if (regime === 'breakout_watch') {
-    return {
-      stop: highVol ? 1.5 : 1.3,
-      target: highVol ? 4.0 : 3.6
-    };
-  }
-
-  if (regime === 'range') {
-    return { stop: 1.0, target: 2.0 };
-  }
-
-  return { stop: 0, target: 0 };
-}
-
 function isTradingHour(timestamp: number): boolean {
   const hourUtc = new Date(timestamp).getUTCHours();
   return hourUtc >= TRADING_HOUR_UTC_FROM && hourUtc < TRADING_HOUR_UTC_TO;
 }
 
-function expectedNetMove(params: {
-  side: 'long' | 'short' | 'none';
-  price: number;
-  takeProfitPrice: number | null;
-}) {
-  const { side, price, takeProfitPrice } = params;
-
-  if (side === 'none' || takeProfitPrice == null || price <= 0) {
-    return { grossMove: 0, netMove: 0, netMoveRate: 0 };
-  }
-
-  const grossMove =
-    side === 'long' ? takeProfitPrice - price : price - takeProfitPrice;
-  const commissionCost = price * ROUND_TRIP_COMMISSION_RATE;
-  const netMove = grossMove - commissionCost;
-
-  return { grossMove, netMove, netMoveRate: netMove / price };
-}
-
-function getNetRiskReward(params: {
-  side: 'long' | 'short' | 'none';
-  price: number;
-  stopLossPrice: number | null;
-  takeProfitPrice: number | null;
-}) {
-  const { side, price, stopLossPrice, takeProfitPrice } = params;
-
-  if (
-    side === 'none' ||
-    stopLossPrice == null ||
-    takeProfitPrice == null ||
-    price <= 0
-  ) {
-    return { risk: 0, reward: 0, ratio: 0, stopDist: 0, tpDist: 0, commPerShare: 0 };
-  }
-
-  const stopDist = side === 'long' ? price - stopLossPrice : stopLossPrice - price;
-  const tpDist = side === 'long' ? takeProfitPrice - price : price - takeProfitPrice;
-  const commPerShare = price * ROUND_TRIP_COMMISSION_RATE;
-
-  const risk = stopDist + commPerShare;
-  const reward = tpDist - commPerShare;
-
-  if (risk <= 0 || reward <= 0) {
-    return { risk, reward, ratio: 0, stopDist, tpDist, commPerShare };
-  }
-
-  return { risk, reward, ratio: reward / risk, stopDist, tpDist, commPerShare };
-}
-
-function getStructureTarget(params: {
-  side: 'long' | 'short' | 'none';
-  highs: number[];
-  lows: number[];
-  price: number;
-  lastAtr: number;
-  atrTargetMultiplier: number;
-}) {
-  const { side, highs, lows, price, lastAtr, atrTargetMultiplier } = params;
-  if (side === 'none') return null;
-
-  const recentHigh = Math.max(...highs.slice(-STRUCTURE_LOOKBACK));
-  const recentLow = Math.min(...lows.slice(-STRUCTURE_LOOKBACK));
-  const atrFloor = lastAtr * Math.max(atrTargetMultiplier, 2.8);
-
-  if (side === 'long') {
-    const structure =
-      recentHigh > price + lastAtr * 0.8 ? recentHigh : price + atrFloor;
-    return Math.max(structure, price + atrFloor);
-  }
-
-  const structure =
-    recentLow < price - lastAtr * 0.8 ? recentLow : price - atrFloor;
-  return Math.min(structure, price - atrFloor);
-}
-
+/**
+ * Стоп по структуре (свинг ± pad), с жёстким капом по % цены.
+ */
 function getStructureStop(params: {
-  side: 'long' | 'short' | 'none';
+  side: 'long' | 'short';
   highs: number[];
   lows: number[];
   price: number;
   lastAtr: number;
-  atrStopMultiplier: number;
-}) {
-  const { side, highs, lows, price, lastAtr, atrStopMultiplier } = params;
-  if (side === 'none') return null;
-
+  atrStopMult: number;
+}): number {
+  const { side, highs, lows, price, lastAtr, atrStopMult } = params;
   const recentHigh = Math.max(...highs.slice(-STOP_STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STOP_STRUCTURE_LOOKBACK));
   const pad = lastAtr * STOP_SWING_PAD_ATR;
 
-  const minStopDist = Math.max(
-    lastAtr * atrStopMultiplier,
-    price * MIN_STOP_DISTANCE_RATE
-  );
-  const maxStopDist = Math.min(lastAtr * 2.6, price * MAX_STOP_DISTANCE_RATE);
+  const minDist = Math.max(lastAtr * atrStopMult, price * MIN_STOP_DISTANCE_RATE);
+  const maxDist = Math.min(lastAtr * 2.2, price * MAX_STOP_DISTANCE_RATE);
 
   if (side === 'long') {
     let stop = recentLow - pad;
-    if (price - stop < minStopDist) stop = price - minStopDist;
-    if (price - stop > maxStopDist) stop = price - maxStopDist;
-    if (stop >= price) stop = price - minStopDist;
+    if (price - stop < minDist) stop = price - minDist;
+    if (price - stop > maxDist) stop = price - maxDist;
+    if (stop >= price) stop = price - minDist;
     return stop;
   }
 
   let stop = recentHigh + pad;
-  if (stop - price < minStopDist) stop = price + minStopDist;
-  if (stop - price > maxStopDist) stop = price + maxStopDist;
-  if (stop <= price) stop = price + minStopDist;
+  if (stop - price < minDist) stop = price + minDist;
+  if (stop - price > maxDist) stop = price + maxDist;
+  if (stop <= price) stop = price + minDist;
   return stop;
-}
-
-function getBreakoutDisplacement(params: {
-  side: 'long' | 'short';
-  price: number;
-  bandLevel: number;
-  lastAtr: number;
-}) {
-  const { side, price, bandLevel, lastAtr } = params;
-  if (lastAtr <= 0) return { distance: 0, distanceAtr: 0 };
-  const distance = side === 'long' ? price - bandLevel : bandLevel - price;
-  return { distance, distanceAtr: distance / lastAtr };
-}
-
-function getStructureBreak(params: {
-  side: 'long' | 'short';
-  highs: number[];
-  lows: number[];
-  price: number;
-}) {
-  const { side, highs, lows, price } = params;
-  const recentHigh = Math.max(...highs.slice(-BREAKOUT_LOOKBACK, -1));
-  const recentLow = Math.min(...lows.slice(-BREAKOUT_LOOKBACK, -1));
-  if (side === 'long') return { level: recentHigh, broken: price > recentHigh };
-  return { level: recentLow, broken: price < recentLow };
-}
-
-function validateExitLevels(params: {
-  side: 'long' | 'short' | 'none';
-  price: number;
-  stopLossPrice: number | null;
-  takeProfitPrice: number | null;
-  lastAtr: number;
-}) {
-  const { side, price, lastAtr } = params;
-  let { stopLossPrice, takeProfitPrice } = params;
-
-  const fallbackStop = Math.max(lastAtr * 1.5, price * MIN_STOP_DISTANCE_RATE);
-  const fallbackTake = Math.max(
-    lastAtr * 3.2,
-    2.0 * fallbackStop + price * ROUND_TRIP_COMMISSION_RATE * 3
-  );
-
-  if (side === 'long') {
-    if (stopLossPrice == null || stopLossPrice >= price) {
-      stopLossPrice = price - fallbackStop;
-    }
-    if (takeProfitPrice == null || takeProfitPrice <= price) {
-      takeProfitPrice = price + fallbackTake;
-    }
-  }
-
-  if (side === 'short') {
-    if (stopLossPrice == null || stopLossPrice <= price) {
-      stopLossPrice = price + fallbackStop;
-    }
-    if (takeProfitPrice == null || takeProfitPrice >= price) {
-      takeProfitPrice = price - fallbackTake;
-    }
-  }
-
-  return { stopLossPrice, takeProfitPrice };
-}
-
-function normalizeTakeProfit(params: {
-  side: 'long' | 'short' | 'none';
-  price: number;
-  takeProfitPrice: number | null;
-  stopLossPrice: number | null;
-  lastAtr: number;
-}) {
-  const { side, price, takeProfitPrice, stopLossPrice, lastAtr } = params;
-  if (side === 'none' || takeProfitPrice == null || lastAtr <= 0) {
-    return takeProfitPrice;
-  }
-
-  const stopDist =
-    stopLossPrice != null ? Math.abs(price - stopLossPrice) : lastAtr * 1.5;
-
-  const minByRR =
-    stopDist * MIN_RISK_REWARD_RATIO +
-    price * ROUND_TRIP_COMMISSION_RATE * (1 + MIN_RISK_REWARD_RATIO);
-  const minByAtr = lastAtr * 2.8;
-  const minByComm =
-    price *
-    (ROUND_TRIP_COMMISSION_RATE +
-      MIN_NET_PROFIT_BUFFER_RATE +
-      MIN_EXPECTED_NET_MOVE_RATE);
-  const minDist = Math.max(minByRR, minByAtr, minByComm);
-
-  if (side === 'long') return Math.max(takeProfitPrice, price + minDist);
-  return Math.min(takeProfitPrice, price - minDist);
 }
 
 function calcPositionSize(params: {
@@ -329,38 +136,27 @@ function calcPositionSize(params: {
   const { price, stopLossPrice, riskCapital, balance } = params;
   const stopDist = Math.abs(price - stopLossPrice);
   if (stopDist <= 0 || price <= 0) {
-    return { quantity: null, positionSize: null, rejectReason: 'bad_stop' as const };
+    return { quantity: null as number | null, positionSize: null as number | null };
   }
 
   const commPerShare = price * ROUND_TRIP_COMMISSION_RATE;
   const riskPerShare = stopDist + commPerShare;
-  const commShare = commPerShare / riskPerShare;
-
-  if (commShare > MAX_COMMISSION_SHARE_OF_RISK) {
-    return {
-      quantity: null,
-      positionSize: null,
-      rejectReason: 'commission_too_high' as const
-    };
+  if (commPerShare / riskPerShare > MAX_COMMISSION_SHARE_OF_RISK) {
+    return { quantity: null, positionSize: null };
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
-  const maxQtyByFrac = Math.floor((balance * MAX_POSITION_FRAC) / price);
-  quantity = Math.min(quantity, maxQtyByFrac);
+  // Чётное qty — удобнее делить 50/50 на TP1
+  if (quantity >= 3 && quantity % 2 === 1) quantity -= 1;
+
+  const maxQty = Math.floor((balance * MAX_POSITION_FRAC) / price);
+  quantity = Math.min(quantity, maxQty);
 
   if (quantity < MIN_QUANTITY) {
-    return {
-      quantity: null,
-      positionSize: null,
-      rejectReason: 'qty_too_small' as const
-    };
+    return { quantity: null, positionSize: null };
   }
 
-  return {
-    quantity,
-    positionSize: quantity * price,
-    rejectReason: null
-  };
+  return { quantity, positionSize: quantity * price };
 }
 
 export function detectMarketRegime(candles: Candle[]) {
@@ -384,11 +180,7 @@ export function detectMarketRegime(candles: Candle[]) {
     ema200.length < 1 ||
     bb.length < 1
   ) {
-    return {
-      regime: 'unknown' as MarketRegime,
-      ready: false,
-      indicators: null as RegimeIndicators | null
-    };
+    return { regime: 'unknown' as MarketRegime, ready: false, indicators: null };
   }
 
   const lastClose = last(closes);
@@ -400,37 +192,23 @@ export function detectMarketRegime(candles: Candle[]) {
   const lastEma200 = last(ema200);
   const lastBb = last(bb);
 
-  const avgVol20 = mean(volumes.slice(-20));
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
-  const adxRising = lastAdx.adx > prevAdx.adx;
   const atrPct = lastAtr / lastClose;
-  const compression = bbWidth <= BB_SQUEEZE_THRESHOLD;
+  const adxRising = lastAdx.adx > prevAdx.adx;
+  const adxOk = lastAdx.adx >= MIN_ADX_TREND && (adxRising || lastAdx.adx >= 26);
 
-  const adxOk =
-    lastAdx.adx >= MIN_ADX_TREND && (adxRising || lastAdx.adx >= 25);
+  const stackUp = lastEma20 > lastEma50 && lastEma50 > lastEma200;
+  const stackDown = lastEma20 < lastEma50 && lastEma50 < lastEma200;
 
-  const emaStackUp = lastEma20 > lastEma50 && lastEma50 > lastEma200;
-  const emaStackDown = lastEma20 < lastEma50 && lastEma50 < lastEma200;
-
-  const trendUp = lastClose > lastEma200 && emaStackUp && adxOk;
-  const trendDown = lastClose < lastEma200 && emaStackDown && adxOk;
-
-  const range = lastAdx.adx < 18 && bbWidth < 0.09;
-
-  const breakoutWatch =
-    compression &&
-    lastAdx.adx >= 14 &&
-    lastAdx.adx <= 30 &&
-    getVolumeSpike(volumes, avgVol20);
-
-  const highVolatility = atrPct > 0.03 || bbWidth > 0.14;
+  const highVolatility = atrPct > 0.028 || bbWidth > 0.13;
+  const trendUp = !highVolatility && lastClose > lastEma200 && stackUp && adxOk;
+  const trendDown = !highVolatility && lastClose < lastEma200 && stackDown && adxOk;
 
   let regime: MarketRegime = 'unknown';
   if (highVolatility) regime = 'high_volatility';
   else if (trendUp) regime = 'trend_up';
   else if (trendDown) regime = 'trend_down';
-  else if (breakoutWatch) regime = 'breakout_watch';
-  else if (range) regime = 'range';
+  else if (lastAdx.adx < 18) regime = 'range';
 
   return {
     regime,
@@ -445,17 +223,42 @@ export function detectMarketRegime(candles: Candle[]) {
       ema50: lastEma50,
       ema200: lastEma200,
       bbWidth,
-      avgVol20
-    } satisfies RegimeIndicators
+      avgVol20: mean(volumes.slice(-20))
+    }
   };
 }
 
-export function analyzeMarket(candles: Candle[]) {
+function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategySignal {
+  return {
+    price,
+    buy: false,
+    sell: false,
+    side: 'none',
+    stopLossPrice: null,
+    takeProfit1Price: null,
+    takeProfit2Price: null,
+    takeProfitPrice: null,
+    tp1Fraction: TP1_FRACTION,
+    positionSize: null,
+    quantity: null,
+    regime,
+    initialR: null,
+    indicators: { ready: false }
+  };
+}
+
+/**
+ * Сигнал стратегии.
+ * @param balance — текущий баланс (для сайзинга в бэктесте/лайве)
+ */
+export function analyzeMarket(
+  candles: Candle[],
+  balance: number = STARTING_BALANCE
+): StrategySignal {
   const closes = candles.map(c => c.close);
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
   const opens = candles.map(c => c.open);
-  const volumes = candles.map(c => c.volume);
 
   const regimeInfo = detectMarketRegime(candles);
 
@@ -467,23 +270,8 @@ export function analyzeMarket(candles: Candle[]) {
     SimpleMAOscillator: false,
     SimpleMASignal: false
   });
-
   const rsi = RSI.calculate({ period: 14, values: closes });
   const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
-  const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
-
-  const empty = {
-    price: closes[closes.length - 1] ?? 0,
-    buy: false,
-    sell: false,
-    side: 'none' as const,
-    takeProfitPrice: null as number | null,
-    stopLossPrice: null as number | null,
-    positionSize: null as number | null,
-    quantity: null as number | null,
-    regime: 'unknown' as MarketRegime,
-    indicators: { ready: false as const }
-  };
 
   if (
     !regimeInfo.ready ||
@@ -491,37 +279,32 @@ export function analyzeMarket(candles: Candle[]) {
     macd.length < 3 ||
     rsi.length < 2 ||
     atr.length < 2 ||
-    bb.length < 2 ||
     candles.length < 30
   ) {
-    return empty;
+    return emptySignal(closes[closes.length - 1] ?? 0);
   }
 
   const price = last(closes);
   const prevPrice = prev(closes);
-
+  const regime = regimeInfo.regime;
+  const ind = regimeInfo.indicators;
+  const lastAtr = last(atr);
   const lastMacd = last(macd);
   const prevMacd = prev(macd);
-
   const lastRsi = last(rsi);
-  const prevRsi = prev(rsi);
-
-  const lastAtr = last(atr);
-  const prevAtr = prev(atr);
-
-  const lastBb = last(bb);
-  const prevBb = prev(bb);
-
   const lastOpen = last(opens);
   const lastHigh = last(highs);
   const lastLow = last(lows);
 
-  const regimeIndicators = regimeInfo.indicators;
-  const regime = regimeInfo.regime;
-  const atrMultipliers = getAtrMultipliers(regime, regimeIndicators.atrPct);
+  if (!isTradingHour(last(candles).time) || regime === 'high_volatility') {
+    return {
+      ...emptySignal(price, regime),
+      indicators: { ready: true, skipped: true, regime }
+    };
+  }
 
-  const ema20 = regimeIndicators.ema20;
-  const ema50 = regimeIndicators.ema50;
+  const ema20 = ind.ema20;
+  const ema50 = ind.ema50;
   const extension = (price - ema20) / price;
 
   const macdCrossUp =
@@ -536,350 +319,161 @@ export function analyzeMarket(candles: Candle[]) {
     lastMacd.MACD! < lastMacd.signal! &&
     (lastMacd.histogram ?? 0) <= (prevMacd.histogram ?? 0);
 
-  const candleRange = Math.max(lastHigh - lastLow, 1e-9);
-  const bodyPctOfRange = Math.abs(price - lastOpen) / candleRange;
-  const bullishCandle = price > lastOpen && bodyPctOfRange >= 0.4;
-  const bearishCandle = price < lastOpen && bodyPctOfRange >= 0.4;
+  const range = Math.max(lastHigh - lastLow, 1e-9);
+  const bodyPct = Math.abs(price - lastOpen) / range;
+  const bullCandle = price > lastOpen && bodyPct >= 0.4;
+  const bearCandle = price < lastOpen && bodyPct >= 0.4;
 
-  const rsiBull = lastRsi > 40 && lastRsi < 68;
-  const rsiBear = lastRsi < 60 && lastRsi > 32;
-
-  const notExtendedLong =
-    extension >= -0.003 && extension <= MAX_EXTENSION_FROM_EMA20;
-  const notExtendedShort =
-    extension <= 0.003 && extension >= -MAX_EXTENSION_FROM_EMA20;
-
-  // Обязательный pullback к EMA — не входим вдогонку
-  const touchedLong =
-    lastLow <= ema20 * 1.005 ||
+  // Pullback: касание EMA, закрытие обратно по тренду (без momentum-chase)
+  const touchLong =
+    lastLow <= ema20 * 1.006 ||
     lastLow <= ema50 * 1.01 ||
     (prevPrice <= ema20 * 1.006 && lastLow <= ema20 * 1.01);
-
-  const touchedShort =
-    lastHigh >= ema20 * 0.995 ||
+  const touchShort =
+    lastHigh >= ema20 * 0.994 ||
     lastHigh >= ema50 * 0.99 ||
     (prevPrice >= ema20 * 0.994 && lastHigh >= ema20 * 0.99);
 
+  const notExtLong = extension > -0.003 && extension < MAX_EXTENSION_FROM_EMA20;
+  const notExtShort = extension < 0.003 && extension > -MAX_EXTENSION_FROM_EMA20;
+
   const pullbackLong =
-    touchedLong &&
-    bullishCandle &&
+    touchLong &&
+    bullCandle &&
     price >= ema20 * 0.997 &&
     macdBull &&
-    rsiBull &&
-    notExtendedLong;
+    lastRsi > 42 &&
+    lastRsi < 68 &&
+    notExtLong;
 
   const pullbackShort =
-    touchedShort &&
-    bearishCandle &&
+    touchShort &&
+    bearCandle &&
     price <= ema20 * 1.003 &&
     macdBear &&
-    rsiBear &&
-    notExtendedShort;
+    lastRsi < 58 &&
+    lastRsi > 32 &&
+    notExtShort;
 
-  // MACD cross только вместе с касанием зоны EMA (не голый cross в воздухе)
   const crossLong =
     macdCrossUp &&
-    touchedLong &&
-    rsiBull &&
-    notExtendedLong &&
+    touchLong &&
+    bullCandle &&
     price > ema20 &&
-    bullishCandle;
+    lastRsi > 42 &&
+    lastRsi < 68 &&
+    notExtLong;
 
   const crossShort =
     macdCrossDown &&
-    touchedShort &&
-    rsiBear &&
-    notExtendedShort &&
+    touchShort &&
+    bearCandle &&
     price < ema20 &&
-    bearishCandle;
+    lastRsi < 58 &&
+    lastRsi > 32 &&
+    notExtShort;
 
-  // momentum УБРАН — он давал SL за 3–5 баров
-  const trendLongSignal = pullbackLong || crossLong;
-  const trendShortSignal = pullbackShort || crossShort;
+  const longSignal =
+    regime === 'trend_up' &&
+    price > ind.ema200 &&
+    (pullbackLong || crossLong);
 
-  const riskCapital = STARTING_BALANCE * MAX_RISK_PER_TRADE;
+  const shortSignal =
+    regime === 'trend_down' &&
+    price < ind.ema200 &&
+    (pullbackShort || crossShort);
 
-  let side: 'long' | 'short' | 'none' = 'none';
-  let buy = false;
-  let sell = false;
-  let takeProfitPrice: number | null = null;
-  let stopLossPrice: number | null = null;
-  let positionSize: number | null = null;
-  let quantity: number | null = null;
+  if (!longSignal && !shortSignal) {
+    return {
+      ...emptySignal(price, regime),
+      indicators: {
+        ready: true,
+        longSignal,
+        shortSignal,
+        lastRsi,
+        extension,
+        pullbackLong,
+        pullbackShort
+      }
+    };
+  }
 
-  const longBreakoutDisplacement = getBreakoutDisplacement({
-    side: 'long',
+  const side: 'long' | 'short' = longSignal ? 'long' : 'short';
+  const atrStopMult = ind.atrPct > 0.015 ? 1.6 : 1.45;
+
+  const stopLossPrice = getStructureStop({
+    side,
+    highs,
+    lows,
     price,
-    bandLevel: lastBb.upper,
-    lastAtr
-  });
-  const shortBreakoutDisplacement = getBreakoutDisplacement({
-    side: 'short',
-    price,
-    bandLevel: lastBb.lower,
-    lastAtr
-  });
-  const longStructureBreak = getStructureBreak({ side: 'long', highs, lows, price });
-  const shortStructureBreak = getStructureBreak({ side: 'short', highs, lows, price });
-  const volumeSpike = getVolumeSpike(volumes, regimeIndicators.avgVol20);
-
-  const bullishBreakClose =
-    prevPrice <= prevBb.upper &&
-    price > lastBb.upper &&
-    bullishCandle &&
-    bodyPctOfRange >= BREAKOUT_MIN_BODY_PCT &&
-    lastAtr >= prevAtr * 0.95 &&
-    longBreakoutDisplacement.distanceAtr >= BREAKOUT_MIN_ATR_DISPLACEMENT &&
-    longStructureBreak.broken &&
-    volumeSpike;
-
-  const bearishBreakClose =
-    prevPrice >= prevBb.lower &&
-    price < lastBb.lower &&
-    bearishCandle &&
-    bodyPctOfRange >= BREAKOUT_MIN_BODY_PCT &&
-    lastAtr >= prevAtr * 0.95 &&
-    shortBreakoutDisplacement.distanceAtr >= BREAKOUT_MIN_ATR_DISPLACEMENT &&
-    shortStructureBreak.broken &&
-    volumeSpike;
-
-  const baseIndicators = {
-    macdCrossUp,
-    macdCrossDown,
-    pullbackLong,
-    pullbackShort,
-    crossLong,
-    crossShort,
-    trendLongSignal,
-    trendShortSignal,
-    lastRsi,
-    prevRsi,
     lastAtr,
-    bodyPctOfRange,
-    extension,
-    bullishBreakClose,
-    bearishBreakClose,
-    volumeSpike,
-    regimeIndicators,
-    commissionRate: COMMISSION_RATE
-  };
-
-  if (!isTradingHour(last(candles).time)) {
-    return {
-      price,
-      buy: false,
-      sell: false,
-      side: 'none' as const,
-      takeProfitPrice: null,
-      stopLossPrice: null,
-      positionSize: null,
-      quantity: null,
-      regime,
-      indicators: {
-        ...baseIndicators,
-        skippedByTimeFilter: true,
-        expectedNetMove: { grossMove: 0, netMove: 0, netMoveRate: 0 },
-        riskReward: { risk: 0, reward: 0, ratio: 0 },
-        ready: true
-      }
-    };
-  }
-
-  if (regime === 'high_volatility') {
-    return {
-      price,
-      buy: false,
-      sell: false,
-      side: 'none' as const,
-      takeProfitPrice: null,
-      stopLossPrice: null,
-      positionSize: null,
-      quantity: null,
-      regime,
-      indicators: {
-        ...baseIndicators,
-        skippedByRegimeFilter: true,
-        expectedNetMove: { grossMove: 0, netMove: 0, netMoveRate: 0 },
-        riskReward: { risk: 0, reward: 0, ratio: 0 },
-        ready: true
-      }
-    };
-  }
-
-  if (regime === 'trend_up' && trendLongSignal && price > regimeIndicators.ema200) {
-    side = 'long';
-    buy = true;
-
-    stopLossPrice = getStructureStop({
-      side,
-      highs,
-      lows,
-      price,
-      lastAtr,
-      atrStopMultiplier: atrMultipliers.stop
-    });
-
-    const atrTarget = price + lastAtr * atrMultipliers.target;
-    const structureTarget = getStructureTarget({
-      side,
-      highs,
-      lows,
-      price,
-      lastAtr,
-      atrTargetMultiplier: atrMultipliers.target
-    });
-    takeProfitPrice = Math.max(atrTarget, structureTarget ?? atrTarget);
-  }
-
-  if (regime === 'trend_down' && trendShortSignal && price < regimeIndicators.ema200) {
-    side = 'short';
-    sell = true;
-
-    stopLossPrice = getStructureStop({
-      side,
-      highs,
-      lows,
-      price,
-      lastAtr,
-      atrStopMultiplier: atrMultipliers.stop
-    });
-
-    const atrTarget = price - lastAtr * atrMultipliers.target;
-    const structureTarget = getStructureTarget({
-      side,
-      highs,
-      lows,
-      price,
-      lastAtr,
-      atrTargetMultiplier: atrMultipliers.target
-    });
-    takeProfitPrice = Math.min(atrTarget, structureTarget ?? atrTarget);
-  }
-
-  if (ENABLE_BREAKOUT_ENTRIES && regime === 'breakout_watch' && side === 'none') {
-    const breakoutUp =
-      bullishBreakClose && lastRsi > 52 && lastRsi < 75 && price > ema20 && macdBull;
-    const breakoutDown =
-      bearishBreakClose && lastRsi < 48 && lastRsi > 25 && price < ema20 && macdBear;
-
-    if (breakoutUp) {
-      side = 'long';
-      buy = true;
-      stopLossPrice = getStructureStop({
-        side,
-        highs,
-        lows,
-        price,
-        lastAtr,
-        atrStopMultiplier: atrMultipliers.stop
-      });
-      const atrTarget = price + lastAtr * atrMultipliers.target;
-      const structureTarget = getStructureTarget({
-        side,
-        highs,
-        lows,
-        price,
-        lastAtr,
-        atrTargetMultiplier: atrMultipliers.target
-      });
-      takeProfitPrice = Math.max(atrTarget, structureTarget ?? atrTarget);
-    } else if (breakoutDown) {
-      side = 'short';
-      sell = true;
-      stopLossPrice = getStructureStop({
-        side,
-        highs,
-        lows,
-        price,
-        lastAtr,
-        atrStopMultiplier: atrMultipliers.stop
-      });
-      const atrTarget = price - lastAtr * atrMultipliers.target;
-      const structureTarget = getStructureTarget({
-        side,
-        highs,
-        lows,
-        price,
-        lastAtr,
-        atrTargetMultiplier: atrMultipliers.target
-      });
-      takeProfitPrice = Math.min(atrTarget, structureTarget ?? atrTarget);
-    }
-  }
-
-  void ENABLE_RANGE_ENTRIES;
-
-  ({ stopLossPrice, takeProfitPrice } = validateExitLevels({
-    side,
-    price,
-    stopLossPrice,
-    takeProfitPrice,
-    lastAtr
-  }));
-
-  takeProfitPrice = normalizeTakeProfit({
-    side,
-    price,
-    takeProfitPrice,
-    stopLossPrice,
-    lastAtr
+    atrStopMult
   });
 
-  const netMoveCheck = expectedNetMove({ side, price, takeProfitPrice });
-  const netRR = getNetRiskReward({ side, price, stopLossPrice, takeProfitPrice });
+  const initialR = Math.abs(price - stopLossPrice);
+  const stopPct = initialR / price;
 
+  // Кап стопа: слишком узкий/широкий — пас
   if (
-    side !== 'none' &&
-    (netMoveCheck.netMoveRate < MIN_EXPECTED_NET_MOVE_RATE ||
-      netRR.ratio < MIN_RISK_REWARD_RATIO ||
-      netRR.stopDist < price * MIN_STOP_DISTANCE_RATE ||
-      netRR.stopDist > price * MAX_STOP_DISTANCE_RATE)
+    initialR <= 0 ||
+    stopPct < MIN_STOP_DISTANCE_RATE ||
+    stopPct > MAX_STOP_DISTANCE_RATE
   ) {
-    side = 'none';
-    buy = false;
-    sell = false;
-    takeProfitPrice = null;
-    stopLossPrice = null;
+    return {
+      ...emptySignal(price, regime),
+      indicators: { ready: true, reject: 'stop_distance', stopPct }
+    };
   }
 
-  if (side !== 'none' && stopLossPrice != null) {
-    const sized = calcPositionSize({
-      price,
-      stopLossPrice,
-      riskCapital,
-      balance: STARTING_BALANCE
-    });
+  // TP от R — предсказуемый RR (partial + runner)
+  const takeProfit1Price =
+    side === 'long' ? price + TP1_R * initialR : price - TP1_R * initialR;
+  const takeProfit2Price =
+    side === 'long' ? price + TP2_R * initialR : price - TP2_R * initialR;
 
-    if (sized.rejectReason || sized.quantity == null) {
-      side = 'none';
-      buy = false;
-      sell = false;
-      takeProfitPrice = null;
-      stopLossPrice = null;
-      positionSize = null;
-      quantity = null;
-    } else {
-      quantity = sized.quantity;
-      positionSize = sized.positionSize;
-    }
+  const riskCapital = balance * MAX_RISK_PER_TRADE;
+  const sized = calcPositionSize({
+    price,
+    stopLossPrice,
+    riskCapital,
+    balance
+  });
+
+  if (sized.quantity == null) {
+    return {
+      ...emptySignal(price, regime),
+      indicators: { ready: true, reject: 'size' }
+    };
   }
 
   return {
     price,
-    buy,
-    sell,
+    buy: side === 'long',
+    sell: side === 'short',
     side,
-    takeProfitPrice,
     stopLossPrice,
-    positionSize,
-    quantity,
+    takeProfit1Price,
+    takeProfit2Price,
+    takeProfitPrice: takeProfit2Price,
+    tp1Fraction: TP1_FRACTION,
+    positionSize: sized.positionSize,
+    quantity: sized.quantity,
     regime,
+    initialR,
     indicators: {
-      ...baseIndicators,
-      expectedNetMove: netMoveCheck,
-      riskReward: netRR,
-      riskCapital,
-      ready: true
+      ready: true,
+      lastRsi,
+      extension,
+      initialR,
+      stopPct,
+      tp1: takeProfit1Price,
+      tp2: takeProfit2Price,
+      pullbackLong,
+      pullbackShort,
+      crossLong,
+      crossShort,
+      macdBull,
+      macdBear
     }
   };
 }
