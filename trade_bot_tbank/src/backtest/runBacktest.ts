@@ -4,16 +4,21 @@ import { runStrategyBacktest } from './strategyBacktest';
 import { Candle } from '../services/strategy';
 
 /**
- * Количество свечей паузы после убыточной сделки / стопа.
- * Можно менять через CLI четвертым аргументом.
+ * Пауза после убыточной сделки / стопа (свечи).
+ * Можно переопределить 4-м аргументом CLI.
  */
 const DEFAULT_COOLDOWN_CANDLES = 6;
 
-/**
- * Как часто печатать прогресс в консоль.
- * Например, раз в 5000 обработанных свечей.
- */
+/** Как часто печатать прогресс (0 = выкл.). */
 const PROGRESS_LOG_EVERY = 5000;
+
+/**
+ * Параметры управления стопом (должны совпадать с вызовом runStrategyBacktest).
+ * BE/lock-in после 1.6R — чтобы крупные TP не срезались раньше времени.
+ * Трейл выключен, пока не вернём стабильные take_profit.
+ */
+const MOVE_TO_BREAKEVEN_R = 1.6;
+const TRAIL_AFTER_BREAKEVEN_R = 0;
 
 /** ANSI-цвета для терминала */
 const ANSI = {
@@ -27,7 +32,7 @@ const ANSI = {
 } as const;
 
 /**
- * Окраска строки. Если stdout не TTY — без escape-кодов.
+ * Окраска строки. Если stdout не TTY (pipe/файл) — без escape-кодов.
  */
 function colorize(text: string, color: keyof typeof ANSI): string {
   if (!process.stdout.isTTY) {
@@ -36,17 +41,11 @@ function colorize(text: string, color: keyof typeof ANSI): string {
   return `${ANSI[color]}${text}${ANSI.reset}`;
 }
 
-/**
- * Преобразование значения в число.
- */
 function toNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : NaN;
 }
 
-/**
- * Проверка, что объект похож на свечу.
- */
 function isValidCandle(candidate: unknown): candidate is Candle {
   if (!candidate || typeof candidate !== 'object') return false;
 
@@ -62,10 +61,6 @@ function isValidCandle(candidate: unknown): candidate is Candle {
   );
 }
 
-/**
- * Нормализация массива свечей.
- * На выходе всегда числа и сортировка по времени.
- */
 function normalizeCandles(raw: unknown): Candle[] {
   if (!Array.isArray(raw)) {
     throw new Error('JSON должен содержать массив свечей.');
@@ -89,27 +84,17 @@ function normalizeCandles(raw: unknown): Candle[] {
   return candles.sort((a, b) => a.time - b.time);
 }
 
-/**
- * Короткое форматирование числа для красивого вывода.
- */
 function formatNumber(value: number, digits = 4): string {
   if (!Number.isFinite(value)) return 'NaN';
   return value.toFixed(digits);
 }
 
-/**
- * Форматирование даты для консоли.
- */
 function formatDate(ts: number): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return String(ts);
   return d.toISOString();
 }
 
-/**
- * Чтение количества свечей cooldown из CLI.
- * Если аргумент не передан или некорректен — берем значение по умолчанию.
- */
 function parseCooldownCandles(value: string | undefined): number {
   if (value == null) {
     return DEFAULT_COOLDOWN_CANDLES;
@@ -127,9 +112,6 @@ function parseCooldownCandles(value: string | undefined): number {
   return parsed;
 }
 
-/**
- * Форматирование секунд в человекочитаемый вид.
- */
 function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) {
     return 'неизвестно';
@@ -152,9 +134,6 @@ function formatDuration(seconds: number): string {
   return `${hours} ч ${mins} мин`;
 }
 
-/**
- * Оценка времени выполнения бэктеста по числу свечей.
- */
 function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: number } {
   if (candlesCount <= 5000) {
     return { minSec: 5, maxSec: 20 };
@@ -176,7 +155,7 @@ function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: n
 }
 
 /**
- * Печать итоговой статистики (с цветом net profit / return).
+ * Итоги бэктеста: плюс — зелёный, минус — красный.
  */
 function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   const s = result.summary;
@@ -217,10 +196,8 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
 
 /**
  * Печать сделок.
- * Без limit — все сделки.
- * С limit — только последние N.
- *
- * Прибыльные — зелёные, убыточные — красные, BE (~0) — жёлтые.
+ * Без limit — все; с limit — последние N.
+ * Прибыль — зелёный, убыток — красный, ноль — жёлтый.
  */
 function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: number) {
   const all = result.trades;
@@ -262,7 +239,6 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
       `Bars: ${trade.barsHeld}`
     ].join(' | ');
 
-    // > 0 — win (зелёный), < 0 — loss (красный), ≈0 — BE (жёлтый)
     if (trade.netPnl > 0) {
       console.log(colorize(line, 'green'));
     } else if (trade.netPnl < 0) {
@@ -273,9 +249,6 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
   }
 }
 
-/**
- * Печать подсказки по запуску.
- */
 function printUsage() {
   console.log(`
 Использование:
@@ -287,9 +260,6 @@ function printUsage() {
 `);
 }
 
-/**
- * Основная CLI-функция.
- */
 function main() {
   const [, , inputPathArg, symbolArg, cooldownCandlesArg] = process.argv;
 
@@ -349,8 +319,12 @@ function main() {
     `Оценка времени:        ~ ${formatDuration(estimated.minSec)} - ${formatDuration(estimated.maxSec)}`
   );
   console.log(`Лог прогресса:         каждые ${PROGRESS_LOG_EVERY} свечей`);
-  console.log(`Breakeven после:       1.0 R`);
-  console.log(`Trail после BE:        1.2 R`);
+  console.log(`Lock-in после:         ${MOVE_TO_BREAKEVEN_R} R (стоп ≈ entry ± 0.3R)`);
+  console.log(
+    `Trail после lock-in:   ${
+      TRAIL_AFTER_BREAKEVEN_R > 0 ? `${TRAIL_AFTER_BREAKEVEN_R} R` : 'выкл.'
+    }`
+  );
 
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
@@ -376,10 +350,10 @@ function main() {
       conservativeIntrabarExecution: true,
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
-      // После 1R в плюс — стоп в BE
-      moveToBreakevenR: 1.0,
-      // Затем трейл 1.2R от экстремума (0 = только BE)
-      trailAfterBreakevenR: 1.2
+      // Lock-in только после 1.6R — не режем победы на полпути к TP
+      moveToBreakevenR: MOVE_TO_BREAKEVEN_R,
+      // Трейл выкл., пока снова не появятся стабильные take_profit
+      trailAfterBreakevenR: TRAIL_AFTER_BREAKEVEN_R
     });
   } finally {
     clearInterval(heartbeat);
