@@ -103,8 +103,6 @@
     .pager{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto}
     .pager-info{font-size:var(--text-sm);color:var(--color-text-muted);min-width:150px;text-align:center}
     .mobile-note{display:none;color:var(--color-text-muted);font-size:var(--text-sm);margin-top:var(--space-3)}
-    .readonly-field{border:1px solid var(--color-border);background:var(--color-surface-2);color:var(--color-text);text-align:center;cursor:default}
-    .readonly-field:focus{outline:none}
     @media (max-width: 1100px){.overview{grid-template-columns:1fr}}
     @media (max-width: 720px){
       .app{padding:var(--space-4)}
@@ -171,11 +169,6 @@
         </div>
         <div class="card-actions">
           <button class="primary-btn equal-btn" id="refreshSignalsBtn">Обновить</button>
-          <select id="signalFilter">
-            <option value="all">Сигнал = Все</option>
-            <option value="true">Сигнал = Да</option>
-            <option value="false">Сигнал = Нет</option>
-          </select>
           <select id="pairFilter">
             <option value="all">Пара = Все</option>
           </select>
@@ -237,26 +230,6 @@
             <option value="2weeks">За 2 недели</option>
             <option value="month">За месяц</option>
           </select>
-
-          <input
-            type="text"
-            id="currentPositionPrice"
-            class="ghost-btn equal-btn readonly-field"
-            value="-"
-            readonly
-            aria-label="Текущая цена открытой позиции Crypto"
-          />
-          <button class="primary-btn equal-btn" id="refreshPositionPriceBtn">Crypto</button>
-
-          <input
-            type="text"
-            id="moexPositionPrice"
-            class="ghost-btn equal-btn readonly-field"
-            value="-"
-            readonly
-            aria-label="Текущая цена открытой позиции Moex"
-          />
-          <button class="primary-btn equal-btn" id="refreshMoexPositionPriceBtn">Moex</button>
         </div>
         <div class="table-wrap">
           <table>
@@ -291,7 +264,6 @@
       const themeBtn = document.querySelector('[data-theme-toggle]');
       const refreshSignalsBtn = document.getElementById('refreshSignalsBtn');
       const refreshBotsPositionsBtn = document.getElementById('refreshBotsPositionsBtn');
-      const signalFilter = document.getElementById('signalFilter');
       const pairFilter = document.getElementById('pairFilter');
       const periodFilter = document.getElementById('periodFilter');
       const prevPageBtn = document.getElementById('prevPageBtn');
@@ -303,10 +275,6 @@
       const refreshTradesBtn = document.getElementById('refreshTradesBtn');
       const tradePairFilter = document.getElementById('tradePairFilter');
       const tradePeriodFilter = document.getElementById('tradePeriodFilter');
-      const currentPositionPriceInput = document.getElementById('currentPositionPrice');
-      const refreshPositionPriceBtn = document.getElementById('refreshPositionPriceBtn');
-      const moexPositionPriceInput = document.getElementById('moexPositionPrice');
-      const refreshMoexPositionPriceBtn = document.getElementById('refreshMoexPositionPriceBtn');
 
       let theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       let botsState = [];
@@ -316,7 +284,6 @@
       let botPositionMap = {};
       let currentPage = 1;
       const pageSize = 5;
-      let signalFilterValue = 'all';
       let pairFilterValue = 'all';
       let periodFilterValue = 'all';
       let tradePairFilterValue = 'all';
@@ -357,12 +324,7 @@
         const days = daysFromPeriod(periodFilterValue);
         const now = new Date();
         return signalsState.filter((s) => {
-          const hasSignal = Boolean(s.buy) || Boolean(s.sell);
           const pair = getPairValue(s);
-          if (signalFilterValue !== 'all') {
-            if (signalFilterValue === 'true' && !hasSignal) return false;
-            if (signalFilterValue === 'false' && hasSignal) return false;
-          }
           if (pairFilterValue !== 'all' && pair !== pairFilterValue) return false;
           if (!days) return true;
           const d = new Date(s.created_at);
@@ -396,8 +358,6 @@
         return '';
       }
 
-      // Универсальная проверка наличия позиции:
-      // если webhook вернул action === "hold", считаем что позиция открыта
       async function checkBotPositionByWebhook(url) {
         try {
           const res = await fetch(url, {
@@ -419,17 +379,13 @@
         }
       }
 
-      // Возвращаем webhook для проверки позиции по id бота
       function getPositionWebhookByBotId(botId) {
         const id = Number(botId);
-
         if (id === 1) return 'https://n8n.kino-test.ru/webhook/check_position';
         if (id === 2) return 'https://n8n.kino-test.ru/webhook/check_position_moex';
-
         return null;
       }
 
-      // Обновляем наличие позиции для всех ботов из таблицы
       async function refreshBotsPositions() {
         botsState.forEach((bot) => {
           botPositionMap[bot.id_bot] = null;
@@ -566,65 +522,6 @@
         renderTradesTable();
       }
 
-      async function loadPositionPrice() {
-        currentPositionPriceInput.value = 'Загрузка...';
-        try {
-          const res = await fetch('https://n8n.kino-test.ru/webhook/check_position', {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' }
-          });
-
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-          const json = await res.json();
-          const items = normalizeResponse(json);
-          const item = items[0] || {};
-          const action = String(item.action || '').toLowerCase();
-
-          if (action === 'hold') {
-            currentPositionPriceInput.value = item.currentPrice != null ? formatNumber(item.currentPrice, 8) : '-';
-          } else {
-            currentPositionPriceInput.value = '-';
-          }
-        } catch (error) {
-          console.error('loadPositionPrice error:', error);
-          currentPositionPriceInput.value = 'Ошибка';
-        }
-      }
-
-      async function loadMoexPositionPrice() {
-        moexPositionPriceInput.value = 'Загрузка...';
-        try {
-          const res = await fetch('https://n8n.kino-test.ru/webhook/check_position_moex', {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' }
-          });
-
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-          const json = await res.json();
-          const items = normalizeResponse(json);
-          const item = items[0] || {};
-          const action = String(item.action || '').toLowerCase();
-
-          if (action === 'hold') {
-            moexPositionPriceInput.value =
-              item.currentPrice != null
-                ? formatNumber(item.currentPrice, 8)
-                : item.price != null
-                  ? formatNumber(item.price, 8)
-                  : item.close_price != null
-                    ? formatNumber(item.close_price, 8)
-                    : '-';
-          } else {
-            moexPositionPriceInput.value = '-';
-          }
-        } catch (error) {
-          console.error('loadMoexPositionPrice error:', error);
-          moexPositionPriceInput.value = 'Ошибка';
-        }
-      }
-
       function selectBot(botId) {
         currentBotId = botId;
         currentPage = 1;
@@ -632,8 +529,6 @@
         renderBotDetails(botsState.find((b) => String(b.id_bot) === String(botId)));
         loadSignals(botId);
         loadPositions(botId);
-        loadPositionPrice();
-        loadMoexPositionPrice();
       }
 
       async function loadBots() {
@@ -731,14 +626,6 @@
       refreshBotsPositionsBtn.addEventListener('click', () => refreshBotsPositions());
       refreshSignalsBtn.addEventListener('click', () => loadSignals(currentBotId));
       refreshTradesBtn.addEventListener('click', () => loadPositions(currentBotId));
-      refreshPositionPriceBtn.addEventListener('click', () => loadPositionPrice());
-      refreshMoexPositionPriceBtn.addEventListener('click', () => loadMoexPositionPrice());
-
-      signalFilter.addEventListener('change', () => {
-        signalFilterValue = signalFilter.value;
-        currentPage = 1;
-        renderSignalsTable();
-      });
 
       pairFilter.addEventListener('change', () => {
         pairFilterValue = pairFilter.value;
