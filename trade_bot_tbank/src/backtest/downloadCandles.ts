@@ -71,7 +71,7 @@ async function fetchCandles(params: {
   const response = await axios.post<ApiResponse>(
     url,
     {
-      figi,
+      instrumentId: figi,
       from: from.toISOString(),
       to: to.toISOString(),
       interval
@@ -177,10 +177,20 @@ async function main() {
 
 main().catch(error => {
   console.error('Ошибка загрузки свечей');
+
   if (axios.isAxiosError(error)) {
-    console.error(error.response?.status, error.response?.data);
+    console.error('message:', error.message);
+    console.error('code:', error.code);
+
+    if (error.response) {
+      console.error('status:', error.response.status);
+      console.error('data:', JSON.stringify(error.response.data, null, 2));
+    } else {
+      console.error('response: отсутствует');
+    }
   } else {
     console.error(error);
   }
+
   process.exit(1);
 });
