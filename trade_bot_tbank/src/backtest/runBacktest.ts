@@ -7,7 +7,7 @@ import { Candle } from '../services/strategy';
  * Пауза после любой закрытой сделки (свечи).
  * Можно переопределить 4-м аргументом CLI.
  */
-const DEFAULT_COOLDOWN_CANDLES = 12;
+const DEFAULT_COOLDOWN_CANDLES = 6;
 
 /** Как часто печатать прогресс (0 = выкл.). */
 const PROGRESS_LOG_EVERY = 5000;
@@ -252,7 +252,7 @@ function printUsage() {
 
 Пример:
   npm run backtest -- ./src/backtest/data/SBER_15m.json SBER
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
+  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 6
 `);
 }
 
@@ -319,9 +319,10 @@ function main() {
     )}`
   );
   console.log(`Лог прогресса:         каждые ${PROGRESS_LOG_EVERY} свечей`);
-  console.log(`Модель выхода:         TP1 50%@1.2R → lock 0.2R → TP2@2.5R`);
+  console.log(`Риск на сделку:        2% (MAX_RISK_PER_TRADE в strategy.ts)`);
+  console.log(`Модель выхода:         TP1 40%@1.3R → lock 0.5R + trail 1.2R → TP2@3R`);
   console.log(`Лимит входов в день:   выкл.`);
-  console.log(`Time-stop / abort:     64 бар / 16 бар < 0.25R`);
+  console.log(`Time-stop / abort:     80 бар / выкл.`);
   console.log(`Кап стопа:             ≤ 1.2% цены`);
 
   const startedAt = Date.now();
@@ -353,10 +354,11 @@ function main() {
       conservativeIntrabarExecution: true,
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
-      maxTradesPerDay: 0, // без лимита «1 вход в день»
-      timeStopBars: 64,
-      earlyAbortBars: 16,
-      earlyAbortMinR: 0.25
+      maxTradesPerDay: 0,
+      timeStopBars: 80,
+      earlyAbortBars: 0,
+      earlyAbortMinR: 0.25,
+      runnerTrailR: 1.2
     });
   } finally {
     clearInterval(heartbeat);
