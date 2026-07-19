@@ -33,6 +33,12 @@ export interface BacktestOptions {
    * считаем, что сработал стоп.
    */
   conservativeIntrabarExecution?: boolean;
+
+  /**
+   * Количество свечей паузы после убыточной сделки / стопа.
+   * Пока пауза активна, новые входы запрещены.
+   */
+  cooldownCandles?: number;
 }
 
 /**
@@ -426,7 +432,8 @@ export function runStrategyBacktest(
     commissionRate: options.commissionRate ?? 0.003,
     warmupCandles: options.warmupCandles ?? 250,
     onePositionAtTime: options.onePositionAtTime ?? true,
-    conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true
+    conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true,
+    cooldownCandles: options.cooldownCandles ?? 4
   };
 
   if (!Array.isArray(candles) || candles.length === 0) {
@@ -451,6 +458,9 @@ export function runStrategyBacktest(
   let openPosition: OpenPosition | null = null;
   let openPositionIndex = -1;
 
+  // Счетчик свечей паузы после убыточной сделки / стопа
+  let cooldownRemaining = 0;
+
   const trades: BacktestTrade[] = [];
   const equityCurve: Array<{ time: number; balance: number }> = [
     { time: sortedCandles[0].time, balance: round(balance) }
@@ -460,6 +470,7 @@ export function runStrategyBacktest(
     const visibleCandles = sortedCandles.slice(0, i + 1);
     const currentCandle = sortedCandles[i];
 
+    // Если есть открытая позиция — сначала проверяем выход
     if (openPosition) {
       const exit = checkExitOnCandle({
         position: openPosition,
@@ -483,9 +494,29 @@ export function runStrategyBacktest(
         trades.push(trade);
         equityCurve.push({ time: currentCandle.time, balance: round(balance) });
 
+        // Если получили стоп или убыточную сделку —
+        // включаем паузу на заданное число свечей
+        if (
+          trade.closeReason === 'stop_loss' ||
+          trade.netPnl <= 0
+        ) {
+          cooldownRemaining = resolvedOptions.cooldownCandles;
+        }
+
         openPosition = null;
         openPositionIndex = -1;
       }
+    }
+
+    // Пока есть открытая позиция — новую не открываем
+    if (openPosition && resolvedOptions.onePositionAtTime) {
+      continue;
+    }
+
+    // Если активен cooldown — пропускаем входы на этой свече
+    if (cooldownRemaining > 0) {
+      cooldownRemaining -= 1;
+      continue;
     }
 
     if (!openPosition || !resolvedOptions.onePositionAtTime) {
