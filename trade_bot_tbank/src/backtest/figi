@@ -1,8 +1,16 @@
 export TINVEST_TOKEN=t.JEad0aPyZeL3vpVxMbMYWlHkkZKnt5TPIEqGgbv9z4Avxo_j45AYmw-xDgNIsFLmndf61-5VSgM_jX82sYsadw
 
+Получение истории
+
 npm run download:candles -- BBG004730N88 SBER 21
 npm run download:candles -- BBG004730RP0 GAZP 21
 npm run download:candles -- BBG004731354 ROSN 21
 npm run download:candles -- BBG006L8G4H1 YNDX 21
 npm run download:candles -- BBG000R607Y3 IRKT 21
 npm run download:candles -- BBG004S683W7 AFLT 21
+
+Запуск теста
+
+npm run backtest -- src/backtest/data/SBER_15m.json SBER
+
+
