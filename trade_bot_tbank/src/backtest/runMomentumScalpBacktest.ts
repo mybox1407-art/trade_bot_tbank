@@ -2,13 +2,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   Candle,
-  DEFAULT_SCALP_V2_PARAMS,
-  MomentumScalpV2Params
+  DEFAULT_SCALP_PARAMS,
+  ScalpParams
 } from '../services/momentumScalpStrategy';
 import {
-  runMomentumScalpBacktestV2,
-  ScalpBacktestResultV2,
-  ScalpTradeV2,
+  runMomentumScalpBacktest,
+  ScalpBacktestResult,
+  ScalpTrade,
   RejectStat
 } from './momentumScalpBacktest';
 
@@ -65,8 +65,8 @@ function parseSide(value: string | undefined): SideFilter {
   return 'both';
 }
 
-function buildParams(preset: PresetName): MomentumScalpV2Params {
-  const base: MomentumScalpV2Params = { ...DEFAULT_SCALP_V2_PARAMS };
+function buildParams(preset: PresetName): ScalpParams {
+  const base: ScalpParams = { ...DEFAULT_SCALP_PARAMS };
 
   if (preset === 'base') {
     return base;
@@ -96,7 +96,7 @@ function buildParams(preset: PresetName): MomentumScalpV2Params {
   };
 }
 
-function printParams(params: MomentumScalpV2Params, preset: PresetName, side: SideFilter) {
+function printParams(params: ScalpParams, preset: PresetName, side: SideFilter) {
   console.log('\n=== PRESET ===');
   console.log(preset);
 
@@ -135,14 +135,14 @@ function printParams(params: MomentumScalpV2Params, preset: PresetName, side: Si
   ]);
 }
 
-function printSummary(result: ScalpBacktestResultV2) {
+function printSummary(result: ScalpBacktestResult) {
   const startingBalance = result.equity[0] ?? 0;
   const absoluteReturn = result.finalBalance - startingBalance;
   const drawdownPct = startingBalance > 0
     ? (result.maxDrawdown / startingBalance) * 100
     : 0;
 
-  console.log('\n=== MOMENTUM SCALP V2 BACKTEST RESULT ===');
+  console.log('\n=== MOMENTUM SCALP BACKTEST RESULT ===');
   console.log(`Starting Balance: ${formatCurrency(startingBalance)} ₽`);
   console.log(`Final Balance:    ${formatCurrency(result.finalBalance)} ₽`);
   console.log(`Total Return:     ${formatSignedCurrency(absoluteReturn)} ₽ (${formatPct(result.totalReturn)})`);
@@ -159,18 +159,18 @@ function printSummary(result: ScalpBacktestResultV2) {
   console.log(`Commission Total: ${formatCurrency(result.commissionTotal)} ₽`);
 }
 
-function printTradeStats(result: ScalpBacktestResultV2) {
+function printTradeStats(result: ScalpBacktestResult) {
   if (result.trades.length === 0) {
     console.log('\n=== TRADE STATS ===');
     console.log('No trades');
     return;
   }
 
-  const positiveNet = result.trades.filter((t: ScalpTradeV2) => t.netPnl > 0).length;
-  const negativeNet = result.trades.filter((t: ScalpTradeV2) => t.netPnl < 0).length;
-  const positiveGross = result.trades.filter((t: ScalpTradeV2) => t.grossPnl > 0).length;
-  const longTrades = result.trades.filter((t: ScalpTradeV2) => t.side === 'long').length;
-  const shortTrades = result.trades.filter((t: ScalpTradeV2) => t.side === 'short').length;
+  const positiveNet = result.trades.filter((t: ScalpTrade) => t.netPnl > 0).length;
+  const negativeNet = result.trades.filter((t: ScalpTrade) => t.netPnl < 0).length;
+  const positiveGross = result.trades.filter((t: ScalpTrade) => t.grossPnl > 0).length;
+  const longTrades = result.trades.filter((t: ScalpTrade) => t.side === 'long').length;
+  const shortTrades = result.trades.filter((t: ScalpTrade) => t.side === 'short').length;
 
   console.log('\n=== TRADE STATS ===');
   console.log(`Positive net trades: ${positiveNet}`);
@@ -180,7 +180,7 @@ function printTradeStats(result: ScalpBacktestResultV2) {
   console.log(`Short trades: ${shortTrades}`);
 }
 
-function printRejectStats(result: ScalpBacktestResultV2) {
+function printRejectStats(result: ScalpBacktestResult) {
   console.log('\n=== REJECT REASONS ===');
 
   if (!result.rejectStats || result.rejectStats.length === 0) {
@@ -203,7 +203,7 @@ function printRejectStats(result: ScalpBacktestResultV2) {
   console.log(`Total rejects: ${totalRejects}`);
 }
 
-function printTrades(result: ScalpBacktestResultV2, limit: number = 200) {
+function printTrades(result: ScalpBacktestResult, limit: number = 200) {
   if (result.trades.length === 0) {
     return;
   }
@@ -215,7 +215,7 @@ function printTrades(result: ScalpBacktestResultV2, limit: number = 200) {
 
   const rows = result.trades.slice(0, limit);
 
-  rows.forEach((t: ScalpTradeV2, i: number) => {
+  rows.forEach((t: ScalpTrade, i: number) => {
     const signalTime = new Date(t.signalTime).toISOString();
     const entryTime = new Date(t.entryTime).toISOString();
 
@@ -248,10 +248,10 @@ function printTrades(result: ScalpBacktestResultV2, limit: number = 200) {
   }
 }
 
-function printExitDistribution(result: ScalpBacktestResultV2) {
+function printExitDistribution(result: ScalpBacktestResult) {
   const counts: Record<string, number> = {};
 
-  result.trades.forEach((t: ScalpTradeV2) => {
+  result.trades.forEach((t: ScalpTrade) => {
     counts[t.exitReason] = (counts[t.exitReason] || 0) + 1;
   });
 
@@ -283,7 +283,7 @@ function main() {
   const params = buildParams(preset);
 
   const startedAt = Date.now();
-  const result = runMomentumScalpBacktestV2(candles, params, {
+  const result = runMomentumScalpBacktest(candles, params, {
     allowLongs: side !== 'short',
     allowShorts: side !== 'long'
   });
