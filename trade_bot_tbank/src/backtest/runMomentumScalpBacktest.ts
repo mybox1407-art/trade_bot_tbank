@@ -1,10 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Candle, DEFAULT_SCALP_PARAMS } from '../services/momentumScalpStrategy';
+import { Candle, DEFAULT_SCALP_PARAMS, ScalpParams } from '../services/momentumScalpStrategy';
 import {
   runMomentumScalpBacktest,
   ScalpBacktestResult,
-  ScalpTrade
+  ScalpTrade,
+  RejectStat
 } from './momentumScalpBacktest';
 
 function loadCandles(filePath: string): Candle[] {
@@ -33,38 +34,99 @@ function formatCurrency(n: number): string {
   });
 }
 
-function formatPctFromFraction(n: number): string {
-  return (n * 100).toFixed(2) + '%';
+function formatSignedCurrency(n: number): string {
+  return `${n >= 0 ? '+' : ''}${formatCurrency(n)}`;
 }
 
-function formatSigned(n: number): string {
-  return `${n >= 0 ? '+' : ''}${formatCurrency(n)}`;
+function formatPct(n: number): string {
+  return `${n.toFixed(2)}%`;
+}
+
+function formatFractionPct(n: number): string {
+  return `${(n * 100).toFixed(2)}%`;
+}
+
+function printParams(params: ScalpParams) {
+  console.log('\n=== PARAMS ===');
+  console.table([
+    { name: 'riskPerTrade', value: params.riskPerTrade },
+    { name: 'maxRiskPerTrade', value: params.maxRiskPerTrade },
+    { name: 'commissionRate', value: params.commissionRate },
+    { name: 'slippageRate', value: params.slippageRate },
+    { name: 'atrPeriod', value: params.atrPeriod },
+    { name: 'atrSlMult', value: params.atrSlMult },
+    { name: 'atrTpMult', value: params.atrTpMult },
+    { name: 'emaFastPeriod', value: params.emaFastPeriod },
+    { name: 'emaSlowPeriod', value: params.emaSlowPeriod },
+    { name: 'vwapPeriod', value: params.vwapPeriod },
+    { name: 'volumeLookback', value: params.volumeLookback },
+    { name: 'volumeMinRatio', value: params.volumeMinRatio },
+    { name: 'minAtrPct', value: params.minAtrPct },
+    { name: 'minImpulsePct', value: params.minImpulsePct },
+    { name: 'minTargetMovePct', value: params.minTargetMovePct },
+    { name: 'minCostCoverage', value: params.minCostCoverage },
+    { name: 'maxPositionNotionalPct', value: params.maxPositionNotionalPct },
+    { name: 'maxEntryDistanceFromVwapPct', value: params.maxEntryDistanceFromVwapPct },
+    { name: 'timeStopBars', value: params.timeStopBars },
+    { name: 'sessionStartHour', value: params.sessionStartHour },
+    { name: 'sessionEndHour', value: params.sessionEndHour },
+    { name: 'afternoonStartHour', value: params.afternoonStartHour },
+    { name: 'afternoonEndHour', value: params.afternoonEndHour },
+    { name: 'cooldownBars', value: params.cooldownBars }
+  ]);
 }
 
 function printSummary(result: ScalpBacktestResult) {
   const startingBalance = result.equity[0] ?? 0;
-  const ddPct = startingBalance > 0
+  const absoluteReturn = result.finalBalance - startingBalance;
+  const drawdownPct = startingBalance > 0
     ? (result.maxDrawdown / startingBalance) * 100
     : 0;
 
   console.log('\n=== MOMENTUM SCALP BACKTEST RESULT ===');
   console.log(`Starting Balance: ${formatCurrency(startingBalance)} ₽`);
   console.log(`Final Balance:    ${formatCurrency(result.finalBalance)} ₽`);
-  console.log(
-    `Total Return:     ${formatSigned(result.finalBalance - startingBalance)} ₽ (${result.totalReturn.toFixed(2)}%)`
-  );
+  console.log(`Total Return:     ${formatSignedCurrency(absoluteReturn)} ₽ (${formatPct(result.totalReturn)})`);
   console.log(`Total Trades:     ${result.totalTrades}`);
-  console.log(`Win Rate:         ${formatPctFromFraction(result.winRate)}`);
-  console.log(`Profit Factor:    ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : 'Infinity'}`);
-  console.log(`Max Drawdown:     ${formatCurrency(result.maxDrawdown)} ₽ (${ddPct.toFixed(2)}%)`);
-  console.log(`Avg Trade:        ${formatSigned(result.avgTrade)} ₽`);
+  console.log(`Win Rate:         ${formatFractionPct(result.winRate)}`);
+  console.log(
+    `Profit Factor:    ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : 'Infinity'}`
+  );
+  console.log(`Max Drawdown:     ${formatCurrency(result.maxDrawdown)} ₽ (${formatPct(drawdownPct)})`);
+  console.log(`Avg Trade:        ${formatSignedCurrency(result.avgTrade)} ₽`);
   console.log(`Avg Bars Held:    ${result.avgBars.toFixed(1)}`);
   console.log(`Gross Profit:     ${formatCurrency(result.grossProfit)} ₽`);
   console.log(`Gross Loss:       ${formatCurrency(result.grossLoss)} ₽`);
   console.log(`Commission Total: ${formatCurrency(result.commissionTotal)} ₽`);
 }
 
-function printTrades(result: ScalpBacktestResult) {
+function printTradeStats(result: ScalpBacktestResult) {
+  if (result.trades.length === 0) {
+    console.log('\n=== TRADE STATS ===');
+    console.log('No trades');
+    return;
+  }
+
+  const positiveNet = result.trades.filter((t: ScalpTrade) => t.netPnl > 0).length;
+  const negativeNet = result.trades.filter((t: ScalpTrade) => t.netPnl < 0).length;
+  const positiveGross = result.trades.filter((t: ScalpTrade) => t.grossPnl > 0).length;
+  const negativeTakeProfits = result.trades.filter(
+    (t: ScalpTrade) => t.exitReason === 'take_profit' && t.netPnl < 0
+  ).length;
+
+  const longTrades = result.trades.filter((t: ScalpTrade) => t.side === 'long').length;
+  const shortTrades = result.trades.filter((t: ScalpTrade) => t.side === 'short').length;
+
+  console.log('\n=== TRADE STATS ===');
+  console.log(`Positive net trades: ${positiveNet}`);
+  console.log(`Negative net trades: ${negativeNet}`);
+  console.log(`Positive gross trades: ${positiveGross}`);
+  console.log(`Negative take_profit trades after costs: ${negativeTakeProfits}`);
+  console.log(`Long trades: ${longTrades}`);
+  console.log(`Short trades: ${shortTrades}`);
+}
+
+function printTrades(result: ScalpBacktestResult, limit: number = 200) {
   if (result.trades.length === 0) {
     return;
   }
@@ -74,7 +136,9 @@ function printTrades(result: ScalpBacktestResult) {
     '# | Signal Time | Entry Time | Side | Entry | Exit | Size | GrossPnL | Commission | NetPnL | PnL% | Bars | Reason'
   );
 
-  result.trades.forEach((t: ScalpTrade, i: number) => {
+  const rows = result.trades.slice(0, limit);
+
+  rows.forEach((t: ScalpTrade, i: number) => {
     const signalTime = new Date(t.signalTime).toISOString();
     const entryTime = new Date(t.entryTime).toISOString();
 
@@ -87,15 +151,19 @@ function printTrades(result: ScalpBacktestResult) {
         t.entryPrice.toFixed(2),
         t.exitPrice.toFixed(2),
         t.size.toFixed(4),
-        formatSigned(t.grossPnl),
+        formatSignedCurrency(t.grossPnl),
         formatCurrency(t.commission),
-        formatSigned(t.netPnl),
+        formatSignedCurrency(t.netPnl),
         `${t.pnlPct.toFixed(3)}%`,
         t.barsHeld,
         t.exitReason
       ].join(' | ')
     );
   });
+
+  if (result.trades.length > limit) {
+    console.log(`... truncated: shown ${limit} of ${result.trades.length} trades`);
+  }
 }
 
 function printExitDistribution(result: ScalpBacktestResult) {
@@ -109,29 +177,54 @@ function printExitDistribution(result: ScalpBacktestResult) {
     .map(([reason, count]: [string, number]) => ({ reason, count }))
     .sort((a: { reason: string; count: number }, b: { reason: string; count: number }) => b.count - a.count);
 
-  if (rows.length > 0) {
-    console.log('\n=== EXIT REASONS ===');
-    console.table(rows);
-  }
-}
+  console.log('\n=== EXIT REASONS ===');
 
-function printTradeStats(result: ScalpBacktestResult) {
-  if (result.trades.length === 0) {
+  if (rows.length === 0) {
+    console.log('No exits');
     return;
   }
 
-  const positiveNet = result.trades.filter((t: ScalpTrade) => t.netPnl > 0).length;
-  const negativeNet = result.trades.filter((t: ScalpTrade) => t.netPnl < 0).length;
-  const positiveGross = result.trades.filter((t: ScalpTrade) => t.grossPnl > 0).length;
-  const negativeTakeProfits = result.trades.filter(
-    (t: ScalpTrade) => t.exitReason === 'take_profit' && t.netPnl < 0
-  ).length;
+  console.table(rows);
+}
 
-  console.log('\n=== TRADE STATS ===');
-  console.log(`Positive net trades: ${positiveNet}`);
-  console.log(`Negative net trades: ${negativeNet}`);
-  console.log(`Positive gross trades: ${positiveGross}`);
-  console.log(`Negative take_profit trades after costs: ${negativeTakeProfits}`);
+function printRejectStats(result: ScalpBacktestResult) {
+  console.log('\n=== REJECT REASONS ===');
+
+  if (!result.rejectStats || result.rejectStats.length === 0) {
+    console.log('No rejects collected');
+    return;
+  }
+
+  const totalRejects = result.rejectStats.reduce(
+    (sum: number, row: RejectStat) => sum + row.count,
+    0
+  );
+
+  const rows = result.rejectStats.map((row: RejectStat) => ({
+    reason: row.reason,
+    count: row.count,
+    sharePct: totalRejects > 0 ? ((row.count / totalRejects) * 100).toFixed(2) : '0.00'
+  }));
+
+  console.table(rows);
+  console.log(`Total rejects: ${totalRejects}`);
+}
+
+function printTopRejectComment(result: ScalpBacktestResult) {
+  if (!result.rejectStats || result.rejectStats.length === 0) {
+    return;
+  }
+
+  const top = result.rejectStats[0];
+  const totalRejects = result.rejectStats.reduce(
+    (sum: number, row: RejectStat) => sum + row.count,
+    0
+  );
+
+  const share = totalRejects > 0 ? (top.count / totalRejects) * 100 : 0;
+
+  console.log('\n=== TOP REJECT ===');
+  console.log(`${top.reason}: ${top.count} (${share.toFixed(2)}%)`);
 }
 
 function main() {
@@ -143,18 +236,21 @@ function main() {
   const candles = loadCandles(filePath);
   console.log(`Loaded ${candles.length} candles`);
 
-  const params = { ...DEFAULT_SCALP_PARAMS };
+  const params: ScalpParams = { ...DEFAULT_SCALP_PARAMS };
 
-  const startTime = Date.now();
+  const startedAt = Date.now();
   const result = runMomentumScalpBacktest(candles, params);
-  const elapsed = Date.now() - startTime;
+  const elapsedMs = Date.now() - startedAt;
 
+  printParams(params);
   printSummary(result);
   printTradeStats(result);
-  printTrades(result);
+  printRejectStats(result);
+  printTopRejectComment(result);
+  printTrades(result, 200);
   printExitDistribution(result);
 
-  console.log(`\nBacktest completed in ${elapsed}ms`);
+  console.log(`\nBacktest completed in ${elapsedMs}ms`);
 }
 
 main();
