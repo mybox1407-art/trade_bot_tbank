@@ -1,471 +1,592 @@
-import { ATR, SMA } from 'technicalindicators';
+import {
+  analyzeDailyBreakout,
+  buildDailyBreakoutPositionFromSignal,
+  Candle,
+  DailyBreakoutOptions,
+  DailyBreakoutPosition,
+  DailyBreakoutSignal,
+  shouldExitDailyBreakoutPosition,
+  updateDailyBreakoutTrailingStop
+} from '../services/dailyBreakoutStrategy';
 
-export interface Candle {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
+export interface DailyUniverseBacktestOptions extends DailyBreakoutOptions {
+  startingBalance?: number;
+  commissionRate?: number;
+  warmupCandles?: number;
+  progressLogEvery?: number;
+  onePositionAtTime?: boolean;
+  minSignalAtrPct?: number;
 }
 
-export type BreakoutSide = 'long' | 'short' | 'none';
-
-export interface DailyBreakoutSignal {
-  symbol: string;
-  side: BreakoutSide;
-  entryPrice: number | null;
-  stopLossPrice: number | null;
-  trailingStopPrice: number | null;
-  reverseLevel: number | null;
-  takeProfitPrice: number | null;
-  quantity: number | null;
-  positionSize: number | null;
-  atr: number | null;
-  sma20: number | null;
-  prevDayHigh: number | null;
-  prevDayLow: number | null;
-  riskPerShare: number | null;
-  riskCapital: number | null;
-  breakoutDistancePct: number | null;
-  regime: 'trend_up' | 'trend_down' | 'none';
-  indicators: {
-    ready: boolean;
-    close: number | null;
-    aboveSma20: boolean;
-    belowSma20: boolean;
-    atrPct: number | null;
-    trailingAtrMult: number;
-    stopAtrMult: number;
-  };
+interface OpenPosition extends DailyBreakoutPosition {
+  balanceBefore: number;
+  openIndex: number;
 }
 
-export interface DailyBreakoutPosition {
+export interface DailyUniverseTrade {
   symbol: string;
   side: 'long' | 'short';
+  regime: 'trend_up' | 'trend_down';
+  openedAt: number;
+  closedAt: number;
   entryPrice: number;
+  exitPrice: number;
   stopLossPrice: number;
   trailingStopPrice: number;
   reverseLevel: number;
-  atrAtEntry: number;
-  highestHighSinceEntry: number;
-  lowestLowSinceEntry: number;
   quantity: number;
   positionSize: number;
-  riskPerShare: number;
-  openedAt: number;
-  regime: 'trend_up' | 'trend_down';
+  grossPnl: number;
+  commissionOpen: number;
+  commissionClose: number;
+  totalCommission: number;
+  netPnl: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  barsHeld: number;
+  closeReason: 'stop_loss' | 'trailing_stop' | 'reverse_signal' | 'forced_close';
 }
 
-export interface DailyBreakoutOptions {
-  riskPerTrade?: number;
-  stopAtrMult?: number;
-  trailingAtrMult?: number;
-  smaPeriod?: number;
-  atrPeriod?: number;
-  minAtrPct?: number;
-  maxAtrPct?: number;
-  maxBreakoutDistancePct?: number;
-  allowLongs?: boolean;
-  allowShorts?: boolean;
+export interface DailyUniverseSummary {
+  universe: string[];
+  tradesCount: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  grossProfit: number;
+  grossLoss: number;
+  netProfit: number;
+  avgNetPnl: number;
+  avgWin: number;
+  avgLoss: number;
+  profitFactor: number;
+  sharpe: number;
+  startBalance: number;
+  endBalance: number;
+  returnPct: number;
+  maxDrawdownAbs: number;
+  maxDrawdownPct: number;
+  yearsCount: number;
 }
 
-export interface DailyBreakoutExitDecision {
-  exit: boolean;
-  exitPrice: number | null;
-  reason: 'stop_loss' | 'trailing_stop' | 'reverse_signal' | null;
+export interface DailySelectionStats {
+  totalDecisionDays: number;
+  noSignalDays: number;
+  pickedBySymbol: Record<string, number>;
+  pickedBySide: Record<string, number>;
+  signalsAccepted: number;
+  signalsRejected: number;
 }
 
-const DEFAULT_OPTIONS: Required<DailyBreakoutOptions> = {
-  riskPerTrade: 0.01,
-  stopAtrMult: 2.5,
-  trailingAtrMult: 2.0,
-  smaPeriod: 20,
-  atrPeriod: 14,
-  minAtrPct: 0.008,
-  maxAtrPct: 0.12,
-  maxBreakoutDistancePct: 0.04,
-  allowLongs: true,
-  allowShorts: true
-};
+export interface DailyUniverseBacktestResult {
+  options: Required<DailyUniverseBacktestOptions>;
+  summary: DailyUniverseSummary;
+  trades: DailyUniverseTrade[];
+  equityCurve: Array<{ time: number; balance: number }>;
+  selectionStats: DailySelectionStats;
+}
 
 function round(value: number, digits = 8): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
 }
 
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'неизвестно';
+  if (seconds < 60) return `${Math.round(seconds)} сек`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  if (minutes < 60) return `${minutes} мин ${secs} сек`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return `${hours} ч ${mins} мин`;
+}
+
+function getCommission(turnover: number, commissionRate: number): number {
+  return turnover * commissionRate;
+}
+
+function getGrossPnl(params: {
+  side: 'long' | 'short';
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+}): number {
+  const { side, entryPrice, exitPrice, quantity } = params;
+  if (side === 'long') return (exitPrice - entryPrice) * quantity;
+  return (entryPrice - exitPrice) * quantity;
+}
+
 function last<T>(arr: T[]): T {
   return arr[arr.length - 1];
 }
 
-function resolveOptions(
-  options: DailyBreakoutOptions = {}
-): Required<DailyBreakoutOptions> {
+function mean(values: number[]): number {
+  if (!values.length) return 0;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function stddevSample(values: number[]): number {
+  if (values.length < 2) return 0;
+  const avg = mean(values);
+  const variance =
+    values.reduce((sum, v) => sum + (v - avg) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function calculateDrawdown(
+  equityCurve: Array<{ time: number; balance: number }>
+): { maxDrawdownAbs: number; maxDrawdownPct: number } {
+  let peak = equityCurve.length ? equityCurve[0].balance : 0;
+  let maxDrawdownAbs = 0;
+  let maxDrawdownPct = 0;
+
+  for (const point of equityCurve) {
+    if (point.balance > peak) peak = point.balance;
+    const ddAbs = peak - point.balance;
+    const ddPct = peak > 0 ? ddAbs / peak : 0;
+    if (ddAbs > maxDrawdownAbs) maxDrawdownAbs = ddAbs;
+    if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
+  }
+
   return {
-    riskPerTrade: options.riskPerTrade ?? DEFAULT_OPTIONS.riskPerTrade,
-    stopAtrMult: options.stopAtrMult ?? DEFAULT_OPTIONS.stopAtrMult,
-    trailingAtrMult: options.trailingAtrMult ?? DEFAULT_OPTIONS.trailingAtrMult,
-    smaPeriod: options.smaPeriod ?? DEFAULT_OPTIONS.smaPeriod,
-    atrPeriod: options.atrPeriod ?? DEFAULT_OPTIONS.atrPeriod,
-    minAtrPct: options.minAtrPct ?? DEFAULT_OPTIONS.minAtrPct,
-    maxAtrPct: options.maxAtrPct ?? DEFAULT_OPTIONS.maxAtrPct,
-    maxBreakoutDistancePct:
-      options.maxBreakoutDistancePct ?? DEFAULT_OPTIONS.maxBreakoutDistancePct,
-    allowLongs: options.allowLongs ?? DEFAULT_OPTIONS.allowLongs,
-    allowShorts: options.allowShorts ?? DEFAULT_OPTIONS.allowShorts
+    maxDrawdownAbs: round(maxDrawdownAbs),
+    maxDrawdownPct: round(maxDrawdownPct, 6)
   };
 }
 
-function buildEmptySignal(
-  symbol: string,
-  options: Required<DailyBreakoutOptions>
-): DailyBreakoutSignal {
-  return {
-    symbol,
-    side: 'none',
-    entryPrice: null,
-    stopLossPrice: null,
-    trailingStopPrice: null,
-    reverseLevel: null,
-    takeProfitPrice: null,
-    quantity: null,
-    positionSize: null,
-    atr: null,
-    sma20: null,
-    prevDayHigh: null,
-    prevDayLow: null,
-    riskPerShare: null,
-    riskCapital: null,
-    breakoutDistancePct: null,
-    regime: 'none',
-    indicators: {
-      ready: false,
-      close: null,
-      aboveSma20: false,
-      belowSma20: false,
-      atrPct: null,
-      trailingAtrMult: options.trailingAtrMult,
-      stopAtrMult: options.stopAtrMult
-    }
-  };
+function intersectTimes(candlesBySymbol: Record<string, Candle[]>): number[] {
+  const symbols = Object.keys(candlesBySymbol);
+  if (!symbols.length) return [];
+
+  const sets = symbols.map(symbol => new Set(candlesBySymbol[symbol].map(c => c.time)));
+  const base = [...sets[0]].sort((a, b) => a - b);
+
+  return base.filter(ts => sets.every(s => s.has(ts)));
 }
 
-export function getDailyBreakoutWarmup(
-  options: DailyBreakoutOptions = {}
-): number {
-  const resolved = resolveOptions(options);
-  return Math.max(resolved.smaPeriod + 2, resolved.atrPeriod + 2, 30);
+function buildLookup(
+  candlesBySymbol: Record<string, Candle[]>
+): Record<string, Map<number, number>> {
+  const out: Record<string, Map<number, number>> = {};
+  for (const [symbol, candles] of Object.entries(candlesBySymbol)) {
+    const map = new Map<number, number>();
+    candles.forEach((c, i) => map.set(c.time, i));
+    out[symbol] = map;
+  }
+  return out;
 }
 
-export function analyzeDailyBreakout(
-  symbol: string,
-  candles: Candle[],
+function buildVisibleSlices(
+  candlesBySymbol: Record<string, Candle[]>,
+  lookup: Record<string, Map<number, number>>,
+  ts: number
+): Record<string, Candle[]> {
+  const out: Record<string, Candle[]> = {};
+  for (const [symbol, candles] of Object.entries(candlesBySymbol)) {
+    const idx = lookup[symbol].get(ts);
+    if (idx == null || idx < 0) continue;
+    out[symbol] = candles.slice(0, idx + 1);
+  }
+  return out;
+}
+
+function pickBestSignal(
+  visibleBySymbol: Record<string, Candle[]>,
   balance: number,
-  options: DailyBreakoutOptions = {}
-): DailyBreakoutSignal {
-  const resolved = resolveOptions(options);
-  const empty = buildEmptySignal(symbol, resolved);
+  strategyOptions: DailyBreakoutOptions,
+  minSignalAtrPct: number
+): {
+  best: DailyBreakoutSignal | null;
+  accepted: number;
+  rejected: number;
+} {
+  let best: DailyBreakoutSignal | null = null;
+  let accepted = 0;
+  let rejected = 0;
 
-  const minBars = getDailyBreakoutWarmup(resolved);
-  if (!Array.isArray(candles) || candles.length < minBars) {
-    return empty;
+  for (const [symbol, candles] of Object.entries(visibleBySymbol)) {
+    const signal = analyzeDailyBreakout(symbol, candles, balance, strategyOptions);
+
+    if (
+      signal.side === 'none' ||
+      signal.entryPrice == null ||
+      signal.stopLossPrice == null ||
+      signal.quantity == null ||
+      signal.positionSize == null ||
+      signal.atr == null ||
+      signal.indicators.atrPct == null
+    ) {
+      rejected += 1;
+      continue;
+    }
+
+    if (signal.indicators.atrPct < minSignalAtrPct) {
+      rejected += 1;
+      continue;
+    }
+
+    accepted += 1;
+
+    const signalScore =
+      (signal.indicators.atrPct ?? 0) * 100 +
+      ((signal.breakoutDistancePct != null ? 0.05 - signal.breakoutDistancePct : 0) * 10);
+
+    if (!best) {
+      best = {
+        ...signal,
+        indicators: {
+          ...signal.indicators,
+          signalScore: round(signalScore, 6)
+        }
+      };
+      continue;
+    }
+
+    const bestScore = Number((best.indicators as Record<string, unknown>).signalScore ?? -Infinity);
+    if (signalScore > bestScore) {
+      best = {
+        ...signal,
+        indicators: {
+          ...signal.indicators,
+          signalScore: round(signalScore, 6)
+        }
+      };
+    }
   }
 
-  const closes = candles.map(c => c.close);
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
+  return { best, accepted, rejected };
+}
 
-  const smaSeries = SMA.calculate({
-    period: resolved.smaPeriod,
-    values: closes
+function buildTrade(params: {
+  position: OpenPosition;
+  exitPrice: number;
+  closedAt: number;
+  closeReason: DailyUniverseTrade['closeReason'];
+  commissionRate: number;
+  barsHeld: number;
+  balanceBeforeClose: number;
+}): DailyUniverseTrade {
+  const {
+    position,
+    exitPrice,
+    closedAt,
+    closeReason,
+    commissionRate,
+    barsHeld,
+    balanceBeforeClose
+  } = params;
+
+  const grossPnl = getGrossPnl({
+    side: position.side,
+    entryPrice: position.entryPrice,
+    exitPrice,
+    quantity: position.quantity
   });
 
-  const atrSeries = ATR.calculate({
-    period: resolved.atrPeriod,
-    high: highs,
-    low: lows,
-    close: closes
-  });
+  const commissionOpen = getCommission(position.entryPrice * position.quantity, commissionRate);
+  const commissionClose = getCommission(exitPrice * position.quantity, commissionRate);
+  const totalCommission = commissionOpen + commissionClose;
+  const netPnl = grossPnl - totalCommission;
 
-  if (!smaSeries.length || !atrSeries.length) {
-    return empty;
+  return {
+    symbol: position.symbol,
+    side: position.side,
+    regime: position.regime,
+    openedAt: position.openedAt,
+    closedAt,
+    entryPrice: round(position.entryPrice),
+    exitPrice: round(exitPrice),
+    stopLossPrice: round(position.stopLossPrice),
+    trailingStopPrice: round(position.trailingStopPrice),
+    reverseLevel: round(position.reverseLevel),
+    quantity: position.quantity,
+    positionSize: round(position.positionSize, 6),
+    grossPnl: round(grossPnl),
+    commissionOpen: round(commissionOpen),
+    commissionClose: round(commissionClose),
+    totalCommission: round(totalCommission),
+    netPnl: round(netPnl),
+    balanceBefore: round(position.balanceBefore),
+    balanceAfter: round(balanceBeforeClose + netPnl),
+    barsHeld,
+    closeReason
+  };
+}
+
+function buildSummary(params: {
+  universe: string[];
+  trades: DailyUniverseTrade[];
+  startBalance: number;
+  endBalance: number;
+  equityCurve: Array<{ time: number; balance: number }>;
+}): DailyUniverseSummary {
+  const { universe, trades, startBalance, endBalance, equityCurve } = params;
+
+  const wins = trades.filter(t => t.netPnl > 0);
+  const losses = trades.filter(t => t.netPnl <= 0);
+
+  const grossProfit = wins.reduce((a, b) => a + b.netPnl, 0);
+  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b.netPnl, 0));
+  const netProfit = trades.reduce((a, b) => a + b.netPnl, 0);
+  const profitFactor =
+    grossLossAbs > 0 ? grossProfit / grossLossAbs : grossProfit > 0 ? Infinity : 0;
+
+  const returnPct = startBalance > 0 ? (endBalance - startBalance) / startBalance : 0;
+
+  const equityReturns: number[] = [];
+  for (let i = 1; i < equityCurve.length; i++) {
+    const prevBalance = equityCurve[i - 1].balance;
+    const curBalance = equityCurve[i].balance;
+    if (prevBalance > 0) {
+      equityReturns.push((curBalance - prevBalance) / prevBalance);
+    }
   }
 
-  const current = last(candles);
-  const prev = candles[candles.length - 2];
-  const sma20 = last(smaSeries);
-  const atr = last(atrSeries);
+  const avgRet = mean(equityReturns);
+  const stdRet = stddevSample(equityReturns);
+  const sharpe =
+    stdRet > 0 ? (avgRet / stdRet) * Math.sqrt(252) : 0;
 
-  if (!current || !prev || !Number.isFinite(sma20) || !Number.isFinite(atr)) {
-    return empty;
-  }
+  const dd = calculateDrawdown(equityCurve);
 
-  const price = current.close;
-  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(atr) || atr <= 0) {
-    return empty;
-  }
+  const years =
+    equityCurve.length >= 2
+      ? Math.max(
+          (equityCurve[equityCurve.length - 1].time - equityCurve[0].time) /
+            (365.25 * 24 * 60 * 60 * 1000),
+          0
+        )
+      : 0;
 
-  const prevDayHigh = prev.high;
-  const prevDayLow = prev.low;
-  const aboveSma20 = price > sma20;
-  const belowSma20 = price < sma20;
-  const atrPct = atr / price;
+  return {
+    universe,
+    tradesCount: trades.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: round(trades.length > 0 ? wins.length / trades.length : 0, 6),
+    grossProfit: round(grossProfit),
+    grossLoss: round(-grossLossAbs),
+    netProfit: round(netProfit),
+    avgNetPnl: round(trades.length > 0 ? netProfit / trades.length : 0),
+    avgWin: round(wins.length > 0 ? grossProfit / wins.length : 0),
+    avgLoss: round(
+      losses.length > 0 ? losses.reduce((a, b) => a + b.netPnl, 0) / losses.length : 0
+    ),
+    profitFactor: Number.isFinite(profitFactor) ? round(profitFactor, 6) : Infinity,
+    sharpe: round(sharpe, 6),
+    startBalance: round(startBalance),
+    endBalance: round(endBalance),
+    returnPct: round(returnPct, 6),
+    maxDrawdownAbs: dd.maxDrawdownAbs,
+    maxDrawdownPct: dd.maxDrawdownPct,
+    yearsCount: round(years, 4)
+  };
+}
 
-  if (atrPct < resolved.minAtrPct || atrPct > resolved.maxAtrPct) {
+export function runDailyUniverseBacktest(
+  candlesBySymbol: Record<string, Candle[]>,
+  options: DailyUniverseBacktestOptions = {}
+): DailyUniverseBacktestResult {
+  const resolvedOptions: Required<DailyUniverseBacktestOptions> = {
+    startingBalance: options.startingBalance ?? 50000,
+    commissionRate: options.commissionRate ?? 0.0005,
+    warmupCandles: options.warmupCandles ?? 30,
+    progressLogEvery: options.progressLogEvery ?? 250,
+    onePositionAtTime: options.onePositionAtTime ?? true,
+    minSignalAtrPct: options.minSignalAtrPct ?? 0.008,
+    riskPerTrade: options.riskPerTrade ?? 0.01,
+    stopAtrMult: options.stopAtrMult ?? 2.5,
+    trailingAtrMult: options.trailingAtrMult ?? 2.0,
+    smaPeriod: options.smaPeriod ?? 20,
+    atrPeriod: options.atrPeriod ?? 14,
+    minAtrPct: options.minAtrPct ?? 0.008,
+    maxAtrPct: options.maxAtrPct ?? 0.12,
+    maxBreakoutDistancePct: options.maxBreakoutDistancePct ?? 0.04,
+    allowLongs: options.allowLongs ?? true,
+    allowShorts: options.allowShorts ?? true
+  };
+
+  const symbols = Object.keys(candlesBySymbol).sort();
+
+  if (!symbols.length) {
     return {
-      ...empty,
-      sma20: round(sma20),
-      atr: round(atr),
-      prevDayHigh: round(prevDayHigh),
-      prevDayLow: round(prevDayLow),
-      indicators: {
-        ready: true,
-        close: round(price),
-        aboveSma20,
-        belowSma20,
-        atrPct: round(atrPct, 6),
-        trailingAtrMult: resolved.trailingAtrMult,
-        stopAtrMult: resolved.stopAtrMult
+      options: resolvedOptions,
+      summary: buildSummary({
+        universe: [],
+        trades: [],
+        startBalance: resolvedOptions.startingBalance,
+        endBalance: resolvedOptions.startingBalance,
+        equityCurve: []
+      }),
+      trades: [],
+      equityCurve: [],
+      selectionStats: {
+        totalDecisionDays: 0,
+        noSignalDays: 0,
+        pickedBySymbol: {},
+        pickedBySide: {},
+        signalsAccepted: 0,
+        signalsRejected: 0
       }
     };
   }
 
-  let side: BreakoutSide = 'none';
-  let regime: 'trend_up' | 'trend_down' | 'none' = 'none';
-  let entryPrice: number | null = null;
-  let reverseLevel: number | null = null;
-
-  if (resolved.allowLongs && aboveSma20 && current.high > prevDayHigh) {
-    side = 'long';
-    regime = 'trend_up';
-    entryPrice = Math.max(prevDayHigh, current.open);
-    reverseLevel = prevDayLow;
-  } else if (resolved.allowShorts && belowSma20 && current.low < prevDayLow) {
-    side = 'short';
-    regime = 'trend_down';
-    entryPrice = Math.min(prevDayLow, current.open);
-    reverseLevel = prevDayHigh;
+  const sortedBySymbol: Record<string, Candle[]> = {};
+  for (const symbol of symbols) {
+    sortedBySymbol[symbol] = [...candlesBySymbol[symbol]].sort((a, b) => a.time - b.time);
   }
 
-  if (side === 'none' || entryPrice == null || reverseLevel == null) {
-    return {
-      ...empty,
-      sma20: round(sma20),
-      atr: round(atr),
-      prevDayHigh: round(prevDayHigh),
-      prevDayLow: round(prevDayLow),
-      indicators: {
-        ready: true,
-        close: round(price),
-        aboveSma20,
-        belowSma20,
-        atrPct: round(atrPct, 6),
-        trailingAtrMult: resolved.trailingAtrMult,
-        stopAtrMult: resolved.stopAtrMult
+  const timeAxis = intersectTimes(sortedBySymbol);
+  const lookup = buildLookup(sortedBySymbol);
+
+  let balance = resolvedOptions.startingBalance;
+  let openPosition: OpenPosition | null = null;
+
+  const trades: DailyUniverseTrade[] = [];
+  const equityCurve: Array<{ time: number; balance: number }> = [];
+  const selectionStats: DailySelectionStats = {
+    totalDecisionDays: 0,
+    noSignalDays: 0,
+    pickedBySymbol: {},
+    pickedBySide: {},
+    signalsAccepted: 0,
+    signalsRejected: 0
+  };
+
+  if (timeAxis.length) {
+    equityCurve.push({ time: timeAxis[0], balance: round(balance) });
+  }
+
+  const startedAt = Date.now();
+  const totalBarsToProcess = Math.max(timeAxis.length - resolvedOptions.warmupCandles, 0);
+
+  for (let i = resolvedOptions.warmupCandles; i < timeAxis.length; i++) {
+    const ts = timeAxis[i];
+    const visibleBySymbol = buildVisibleSlices(sortedBySymbol, lookup, ts);
+
+    if (resolvedOptions.progressLogEvery > 0) {
+      const processedBars = i - resolvedOptions.warmupCandles;
+      const shouldLog =
+        processedBars > 0 &&
+        (processedBars % resolvedOptions.progressLogEvery === 0 ||
+          i === timeAxis.length - 1);
+
+      if (shouldLog) {
+        const elapsedSec = (Date.now() - startedAt) / 1000;
+        const speed = processedBars / Math.max(elapsedSec, 1e-9);
+        const remainingBars = Math.max(totalBarsToProcess - processedBars, 0);
+        const etaSec = remainingBars / Math.max(speed, 1e-9);
+        const progressPct =
+          totalBarsToProcess > 0 ? (processedBars / totalBarsToProcess) * 100 : 100;
+
+        console.log(
+          [
+            '[DAILY]',
+            `Прогресс: ${processedBars}/${totalBarsToProcess}`,
+            `${round(progressPct, 2)}%`,
+            `Скорость: ${round(speed, 2)} бар/сек`,
+            `ETA: ${formatDuration(etaSec)}`,
+            `Сделок: ${trades.length}`,
+            `Баланс: ${round(balance, 2)}`
+          ].join(' | ')
+        );
       }
+    }
+
+    if (openPosition) {
+      const candle = last(visibleBySymbol[openPosition.symbol]);
+      if (!candle) continue;
+
+      openPosition = {
+        ...updateDailyBreakoutTrailingStop(openPosition, candle, resolvedOptions),
+        balanceBefore: openPosition.balanceBefore,
+        openIndex: openPosition.openIndex
+      };
+
+      const exitCheck = shouldExitDailyBreakoutPosition(openPosition, candle);
+      if (exitCheck.exit && exitCheck.exitPrice != null && exitCheck.reason != null) {
+        const trade = buildTrade({
+          position: openPosition,
+          exitPrice: exitCheck.exitPrice,
+          closedAt: candle.time,
+          closeReason: exitCheck.reason,
+          commissionRate: resolvedOptions.commissionRate,
+          barsHeld: i - openPosition.openIndex,
+          balanceBeforeClose: balance
+        });
+
+        balance = trade.balanceAfter;
+        trades.push(trade);
+        equityCurve.push({ time: candle.time, balance: round(balance) });
+        openPosition = null;
+      }
+    }
+
+    if (openPosition && resolvedOptions.onePositionAtTime) {
+      continue;
+    }
+
+    selectionStats.totalDecisionDays += 1;
+
+    const pick = pickBestSignal(
+      visibleBySymbol,
+      balance,
+      resolvedOptions,
+      resolvedOptions.minSignalAtrPct
+    );
+
+    selectionStats.signalsAccepted += pick.accepted;
+    selectionStats.signalsRejected += pick.rejected;
+
+    if (!pick.best) {
+      selectionStats.noSignalDays += 1;
+      continue;
+    }
+
+    selectionStats.pickedBySymbol[pick.best.symbol] =
+      (selectionStats.pickedBySymbol[pick.best.symbol] ?? 0) + 1;
+    selectionStats.pickedBySide[pick.best.side] =
+      (selectionStats.pickedBySide[pick.best.side] ?? 0) + 1;
+
+    const built = buildDailyBreakoutPositionFromSignal(pick.best, ts);
+    if (!built) continue;
+
+    openPosition = {
+      ...built,
+      balanceBefore: balance,
+      openIndex: i
     };
   }
 
-  const breakoutDistancePct = Math.abs(entryPrice - price) / price;
-  if (breakoutDistancePct > resolved.maxBreakoutDistancePct) {
-    return {
-      ...empty,
-      sma20: round(sma20),
-      atr: round(atr),
-      prevDayHigh: round(prevDayHigh),
-      prevDayLow: round(prevDayLow),
-      breakoutDistancePct: round(breakoutDistancePct, 6),
-      indicators: {
-        ready: true,
-        close: round(price),
-        aboveSma20,
-        belowSma20,
-        atrPct: round(atrPct, 6),
-        trailingAtrMult: resolved.trailingAtrMult,
-        stopAtrMult: resolved.stopAtrMult
-      }
-    };
-  }
+  if (openPosition) {
+    const lastCandle = last(sortedBySymbol[openPosition.symbol]);
+    const trade = buildTrade({
+      position: openPosition,
+      exitPrice: lastCandle.close,
+      closedAt: lastCandle.time,
+      closeReason: 'forced_close',
+      commissionRate: resolvedOptions.commissionRate,
+      barsHeld: timeAxis.length - 1 - openPosition.openIndex,
+      balanceBeforeClose: balance
+    });
 
-  const stopLossPrice =
-    side === 'long'
-      ? entryPrice - atr * resolved.stopAtrMult
-      : entryPrice + atr * resolved.stopAtrMult;
-
-  const trailingStopPrice =
-    side === 'long'
-      ? current.high - atr * resolved.trailingAtrMult
-      : current.low + atr * resolved.trailingAtrMult;
-
-  const riskPerShare = Math.abs(entryPrice - stopLossPrice);
-  if (!Number.isFinite(riskPerShare) || riskPerShare <= 0) {
-    return empty;
-  }
-
-  const riskCapital = balance * resolved.riskPerTrade;
-  let quantity = Math.floor(riskCapital / riskPerShare);
-
-  if (!Number.isFinite(quantity) || quantity < 1) {
-    quantity = 1;
-  }
-
-  const positionSize = quantity * entryPrice;
-
-  return {
-    symbol,
-    side,
-    entryPrice: round(entryPrice),
-    stopLossPrice: round(stopLossPrice),
-    trailingStopPrice: round(trailingStopPrice),
-    reverseLevel: round(reverseLevel),
-    takeProfitPrice: null,
-    quantity,
-    positionSize: round(positionSize, 6),
-    atr: round(atr),
-    sma20: round(sma20),
-    prevDayHigh: round(prevDayHigh),
-    prevDayLow: round(prevDayLow),
-    riskPerShare: round(riskPerShare),
-    riskCapital: round(riskCapital, 6),
-    breakoutDistancePct: round(breakoutDistancePct, 6),
-    regime,
-    indicators: {
-      ready: true,
-      close: round(price),
-      aboveSma20,
-      belowSma20,
-      atrPct: round(atrPct, 6),
-      trailingAtrMult: resolved.trailingAtrMult,
-      stopAtrMult: resolved.stopAtrMult
-    }
-  };
-}
-
-export function buildDailyBreakoutPositionFromSignal(
-  signal: DailyBreakoutSignal,
-  openedAt: number
-): DailyBreakoutPosition | null {
-  if (
-    signal.side === 'none' ||
-    signal.entryPrice == null ||
-    signal.stopLossPrice == null ||
-    signal.trailingStopPrice == null ||
-    signal.reverseLevel == null ||
-    signal.atr == null ||
-    signal.quantity == null ||
-    signal.positionSize == null ||
-    signal.riskPerShare == null ||
-    signal.regime === 'none'
-  ) {
-    return null;
+    balance = trade.balanceAfter;
+    trades.push(trade);
+    equityCurve.push({ time: lastCandle.time, balance: round(balance) });
   }
 
   return {
-    symbol: signal.symbol,
-    side: signal.side,
-    entryPrice: signal.entryPrice,
-    stopLossPrice: signal.stopLossPrice,
-    trailingStopPrice: signal.trailingStopPrice,
-    reverseLevel: signal.reverseLevel,
-    atrAtEntry: signal.atr,
-    highestHighSinceEntry: signal.entryPrice,
-    lowestLowSinceEntry: signal.entryPrice,
-    quantity: signal.quantity,
-    positionSize: signal.positionSize,
-    riskPerShare: signal.riskPerShare,
-    openedAt,
-    regime: signal.regime
-  };
-}
-
-export function updateDailyBreakoutTrailingStop(
-  position: DailyBreakoutPosition,
-  candle: Candle,
-  options: DailyBreakoutOptions = {}
-): DailyBreakoutPosition {
-  const resolved = resolveOptions(options);
-
-  let highestHighSinceEntry = position.highestHighSinceEntry;
-  let lowestLowSinceEntry = position.lowestLowSinceEntry;
-  let trailingStopPrice = position.trailingStopPrice;
-
-  if (position.side === 'long') {
-    highestHighSinceEntry = Math.max(highestHighSinceEntry, candle.high);
-    const nextTrail =
-      highestHighSinceEntry - position.atrAtEntry * resolved.trailingAtrMult;
-    trailingStopPrice = Math.max(trailingStopPrice, nextTrail);
-  } else {
-    lowestLowSinceEntry = Math.min(lowestLowSinceEntry, candle.low);
-    const nextTrail =
-      lowestLowSinceEntry + position.atrAtEntry * resolved.trailingAtrMult;
-    trailingStopPrice = Math.min(trailingStopPrice, nextTrail);
-  }
-
-  return {
-    ...position,
-    highestHighSinceEntry: round(highestHighSinceEntry),
-    lowestLowSinceEntry: round(lowestLowSinceEntry),
-    trailingStopPrice: round(trailingStopPrice)
-  };
-}
-
-export function shouldExitDailyBreakoutPosition(
-  position: DailyBreakoutPosition,
-  candle: Candle
-): DailyBreakoutExitDecision {
-  if (position.side === 'long') {
-    if (candle.low <= position.stopLossPrice) {
-      return {
-        exit: true,
-        exitPrice: position.stopLossPrice,
-        reason: 'stop_loss'
-      };
-    }
-
-    if (candle.low <= position.trailingStopPrice) {
-      return {
-        exit: true,
-        exitPrice: position.trailingStopPrice,
-        reason: 'trailing_stop'
-      };
-    }
-
-    if (candle.low < position.reverseLevel) {
-      return {
-        exit: true,
-        exitPrice: position.reverseLevel,
-        reason: 'reverse_signal'
-      };
-    }
-  } else {
-    if (candle.high >= position.stopLossPrice) {
-      return {
-        exit: true,
-        exitPrice: position.stopLossPrice,
-        reason: 'stop_loss'
-      };
-    }
-
-    if (candle.high >= position.trailingStopPrice) {
-      return {
-        exit: true,
-        exitPrice: position.trailingStopPrice,
-        reason: 'trailing_stop'
-      };
-    }
-
-    if (candle.high > position.reverseLevel) {
-      return {
-        exit: true,
-        exitPrice: position.reverseLevel,
-        reason: 'reverse_signal'
-      };
-    }
-  }
-
-  return {
-    exit: false,
-    exitPrice: null,
-    reason: null
+    options: resolvedOptions,
+    summary: buildSummary({
+      universe: symbols,
+      trades,
+      startBalance: resolvedOptions.startingBalance,
+      endBalance: balance,
+      equityCurve
+    }),
+    trades,
+    equityCurve,
+    selectionStats
   };
 }
