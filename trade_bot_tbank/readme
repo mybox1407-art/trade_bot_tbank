@@ -5,10 +5,4 @@ cd trade_bot_tbank/trade_bot_tbank
 docker compose up -d --build
 docker network connect n8n-docker_default trade_bot_tbank
 npm install
-
-Проверка NPM
-ls -l node_modules/tsx/dist/cli.mjs
-node node_modules/tsx/dist/cli.mjs --version
-
-Запуск теста
 npm run backtest -- src/backtest/data/SBER_15m.json SBER
