@@ -126,12 +126,12 @@ export function runMomentumScalpBacktest(
     equity[equity.length - 1] = balance;
   }
 
-  const winningTrades = trades.filter(t => t.pnl > 0);
+  const winningTrades = trades.filter((t: ScalpTrade) => t.pnl > 0);
   const totalTrades = trades.length;
   const winRate = totalTrades === 0 ? 0 : winningTrades.length / totalTrades;
   const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? Infinity : 0) : grossProfit / grossLoss;
-  const avgTrade = totalTrades === 0 ? 0 : trades.reduce((s, t) => s + t.pnl, 0) / totalTrades;
-  const avgBars = totalTrades === 0 ? 0 : trades.reduce((s, t) => s + t.barsHeld, 0) / totalTrades;
+  const avgTrade = totalTrades === 0 ? 0 : trades.reduce((s: number, t: ScalpTrade) => s + t.pnl, 0) / totalTrades;
+  const avgBars = totalTrades === 0 ? 0 : trades.reduce((s: number, t: ScalpTrade) => s + t.barsHeld, 0) / totalTrades;
 
   return {
     trades,
