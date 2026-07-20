@@ -104,9 +104,16 @@ export interface DailyMonthStats {
   netPnl: number;
 }
 
+export interface DailyRejectDiagnostics {
+  rejectsByReason: Record<string, number>;
+  rejectsByMonth: Record<string, Record<string, number>>;
+  rejectsBySymbol: Record<string, Record<string, number>>;
+}
+
 export interface DailyUniverseDiagnostics {
   filters: DailyFilterStats;
   months: DailyMonthStats[];
+  rejects: DailyRejectDiagnostics;
 }
 
 export interface DailyUniverseBacktestResult {
@@ -257,13 +264,39 @@ function ensureMonthStats(
   return months[key];
 }
 
+function incCounter(map: Record<string, number>, key: string): void {
+  map[key] = (map[key] ?? 0) + 1;
+}
+
+function incNestedCounter(
+  map: Record<string, Record<string, number>>,
+  outer: string,
+  inner: string
+): void {
+  if (!map[outer]) map[outer] = {};
+  map[outer][inner] = (map[outer][inner] ?? 0) + 1;
+}
+
+function extractRejectReason(signal: DailyBreakoutSignal): string {
+  const indicators = signal.indicators as Record<string, unknown> | undefined;
+  const reason =
+    indicators?.rejectReason ??
+    indicators?.reject ??
+    (signal.side === 'none' ? 'side_none' : null);
+
+  return typeof reason === 'string' && reason.trim() ? reason : 'unknown_reject';
+}
+
 function pickBestSignal(
   visibleBySymbol: Record<string, Candle[]>,
   balance: number,
   strategyOptions: DailyBreakoutOptions,
   minSignalAtrPct: number,
   filterStats: DailyFilterStats,
-  monthStats: DailyMonthStats
+  monthStats: DailyMonthStats,
+  rejectsByReason: Record<string, number>,
+  rejectsByMonth: Record<string, Record<string, number>>,
+  rejectsBySymbol: Record<string, Record<string, number>>
 ): {
   best: DailyBreakoutSignal | null;
   accepted: number;
@@ -318,16 +351,30 @@ function pickBestSignal(
       signal.atr == null ||
       signal.indicators.atrPct == null
     ) {
+      const rejectReason = extractRejectReason(signal);
+
       rejected += 1;
       filterStats.rejectedSignals += 1;
       monthStats.rejectedSignals += 1;
+
+      incCounter(rejectsByReason, rejectReason);
+      incNestedCounter(rejectsByMonth, monthStats.month, rejectReason);
+      incNestedCounter(rejectsBySymbol, symbol, rejectReason);
+
       continue;
     }
 
     if (signal.indicators.atrPct < minSignalAtrPct) {
+      const rejectReason = 'min_signal_atr_pct';
+
       rejected += 1;
       filterStats.rejectedSignals += 1;
       monthStats.rejectedSignals += 1;
+
+      incCounter(rejectsByReason, rejectReason);
+      incNestedCounter(rejectsByMonth, monthStats.month, rejectReason);
+      incNestedCounter(rejectsBySymbol, symbol, rejectReason);
+
       continue;
     }
 
@@ -430,6 +477,7 @@ function buildSummary(params: {
   const grossProfit = wins.reduce((a, b) => a + b.netPnl, 0);
   const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b.netPnl, 0));
   const netProfit = trades.reduce((a, b) => a + b.netPnl, 0);
+
   const profitFactor =
     grossLossAbs > 0 ? grossProfit / grossLossAbs : grossProfit > 0 ? Infinity : 0;
 
@@ -544,7 +592,12 @@ export function runDailyUniverseBacktest(
           selectedSignals: 0,
           openedPositions: 0
         },
-        months: []
+        months: [],
+        rejects: {
+          rejectsByReason: {},
+          rejectsByMonth: {},
+          rejectsBySymbol: {}
+        }
       }
     };
   }
@@ -587,6 +640,9 @@ export function runDailyUniverseBacktest(
   };
 
   const monthStatsMap: Record<string, DailyMonthStats> = {};
+  const rejectsByReason: Record<string, number> = {};
+  const rejectsByMonth: Record<string, Record<string, number>> = {};
+  const rejectsBySymbol: Record<string, Record<string, number>> = {};
 
   if (timeAxis.length) {
     equityCurve.push({ time: timeAxis[0], balance: round(balance) });
@@ -606,8 +662,7 @@ export function runDailyUniverseBacktest(
       const processedBars = i - resolvedOptions.warmupCandles;
       const shouldLog =
         processedBars > 0 &&
-        (processedBars % resolvedOptions.progressLogEvery === 0 ||
-          i === timeAxis.length - 1);
+        (processedBars % resolvedOptions.progressLogEvery === 0 || i === timeAxis.length - 1);
 
       if (shouldLog) {
         const elapsedSec = (Date.now() - startedAt) / 1000;
@@ -682,7 +737,10 @@ export function runDailyUniverseBacktest(
       resolvedOptions,
       resolvedOptions.minSignalAtrPct,
       filterStats,
-      currentMonthStats
+      currentMonthStats,
+      rejectsByReason,
+      rejectsByMonth,
+      rejectsBySymbol
     );
 
     selectionStats.signalsAccepted += pick.accepted;
@@ -695,6 +753,7 @@ export function runDailyUniverseBacktest(
 
     selectionStats.pickedBySymbol[pick.best.symbol] =
       (selectionStats.pickedBySymbol[pick.best.symbol] ?? 0) + 1;
+
     selectionStats.pickedBySide[pick.best.side] =
       (selectionStats.pickedBySide[pick.best.side] ?? 0) + 1;
 
@@ -749,7 +808,12 @@ export function runDailyUniverseBacktest(
       filters: filterStats,
       months: Object.values(monthStatsMap).sort((a, b) =>
         a.month.localeCompare(b.month)
-      )
+      ),
+      rejects: {
+        rejectsByReason,
+        rejectsByMonth,
+        rejectsBySymbol
+      }
     }
   };
 }
