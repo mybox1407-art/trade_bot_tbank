@@ -19,6 +19,10 @@ export interface DailyUniverseBacktestOptions extends UniverseStrategyOptions {
   maxBreakoutDistancePct?: number;
   allowLongs?: boolean;
   allowShorts?: boolean;
+
+  // backward compatibility for old callers like runDailyMatrix.ts
+  smaPeriod?: number;
+  atrPeriod?: number;
 }
 
 interface OpenPosition {
