@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { Candle } from '../services/universeStrategy';
+import { Candle } from '../services/dailyBreakoutStrategy';
 import {
   runDailyUniverseBacktest,
   DailyUniverseBacktestResult,
@@ -48,6 +48,7 @@ function toNumber(value: unknown): number {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : NaN;
   }
+
   return NaN;
 }
 
@@ -345,6 +346,16 @@ function printRejectDiagnostics(result: DailyUniverseBacktestResult): void {
   console.log('Reject reasons:');
   console.table(byReasonRows);
 
+  const byConditionRows = Object.entries(r.rejectsByCondition ?? {})
+    .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
+    .map(([condition, count]: [string, number]) => ({ condition, count }));
+
+  if (byConditionRows.length) {
+    console.log('');
+    console.log('Reject conditions:');
+    console.table(byConditionRows);
+  }
+
   const byMonthRows = Object.entries(r.rejectsByMonth)
     .sort(
       (a: [string, Record<string, number>], b: [string, Record<string, number>]) =>
@@ -506,7 +517,6 @@ async function main(): Promise<void> {
   printLaunchParams(candlesBySymbol);
 
   const startedAt = Date.now();
-
   const result = runDailyUniverseBacktest(candlesBySymbol, {
     startingBalance: 50000,
     commissionRate: 0.0005,
