@@ -47,6 +47,7 @@ function normalizeCandles(raw: unknown): Candle[] {
     if (!isValidCandle(item)) {
       throw new Error(`Некорректная свеча в массиве, индекс ${index}.`);
     }
+
     return {
       time: toNumber(item.time),
       open: toNumber(item.open),
@@ -79,6 +80,7 @@ function parseCooldownCandles(value: string | undefined): number {
     );
     return DEFAULT_COOLDOWN_CANDLES;
   }
+
   return parsed;
 }
 
@@ -90,21 +92,26 @@ function parseHtfArg(value: string | undefined): {
   if (value == null || value === '') {
     return { htfFilter: false, htfMinAdx1h: 18 };
   }
+
   const v = value.trim().toLowerCase();
   if (v === 'htf' || v === 'htf=on' || v === '1' || v === 'true') {
     return { htfFilter: true, htfMinAdx1h: 18 };
   }
+
   if (v.startsWith('htf=')) {
     const n = Number(v.slice(4));
     if (!Number.isFinite(n) || n < 0) {
       console.warn(`Некорректный htf="${value}", используем htf=18`);
       return { htfFilter: true, htfMinAdx1h: 18 };
     }
+
     return { htfFilter: true, htfMinAdx1h: n };
   }
+
   if (v === 'nohtf' || v === 'htf=off' || v === '0' || v === 'false') {
     return { htfFilter: false, htfMinAdx1h: 18 };
   }
+
   console.warn(`Неизвестный 4-й аргумент "${value}", HTF выкл.`);
   return { htfFilter: false, htfMinAdx1h: 18 };
 }
@@ -119,7 +126,10 @@ function formatDuration(seconds: number): string {
   return `${hours} ч ${minutes % 60} мин`;
 }
 
-function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: number } {
+function estimateBacktestTime(candlesCount: number): {
+  minSec: number;
+  maxSec: number;
+} {
   if (candlesCount <= 5000) return { minSec: 5, maxSec: 20 };
   if (candlesCount <= 15000) return { minSec: 15, maxSec: 60 };
   if (candlesCount <= 30000) return { minSec: 30, maxSec: 120 };
@@ -127,7 +137,7 @@ function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: n
   return { minSec: 180, maxSec: 600 };
 }
 
-function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
+function printSummary(result: ReturnType<typeof runStrategyBacktest>): void {
   const s = result.summary;
   const netColor = s.netProfit > 0 ? 'green' : s.netProfit < 0 ? 'red' : 'yellow';
   const retColor = s.returnPct > 0 ? 'green' : s.returnPct < 0 ? 'red' : 'yellow';
@@ -140,15 +150,21 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   console.log(`Побед: ${colorize(String(s.wins), 'green')}`);
   console.log(`Поражений: ${colorize(String(s.losses), 'red')}`);
   console.log(`Win rate: ${formatNumber(s.winRate * 100, 2)}%`);
-  console.log(`Gross profit: ${colorize(formatNumber(s.grossProfit, 2), 'green')}`);
+  console.log(
+    `Gross profit: ${colorize(formatNumber(s.grossProfit, 2), 'green')}`
+  );
   console.log(`Gross loss: ${colorize(formatNumber(s.grossLoss, 2), 'red')}`);
-  console.log(`Net profit: ${colorize(formatNumber(s.netProfit, 2), netColor)}`);
+  console.log(
+    `Net profit: ${colorize(formatNumber(s.netProfit, 2), netColor)}`
+  );
   console.log(`Avg net pnl: ${formatNumber(s.avgNetPnl, 2)}`);
   console.log(`Avg win: ${colorize(formatNumber(s.avgWin, 2), 'green')}`);
   console.log(`Avg loss: ${colorize(formatNumber(s.avgLoss, 2), 'red')}`);
   console.log(
     `Profit factor: ${colorize(
-      Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity',
+      Number.isFinite(s.profitFactor)
+        ? formatNumber(s.profitFactor, 3)
+        : 'Infinity',
       pfColor
     )}`
   );
@@ -158,7 +174,9 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
     `Доходность: ${colorize(formatNumber(s.returnPct * 100, 2) + '%', retColor)}`
   );
   console.log(`Макс. просадка: ${formatNumber(s.maxDrawdownAbs, 2)}`);
-  console.log(`Макс. просадка %: ${formatNumber(s.maxDrawdownPct * 100, 2)}%`);
+  console.log(
+    `Макс. просадка %: ${formatNumber(s.maxDrawdownPct * 100, 2)}%`
+  );
 
   if (result.options.htfFilter) {
     const h = result.htfStats;
@@ -168,7 +186,90 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>) {
   }
 }
 
-function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: number) {
+function printRegimeStats(
+  result: ReturnType<typeof runStrategyBacktest>
+): void {
+  const rs = result.regimeStats;
+  if (!rs || rs.totalBars === 0) {
+    console.log('\n========== REGIME STATS ==========');
+    console.log('Нет данных по режимам (totalBars=0).');
+    return;
+  }
+
+  const order = [
+    'trend_up',
+    'trend_down',
+    'range',
+    'high_volatility',
+    'breakout_watch',
+    'unknown'
+  ];
+
+  console.log('\n========== REGIME STATS ==========');
+  console.log(`Баров после warmup: ${rs.totalBars}`);
+
+  const barParts: string[] = [];
+  const regimesSeen = new Set([
+    ...order,
+    ...Object.keys(rs.barsByRegime),
+    ...Object.keys(rs.tradesByRegime)
+  ]);
+  for (const reg of [
+    ...order,
+    ...[...regimesSeen].filter(r => !order.includes(r))
+  ]) {
+    const b = rs.barsByRegime[reg];
+    if (!b && !rs.tradesByRegime[reg]) continue;
+    const pct = b ? (b.pct * 100).toFixed(1) : '0.0';
+    const bars = b ? b.bars : 0;
+    barParts.push(`${reg} ${pct}% (${bars})`);
+  }
+  console.log(`Bars: ${barParts.join(' | ')}`);
+
+  console.log('\nTrades by regime (группы, как в summary):');
+  const tradeRegs = [
+    ...order.filter(r => rs.tradesByRegime[r]),
+    ...Object.keys(rs.tradesByRegime).filter(r => !order.includes(r))
+  ];
+  if (!tradeRegs.length) {
+    console.log('  (сделок нет)');
+  }
+  for (const reg of tradeRegs) {
+    const t = rs.tradesByRegime[reg];
+    const pf = Number.isFinite(t.profitFactor)
+      ? t.profitFactor.toFixed(3)
+      : 'Infinity';
+    const wr = (t.winRate * 100).toFixed(1);
+    const reasons = Object.entries(t.closeReasons)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
+    console.log(
+      `  ${reg}: n=${t.trades} WR=${wr}% PF=${pf} net=${t.netProfit.toFixed(2)} ` +
+        `avgBars=${t.avgBarsHeld} | ${reasons || '—'}`
+    );
+  }
+
+  const allReasons = Object.entries(rs.closeReasonsAll)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' | ');
+  console.log(`\nClose reasons (все ноги): ${allReasons || '—'}`);
+
+  const trendBars =
+    (rs.barsByRegime['trend_up']?.bars ?? 0) +
+    (rs.barsByRegime['trend_down']?.bars ?? 0);
+  const trendPct = rs.totalBars > 0 ? (100 * trendBars) / rs.totalBars : 0;
+  console.log(
+    `\nNote: trend_up+trend_down ≈ ${trendPct.toFixed(1)}% баров ` +
+      `(стратегия торгует только там).`
+  );
+}
+
+function printTrades(
+  result: ReturnType<typeof runStrategyBacktest>,
+  limit?: number
+): void {
   const all = result.trades;
   const trades = limit != null && limit > 0 ? all.slice(-limit) : all;
   const title =
@@ -212,19 +313,19 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
   }
 }
 
-function printUsage() {
+function printUsage(): void {
   console.log(`
 Использование:
-  npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [htf|htf=18|nohtf]
+npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [htf|htf=18|nohtf]
 
 Примеры:
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
-  npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 htf
-  npm run backtest -- ./src/backtest/data/NVTK_15m.json NVTK 12 htf=18
+npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
+npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 htf
+npm run backtest -- ./src/backtest/data/NVTK_15m.json NVTK 12 htf=18
 `);
 }
 
-function main() {
+function main(): void {
   const [, , inputPathArg, symbolArg, cooldownCandlesArg, htfArg] = process.argv;
   if (!inputPathArg || !symbolArg) {
     printUsage();
@@ -330,6 +431,7 @@ function main() {
     `Фактическое время: ${formatDuration((Date.now() - startedAt) / 1000)}`
   );
   printSummary(result);
+  printRegimeStats(result);
   printTrades(result);
 }
 
