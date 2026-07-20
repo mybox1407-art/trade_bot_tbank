@@ -4,6 +4,9 @@ import { Candle } from '../services/dailyBreakoutStrategy';
 import { runDailyUniverseBacktest } from './dailyUniverseBacktest';
 
 const DEFAULT_PROGRESS_LOG_EVERY = 250;
+const DEFAULT_MIN_ATR_PCT = 0.006;
+const DEFAULT_ALLOW_LONGS = true;
+const DEFAULT_ALLOW_SHORTS = false;
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -86,11 +89,7 @@ function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: n
   return { minSec: 20, maxSec: 60 };
 }
 
-function parseNumberArg(
-  args: string[],
-  name: string,
-  fallback: number
-): number {
+function parseNumberArg(args: string[], name: string, fallback: number): number {
   const arg = args.find(a => a.startsWith(`--${name}=`));
   if (!arg) return fallback;
 
@@ -102,11 +101,7 @@ function parseNumberArg(
   return n;
 }
 
-function parseBoolArg(
-  args: string[],
-  name: string,
-  fallback: boolean
-): boolean {
+function parseBoolArg(args: string[], name: string, fallback: boolean): boolean {
   const arg = args.find(a => a.startsWith(`--${name}=`));
   if (!arg) return fallback;
 
@@ -145,9 +140,7 @@ function printSummary(result: ReturnType<typeof runDailyUniverseBacktest>): void
       pfColor
     )}`
   );
-  console.log(
-    `Sharpe: ${colorize(formatNumber(s.sharpe, 3), sharpeColor)}`
-  );
+  console.log(`Sharpe: ${colorize(formatNumber(s.sharpe, 3), sharpeColor)}`);
   console.log(`Стартовый баланс: ${formatNumber(s.startBalance, 2)}`);
   console.log(`Финальный баланс: ${formatNumber(s.endBalance, 2)}`);
   console.log(
@@ -174,7 +167,7 @@ function printSelectionStats(result: ReturnType<typeof runDailyUniverseBacktest>
   );
   console.log(
     `Picked by symbol: ${
-      Object.entries(st.pickedBySymbol)
+      (Object.entries(st.pickedBySymbol) as Array<[string, number]>)
         .sort((a, b) => b[1] - a[1])
         .map(([k, v]) => `${k}=${v}`)
         .join(' | ') || '—'
@@ -229,7 +222,10 @@ function printUsage(): void {
 npx tsx src/backtest/runDailyUniverseBacktest.ts <json1:symbol1> <json2:symbol2> ... [опции]
 
 Формат инструмента:
-  ./src/backtest/data/SBER_D.json:SBER
+  ./src/backtest/data/SBER_15m.json:SBER
+
+Пресет по умолчанию:
+  long-only + minAtrPct=0.006
 
 Опции:
   --balance=50000
@@ -238,21 +234,18 @@ npx tsx src/backtest/runDailyUniverseBacktest.ts <json1:symbol1> <json2:symbol2>
   --risk=0.01
   --stopAtr=2.5
   --trailAtr=2.0
-  --minAtrPct=0.008
+  --minAtrPct=0.006
   --maxAtrPct=0.12
   --maxBreakoutDistancePct=0.04
   --allowLongs=true
-  --allowShorts=true
+  --allowShorts=false
 
 Пример:
 npx tsx src/backtest/runDailyUniverseBacktest.ts \
-  ./src/backtest/data/SBER_D.json:SBER \
-  ./src/backtest/data/GAZP_D.json:GAZP \
-  ./src/backtest/data/LKOH_D.json:LKOH \
-  --balance=50000 \
-  --risk=0.01 \
-  --stopAtr=2.5 \
-  --trailAtr=2.0
+  ./src/backtest/data/SBER_15m.json:SBER \
+  ./src/backtest/data/GAZP_15m.json:GAZP \
+  ./src/backtest/data/LKOH_15m.json:LKOH \
+  ./src/backtest/data/ROSN_15m.json:ROSN
 `);
 }
 
@@ -275,11 +268,11 @@ function main(): void {
   const riskPerTrade = parseNumberArg(args, 'risk', 0.01);
   const stopAtrMult = parseNumberArg(args, 'stopAtr', 2.5);
   const trailingAtrMult = parseNumberArg(args, 'trailAtr', 2.0);
-  const minAtrPct = parseNumberArg(args, 'minAtrPct', 0.008);
+  const minAtrPct = parseNumberArg(args, 'minAtrPct', DEFAULT_MIN_ATR_PCT);
   const maxAtrPct = parseNumberArg(args, 'maxAtrPct', 0.12);
   const maxBreakoutDistancePct = parseNumberArg(args, 'maxBreakoutDistancePct', 0.04);
-  const allowLongs = parseBoolArg(args, 'allowLongs', true);
-  const allowShorts = parseBoolArg(args, 'allowShorts', true);
+  const allowLongs = parseBoolArg(args, 'allowLongs', DEFAULT_ALLOW_LONGS);
+  const allowShorts = parseBoolArg(args, 'allowShorts', DEFAULT_ALLOW_SHORTS);
 
   const candlesBySymbol: Record<string, Candle[]> = {};
   const loadedInfo: Array<{
@@ -333,9 +326,7 @@ function main(): void {
     });
   }
 
-  const estimated = estimateBacktestTime(
-    Math.min(...loadedInfo.map(x => x.count))
-  );
+  const estimated = estimateBacktestTime(Math.min(...loadedInfo.map(x => x.count)));
 
   console.log('\n========== ПАРАМЕТРЫ DAILY UNIVERSE ЗАПУСКА ==========');
   console.log(`Инструментов: ${loadedInfo.length}`);
@@ -356,6 +347,7 @@ function main(): void {
   console.log(`Max breakout distance %: ${maxBreakoutDistancePct}`);
   console.log(`Longs: ${allowLongs ? 'ON' : 'OFF'}`);
   console.log(`Shorts: ${allowShorts ? 'ON' : 'OFF'}`);
+  console.log(`Preset default: long-only + minAtrPct=0.006`);
   console.log(
     `Оценка времени: ~ ${formatDuration(estimated.minSec)} - ${formatDuration(
       estimated.maxSec
