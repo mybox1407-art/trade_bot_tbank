@@ -523,13 +523,13 @@ async function main(): Promise<void> {
     warmupCandles: 30,
     progressLogEvery: 250,
     onePositionAtTime: true,
-    minSignalAtrPct: 0.0045,
+    minSignalAtrPct: 0.005,
     riskPerTrade: 0.01,
     stopAtrMult: 2.5,
     trailingAtrMult: 2.0,
     minAtrPct: 0.0035,
     maxAtrPct: 0.12,
-    maxBreakoutDistancePct: 0.03,
+    maxBreakoutDistancePct: 0.025,
     allowLongs: true,
     allowShorts: true
   });
