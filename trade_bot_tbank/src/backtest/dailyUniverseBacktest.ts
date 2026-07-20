@@ -78,12 +78,44 @@ export interface DailySelectionStats {
   signalsRejected: number;
 }
 
+export interface DailyFilterStats {
+  barsProcessed: number;
+  symbolsSeen: number;
+  warmSymbols: number;
+  atrFilterPassed: number;
+  atrFilterRejected: number;
+  breakoutCandidates: number;
+  longCandidates: number;
+  shortCandidates: number;
+  acceptedSignals: number;
+  rejectedSignals: number;
+  selectedSignals: number;
+  openedPositions: number;
+}
+
+export interface DailyMonthStats {
+  month: string;
+  decisionDays: number;
+  acceptedSignals: number;
+  rejectedSignals: number;
+  selectedSignals: number;
+  openedPositions: number;
+  closedTrades: number;
+  netPnl: number;
+}
+
+export interface DailyUniverseDiagnostics {
+  filters: DailyFilterStats;
+  months: DailyMonthStats[];
+}
+
 export interface DailyUniverseBacktestResult {
   options: Required<DailyUniverseBacktestOptions>;
   summary: DailyUniverseSummary;
   trades: DailyUniverseTrade[];
   equityCurve: Array<{ time: number; balance: number }>;
   selectionStats: DailySelectionStats;
+  diagnostics: DailyUniverseDiagnostics;
 }
 
 interface ScoredSignal {
@@ -196,11 +228,42 @@ function buildVisibleSlices(
   return out;
 }
 
+function monthKeyFromTs(ts: number): string {
+  const d = new Date(ts);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+function ensureMonthStats(
+  months: Record<string, DailyMonthStats>,
+  ts: number
+): DailyMonthStats {
+  const key = monthKeyFromTs(ts);
+
+  if (!months[key]) {
+    months[key] = {
+      month: key,
+      decisionDays: 0,
+      acceptedSignals: 0,
+      rejectedSignals: 0,
+      selectedSignals: 0,
+      openedPositions: 0,
+      closedTrades: 0,
+      netPnl: 0
+    };
+  }
+
+  return months[key];
+}
+
 function pickBestSignal(
   visibleBySymbol: Record<string, Candle[]>,
   balance: number,
   strategyOptions: DailyBreakoutOptions,
-  minSignalAtrPct: number
+  minSignalAtrPct: number,
+  filterStats: DailyFilterStats,
+  monthStats: DailyMonthStats
 ): {
   best: DailyBreakoutSignal | null;
   accepted: number;
@@ -211,7 +274,40 @@ function pickBestSignal(
   let rejected = 0;
 
   for (const [symbol, candles] of Object.entries(visibleBySymbol)) {
+    filterStats.symbolsSeen += 1;
+
+    const warmupNeeded = Math.max(
+      (strategyOptions.smaPeriod ?? 20) + 2,
+      (strategyOptions.atrPeriod ?? 14) + 2,
+      30
+    );
+
+    if (!Array.isArray(candles) || candles.length < warmupNeeded) {
+      continue;
+    }
+
+    filterStats.warmSymbols += 1;
+
     const signal = analyzeDailyBreakout(symbol, candles, balance, strategyOptions);
+
+    if (signal.indicators.ready && signal.indicators.atrPct != null) {
+      if (
+        signal.indicators.atrPct >= (strategyOptions.minAtrPct ?? 0) &&
+        signal.indicators.atrPct <= (strategyOptions.maxAtrPct ?? Number.POSITIVE_INFINITY)
+      ) {
+        filterStats.atrFilterPassed += 1;
+      } else {
+        filterStats.atrFilterRejected += 1;
+      }
+    }
+
+    if (signal.side === 'long') {
+      filterStats.breakoutCandidates += 1;
+      filterStats.longCandidates += 1;
+    } else if (signal.side === 'short') {
+      filterStats.breakoutCandidates += 1;
+      filterStats.shortCandidates += 1;
+    }
 
     if (
       signal.side === 'none' ||
@@ -223,15 +319,21 @@ function pickBestSignal(
       signal.indicators.atrPct == null
     ) {
       rejected += 1;
+      filterStats.rejectedSignals += 1;
+      monthStats.rejectedSignals += 1;
       continue;
     }
 
     if (signal.indicators.atrPct < minSignalAtrPct) {
       rejected += 1;
+      filterStats.rejectedSignals += 1;
+      monthStats.rejectedSignals += 1;
       continue;
     }
 
     accepted += 1;
+    filterStats.acceptedSignals += 1;
+    monthStats.acceptedSignals += 1;
 
     const signalScore =
       signal.indicators.atrPct * 100 +
@@ -243,6 +345,11 @@ function pickBestSignal(
         score: signalScore
       };
     }
+  }
+
+  if (bestScored) {
+    filterStats.selectedSignals += 1;
+    monthStats.selectedSignals += 1;
   }
 
   return {
@@ -421,6 +528,23 @@ export function runDailyUniverseBacktest(
         pickedBySide: {},
         signalsAccepted: 0,
         signalsRejected: 0
+      },
+      diagnostics: {
+        filters: {
+          barsProcessed: 0,
+          symbolsSeen: 0,
+          warmSymbols: 0,
+          atrFilterPassed: 0,
+          atrFilterRejected: 0,
+          breakoutCandidates: 0,
+          longCandidates: 0,
+          shortCandidates: 0,
+          acceptedSignals: 0,
+          rejectedSignals: 0,
+          selectedSignals: 0,
+          openedPositions: 0
+        },
+        months: []
       }
     };
   }
@@ -447,6 +571,23 @@ export function runDailyUniverseBacktest(
     signalsRejected: 0
   };
 
+  const filterStats: DailyFilterStats = {
+    barsProcessed: 0,
+    symbolsSeen: 0,
+    warmSymbols: 0,
+    atrFilterPassed: 0,
+    atrFilterRejected: 0,
+    breakoutCandidates: 0,
+    longCandidates: 0,
+    shortCandidates: 0,
+    acceptedSignals: 0,
+    rejectedSignals: 0,
+    selectedSignals: 0,
+    openedPositions: 0
+  };
+
+  const monthStatsMap: Record<string, DailyMonthStats> = {};
+
   if (timeAxis.length) {
     equityCurve.push({ time: timeAxis[0], balance: round(balance) });
   }
@@ -457,6 +598,9 @@ export function runDailyUniverseBacktest(
   for (let i = resolvedOptions.warmupCandles; i < timeAxis.length; i++) {
     const ts = timeAxis[i];
     const visibleBySymbol = buildVisibleSlices(sortedBySymbol, lookup, ts);
+    const currentMonthStats = ensureMonthStats(monthStatsMap, ts);
+
+    filterStats.barsProcessed += 1;
 
     if (resolvedOptions.progressLogEvery > 0) {
       const processedBars = i - resolvedOptions.warmupCandles;
@@ -519,6 +663,8 @@ export function runDailyUniverseBacktest(
         balance = trade.balanceAfter;
         trades.push(trade);
         equityCurve.push({ time: candle.time, balance: round(balance) });
+        currentMonthStats.closedTrades += 1;
+        currentMonthStats.netPnl = round(currentMonthStats.netPnl + trade.netPnl);
         openPosition = null;
       }
     }
@@ -528,12 +674,15 @@ export function runDailyUniverseBacktest(
     }
 
     selectionStats.totalDecisionDays += 1;
+    currentMonthStats.decisionDays += 1;
 
     const pick = pickBestSignal(
       visibleBySymbol,
       balance,
       resolvedOptions,
-      resolvedOptions.minSignalAtrPct
+      resolvedOptions.minSignalAtrPct,
+      filterStats,
+      currentMonthStats
     );
 
     selectionStats.signalsAccepted += pick.accepted;
@@ -552,6 +701,9 @@ export function runDailyUniverseBacktest(
     const built = buildDailyBreakoutPositionFromSignal(pick.best, ts);
     if (!built) continue;
 
+    filterStats.openedPositions += 1;
+    currentMonthStats.openedPositions += 1;
+
     openPosition = {
       ...built,
       balanceBefore: balance,
@@ -562,6 +714,7 @@ export function runDailyUniverseBacktest(
   if (openPosition) {
     const finalCandles: Candle[] = sortedBySymbol[openPosition.symbol];
     const lastCandle: Candle = last(finalCandles);
+    const finalMonthStats = ensureMonthStats(monthStatsMap, lastCandle.time);
 
     const trade = buildTrade({
       position: openPosition,
@@ -576,6 +729,8 @@ export function runDailyUniverseBacktest(
     balance = trade.balanceAfter;
     trades.push(trade);
     equityCurve.push({ time: lastCandle.time, balance: round(balance) });
+    finalMonthStats.closedTrades += 1;
+    finalMonthStats.netPnl = round(finalMonthStats.netPnl + trade.netPnl);
   }
 
   return {
@@ -589,6 +744,12 @@ export function runDailyUniverseBacktest(
     }),
     trades,
     equityCurve,
-    selectionStats
+    selectionStats,
+    diagnostics: {
+      filters: filterStats,
+      months: Object.values(monthStatsMap).sort((a, b) =>
+        a.month.localeCompare(b.month)
+      )
+    }
   };
 }
