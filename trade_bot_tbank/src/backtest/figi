@@ -22,6 +22,8 @@ npm run download:candles -- BBG00QZD8W85 OZON 730
 npm run download:candles -- BBG00QSZXH95 VKCO 730
 npm run download:candles -- BBG0041PHZD2 RUAL 730
 
+npx ts-node src/backtest/downloadCandles.ts BBG004730N88 SBER 7 1m
+
 Запуск теста
 
 npm run backtest -- src/backtest/data/SBER_15m.json SBER
