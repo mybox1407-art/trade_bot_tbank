@@ -8,6 +8,8 @@ import {
   RejectStat
 } from './momentumScalpBacktest';
 
+type PresetName = 'base' | 'presetA' | 'presetB';
+
 function loadCandles(filePath: string): Candle[] {
   const raw = fs.readFileSync(filePath, 'utf-8');
   const data = JSON.parse(raw);
@@ -46,7 +48,37 @@ function formatFractionPct(n: number): string {
   return `${(n * 100).toFixed(2)}%`;
 }
 
-function printParams(params: ScalpParams) {
+function buildParams(preset: PresetName): ScalpParams {
+  const base: ScalpParams = { ...DEFAULT_SCALP_PARAMS };
+
+  if (preset === 'base') {
+    return base;
+  }
+
+  if (preset === 'presetA') {
+    return {
+      ...base,
+      sessionStartHour: 10,
+      sessionEndHour: 18.75,
+      afternoonStartHour: 10,
+      afternoonEndHour: 18.75
+    };
+  }
+
+  return {
+    ...base,
+    sessionStartHour: 10,
+    sessionEndHour: 18.75,
+    afternoonStartHour: 10,
+    afternoonEndHour: 18.75,
+    minAtrPct: 0.0005
+  };
+}
+
+function printParams(params: ScalpParams, preset: PresetName) {
+  console.log('\n=== PRESET ===');
+  console.log(preset);
+
   console.log('\n=== PARAMS ===');
   console.table([
     { name: 'riskPerTrade', value: params.riskPerTrade },
@@ -113,7 +145,6 @@ function printTradeStats(result: ScalpBacktestResult) {
   const negativeTakeProfits = result.trades.filter(
     (t: ScalpTrade) => t.exitReason === 'take_profit' && t.netPnl < 0
   ).length;
-
   const longTrades = result.trades.filter((t: ScalpTrade) => t.side === 'long').length;
   const shortTrades = result.trades.filter((t: ScalpTrade) => t.side === 'short').length;
 
@@ -124,6 +155,45 @@ function printTradeStats(result: ScalpBacktestResult) {
   console.log(`Negative take_profit trades after costs: ${negativeTakeProfits}`);
   console.log(`Long trades: ${longTrades}`);
   console.log(`Short trades: ${shortTrades}`);
+}
+
+function printRejectStats(result: ScalpBacktestResult) {
+  console.log('\n=== REJECT REASONS ===');
+
+  if (!result.rejectStats || result.rejectStats.length === 0) {
+    console.log('No rejects collected');
+    return;
+  }
+
+  const totalRejects = result.rejectStats.reduce(
+    (sum: number, row: RejectStat) => sum + row.count,
+    0
+  );
+
+  const rows = result.rejectStats.map((row: RejectStat) => ({
+    reason: row.reason,
+    count: row.count,
+    sharePct: totalRejects > 0 ? ((row.count / totalRejects) * 100).toFixed(2) : '0.00'
+  }));
+
+  console.table(rows);
+  console.log(`Total rejects: ${totalRejects}`);
+}
+
+function printTopRejectComment(result: ScalpBacktestResult) {
+  if (!result.rejectStats || result.rejectStats.length === 0) {
+    return;
+  }
+
+  const top = result.rejectStats[0];
+  const totalRejects = result.rejectStats.reduce(
+    (sum: number, row: RejectStat) => sum + row.count,
+    0
+  );
+  const share = totalRejects > 0 ? (top.count / totalRejects) * 100 : 0;
+
+  console.log('\n=== TOP REJECT ===');
+  console.log(`${top.reason}: ${top.count} (${share.toFixed(2)}%)`);
 }
 
 function printTrades(result: ScalpBacktestResult, limit: number = 200) {
@@ -187,62 +257,29 @@ function printExitDistribution(result: ScalpBacktestResult) {
   console.table(rows);
 }
 
-function printRejectStats(result: ScalpBacktestResult) {
-  console.log('\n=== REJECT REASONS ===');
-
-  if (!result.rejectStats || result.rejectStats.length === 0) {
-    console.log('No rejects collected');
-    return;
-  }
-
-  const totalRejects = result.rejectStats.reduce(
-    (sum: number, row: RejectStat) => sum + row.count,
-    0
-  );
-
-  const rows = result.rejectStats.map((row: RejectStat) => ({
-    reason: row.reason,
-    count: row.count,
-    sharePct: totalRejects > 0 ? ((row.count / totalRejects) * 100).toFixed(2) : '0.00'
-  }));
-
-  console.table(rows);
-  console.log(`Total rejects: ${totalRejects}`);
-}
-
-function printTopRejectComment(result: ScalpBacktestResult) {
-  if (!result.rejectStats || result.rejectStats.length === 0) {
-    return;
-  }
-
-  const top = result.rejectStats[0];
-  const totalRejects = result.rejectStats.reduce(
-    (sum: number, row: RejectStat) => sum + row.count,
-    0
-  );
-
-  const share = totalRejects > 0 ? (top.count / totalRejects) * 100 : 0;
-
-  console.log('\n=== TOP REJECT ===');
-  console.log(`${top.reason}: ${top.count} (${share.toFixed(2)}%)`);
+function parsePreset(value: string | undefined): PresetName {
+  if (value === 'presetA') return 'presetA';
+  if (value === 'presetB') return 'presetB';
+  return 'base';
 }
 
 function main() {
   const args = process.argv.slice(2);
   const filePath = args[0] || path.join(__dirname, 'data', 'SBER_1m.json');
   const ticker = args[1] || 'SBER';
+  const preset = parsePreset(args[2]);
 
   console.log(`Loading 1m candles for ${ticker} from ${filePath}...`);
   const candles = loadCandles(filePath);
   console.log(`Loaded ${candles.length} candles`);
 
-  const params: ScalpParams = { ...DEFAULT_SCALP_PARAMS };
+  const params = buildParams(preset);
 
   const startedAt = Date.now();
   const result = runMomentumScalpBacktest(candles, params);
   const elapsedMs = Date.now() - startedAt;
 
-  printParams(params);
+  printParams(params, preset);
   printSummary(result);
   printTradeStats(result);
   printRejectStats(result);
