@@ -79,19 +79,19 @@ export const DEFAULT_SCALP_PARAMS: ScalpParams = {
   emaSlowPeriod: 20,
   vwapPeriod: 60,
   volumeLookback: 60,
-  volumeMinRatio: 1.8,
-  minAtrPct: 0.0012,
-  minImpulsePct: 0.0010,
-  minTargetMovePct: 0.0035,
-  minCostCoverage: 3.0,
+  volumeMinRatio: 1.2,
+  minAtrPct: 0.0007,
+  minImpulsePct: 0.0005,
+  minTargetMovePct: 0.0022,
+  minCostCoverage: 2.0,
   maxPositionNotionalPct: 0.20,
-  maxEntryDistanceFromVwapPct: 0.006,
-  timeStopBars: 10,
+  maxEntryDistanceFromVwapPct: 0.010,
+  timeStopBars: 12,
   sessionStartHour: 10,
   sessionEndHour: 12.5,
   afternoonStartHour: 14,
   afternoonEndHour: 17.5,
-  cooldownBars: 8
+  cooldownBars: 4
 };
 
 function round(value: number, digits: number = 6): number {
@@ -109,13 +109,8 @@ function toMskHour(timestamp: number): number {
 function isInSession(timestamp: number, params: ScalpParams): boolean {
   const h = toMskHour(timestamp);
 
-  const inMorning =
-    h >= params.sessionStartHour &&
-    h <= params.sessionEndHour;
-
-  const inAfternoon =
-    h >= params.afternoonStartHour &&
-    h <= params.afternoonEndHour;
+  const inMorning = h >= params.sessionStartHour && h <= params.sessionEndHour;
+  const inAfternoon = h >= params.afternoonStartHour && h <= params.afternoonEndHour;
 
   return inMorning || inAfternoon;
 }
