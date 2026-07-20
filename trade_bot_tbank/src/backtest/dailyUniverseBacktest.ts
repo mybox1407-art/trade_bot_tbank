@@ -127,6 +127,7 @@ export interface DailyMonthStats {
 
 export interface DailyRejectDiagnostics {
   rejectsByReason: Record<string, number>;
+  rejectsByCondition: Record<string, number>;
   rejectsByMonth: Record<string, Record<string, number>>;
   rejectsBySymbol: Record<string, Record<string, number>>;
 }
@@ -312,6 +313,59 @@ function extractRejectReason(signal: DailyBreakoutSignal): string {
   return typeof reason === 'string' && reason.trim() ? reason : 'unknown_reject';
 }
 
+function extractFailedConditions(signal: DailyBreakoutSignal): string[] {
+  const indicators = signal.indicators as Record<string, unknown> | undefined;
+  const failedConditions = indicators?.failedConditions;
+
+  if (Array.isArray(failedConditions) && failedConditions.length > 0) {
+    const normalized = failedConditions.filter(
+      (item): item is string => typeof item === 'string' && item.trim().length > 0
+    );
+    if (normalized.length) return normalized;
+  }
+
+  const primary = indicators?.primaryFailedCondition;
+  if (typeof primary === 'string' && primary.trim()) {
+    return [primary];
+  }
+
+  return [extractRejectReason(signal)];
+}
+
+function registerReject(
+  signal: DailyBreakoutSignal,
+  symbol: string,
+  month: string,
+  filterStats: DailyFilterStats,
+  monthStats: DailyMonthStats,
+  rejectsByReason: Record<string, number>,
+  rejectsByCondition: Record<string, number>,
+  rejectsByMonth: Record<string, Record<string, number>>,
+  rejectsBySymbol: Record<string, Record<string, number>>,
+  explicitReason?: string
+): void {
+  const rejectReason = explicitReason ?? extractRejectReason(signal);
+  const failedConditions = extractFailedConditions(signal);
+
+  filterStats.rejectedSignals += 1;
+  monthStats.rejectedSignals += 1;
+
+  incCounter(rejectsByReason, rejectReason);
+  incNestedCounter(rejectsByMonth, month, rejectReason);
+  incNestedCounter(rejectsBySymbol, symbol, rejectReason);
+
+  for (const condition of failedConditions) {
+    incCounter(rejectsByCondition, condition);
+  }
+
+  if (
+    explicitReason &&
+    !failedConditions.includes(explicitReason)
+  ) {
+    incCounter(rejectsByCondition, explicitReason);
+  }
+}
+
 function pickBestSignal(
   visibleBySymbol: Record<string, Candle[]>,
   balance: number,
@@ -320,6 +374,7 @@ function pickBestSignal(
   filterStats: DailyFilterStats,
   monthStats: DailyMonthStats,
   rejectsByReason: Record<string, number>,
+  rejectsByCondition: Record<string, number>,
   rejectsByMonth: Record<string, Record<string, number>>,
   rejectsBySymbol: Record<string, Record<string, number>>
 ): {
@@ -351,7 +406,8 @@ function pickBestSignal(
     if (signal.indicators.ready && signal.indicators.atrPct != null) {
       if (
         signal.indicators.atrPct >= (strategyOptions.minAtrPct ?? 0) &&
-        signal.indicators.atrPct <= (strategyOptions.maxAtrPct ?? Number.POSITIVE_INFINITY)
+        signal.indicators.atrPct <=
+          (strategyOptions.maxAtrPct ?? Number.POSITIVE_INFINITY)
       ) {
         filterStats.atrFilterPassed += 1;
       } else {
@@ -376,30 +432,35 @@ function pickBestSignal(
       signal.atr == null ||
       signal.indicators.atrPct == null
     ) {
-      const rejectReason = extractRejectReason(signal);
-
       rejected += 1;
-      filterStats.rejectedSignals += 1;
-      monthStats.rejectedSignals += 1;
-
-      incCounter(rejectsByReason, rejectReason);
-      incNestedCounter(rejectsByMonth, monthStats.month, rejectReason);
-      incNestedCounter(rejectsBySymbol, symbol, rejectReason);
-
+      registerReject(
+        signal,
+        symbol,
+        monthStats.month,
+        filterStats,
+        monthStats,
+        rejectsByReason,
+        rejectsByCondition,
+        rejectsByMonth,
+        rejectsBySymbol
+      );
       continue;
     }
 
     if (signal.indicators.atrPct < minSignalAtrPct) {
-      const rejectReason = 'min_signal_atr_pct';
-
       rejected += 1;
-      filterStats.rejectedSignals += 1;
-      monthStats.rejectedSignals += 1;
-
-      incCounter(rejectsByReason, rejectReason);
-      incNestedCounter(rejectsByMonth, monthStats.month, rejectReason);
-      incNestedCounter(rejectsBySymbol, symbol, rejectReason);
-
+      registerReject(
+        signal,
+        symbol,
+        monthStats.month,
+        filterStats,
+        monthStats,
+        rejectsByReason,
+        rejectsByCondition,
+        rejectsByMonth,
+        rejectsBySymbol,
+        'min_signal_atr_pct'
+      );
       continue;
     }
 
@@ -620,6 +681,7 @@ export function runDailyUniverseBacktest(
         months: [],
         rejects: {
           rejectsByReason: {},
+          rejectsByCondition: {},
           rejectsByMonth: {},
           rejectsBySymbol: {}
         }
@@ -666,6 +728,7 @@ export function runDailyUniverseBacktest(
 
   const monthStatsMap: Record<string, DailyMonthStats> = {};
   const rejectsByReason: Record<string, number> = {};
+  const rejectsByCondition: Record<string, number> = {};
   const rejectsByMonth: Record<string, Record<string, number>> = {};
   const rejectsBySymbol: Record<string, Record<string, number>> = {};
 
@@ -764,6 +827,7 @@ export function runDailyUniverseBacktest(
       filterStats,
       currentMonthStats,
       rejectsByReason,
+      rejectsByCondition,
       rejectsByMonth,
       rejectsBySymbol
     );
@@ -834,6 +898,7 @@ export function runDailyUniverseBacktest(
       months: Object.values(monthStatsMap).sort((a, b) => a.month.localeCompare(b.month)),
       rejects: {
         rejectsByReason,
+        rejectsByCondition,
         rejectsByMonth,
         rejectsBySymbol
       }
