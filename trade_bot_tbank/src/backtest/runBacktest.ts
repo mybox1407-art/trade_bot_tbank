@@ -274,11 +274,11 @@ function main() {
     )}`
   );
   console.log(`Лог прогресса: каждые ${PROGRESS_LOG_EVERY} свечей`);
-  console.log(`Риск на сделку: 1%`);
+  console.log(`Риск на сделку: 2%`);
   console.log(`Модель выхода: TP1 50%@1.2R → lock 0.2R → TP2@2.5R (без trail)`);
   console.log(`Лимит входов в день: выкл.`);
   console.log(`Time-stop / abort: 120 бар / выкл.`);
-  console.log(`Кап стопа: ≤ 1.2% цены`);
+  console.log(`Кап стопа: ≤ 1.8% цены`);
   console.log(`Warmup: ${warmup} бар`);
   console.log(
     htfFilter
