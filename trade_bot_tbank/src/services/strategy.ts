@@ -4,16 +4,16 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-/** 1% — лучший PF/DD на этом отрезке; 2% только раздул убытки */
-export const MAX_RISK_PER_TRADE = 0.01;
+/** Тест: 2% риска на сделку (раньше 1%) */
+export const MAX_RISK_PER_TRADE = 0.02;
 
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 
 /**
- * Рабочая модель выхода (PF ~1.85 на SBER 15m):
+ * Рабочая модель выхода:
  * TP1 50% @ 1.2R → lock 0.2R на остатке → TP2 @ 2.5R
- * Без агрессивного трейла runner (он резал победы).
+ * Без агрессивного трейла runner.
  */
 export const TP1_FRACTION = 0.5;
 export const TP1_R = 1.2;
@@ -21,7 +21,10 @@ export const TP2_R = 2.5;
 export const PARTIAL_LOCK_R = 0.2;
 
 const MIN_STOP_DISTANCE_RATE = 0.005;
-const MAX_STOP_DISTANCE_RATE = 0.012;
+/** Было 1.2% — расширили окно стопа до 1.8% цены */
+const MAX_STOP_DISTANCE_RATE = 0.018;
+/** Потолок стопа в ATR (было 2.2) */
+const MAX_STOP_ATR_MULT = 2.8;
 
 const MAX_POSITION_FRAC = 0.3;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
@@ -133,7 +136,7 @@ function getStructureStop(params: {
   const pad = lastAtr * STOP_SWING_PAD_ATR;
 
   const minDist = Math.max(lastAtr * atrStopMult, price * MIN_STOP_DISTANCE_RATE);
-  const maxDist = Math.min(lastAtr * 2.2, price * MAX_STOP_DISTANCE_RATE);
+  const maxDist = Math.min(lastAtr * MAX_STOP_ATR_MULT, price * MAX_STOP_DISTANCE_RATE);
 
   if (side === 'long') {
     let stop = recentLow - pad;
@@ -182,7 +185,7 @@ function calcPositionSize(params: {
 }
 
 // ============================================================================
-// HTF 1h — агрегция и bias (без look-ahead)
+// HTF 1h — агрегация и bias (без look-ahead)
 // ============================================================================
 
 export function hourBucketStart(ts: number): number {
@@ -470,19 +473,11 @@ export function analyzeMarket(
     lastMacd.MACD! < lastMacd.signal! &&
     (lastMacd.histogram ?? 0) <= (prevMacd.histogram ?? 0);
 
+  // Откат фильтра силы свечи: снова мягкий body >= 40%
   const range = Math.max(lastHigh - lastLow, 1e-9);
   const bodyPct = Math.abs(price - lastOpen) / range;
-  const closeNearHigh = (lastHigh - price) / range <= 0.25;
-  const closeNearLow = (price - lastLow) / range <= 0.25;
-
-  /**
-   * Фильтр силы 15m-свечи:
-   * - тело не меньше 55% диапазона
-   * - закрытие near high / near low
-   * Это отсекает вялые pullback/cross-сигналы с длинными хвостами.
-   */
-  const bullCandle = price > lastOpen && bodyPct >= 0.55 && closeNearHigh;
-  const bearCandle = price < lastOpen && bodyPct >= 0.55 && closeNearLow;
+  const bullCandle = price > lastOpen && bodyPct >= 0.4;
+  const bearCandle = price < lastOpen && bodyPct >= 0.4;
 
   const touchLong =
     lastLow <= ema20 * 1.006 ||
@@ -588,8 +583,6 @@ export function analyzeMarket(
         lastRsi,
         extension,
         bodyPct,
-        closeNearHigh,
-        closeNearLow,
         pullbackLong,
         pullbackShort,
         crossLong,
@@ -665,8 +658,6 @@ export function analyzeMarket(
       initialR,
       stopPct,
       bodyPct,
-      closeNearHigh,
-      closeNearLow,
       tp1: takeProfit1Price,
       tp2: takeProfit2Price,
       pullbackLong,
