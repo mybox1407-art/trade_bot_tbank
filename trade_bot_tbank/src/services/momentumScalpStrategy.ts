@@ -10,69 +10,54 @@ export interface Candle {
 }
 
 export type ScalpSide = 'long' | 'short';
+
 export type EntryRejectReason =
   | 'outside_session'
   | 'not_enough_history'
-  | 'missing_5m_context'
-  | '5m_trend_not_aligned'
-  | '5m_atr_not_expanding'
-  | '1m_volume_too_small'
-  | '1m_pullback_missing'
-  | '1m_breakout_missing'
+  | 'ema_not_ready'
+  | 'vwap_not_ready'
+  | 'atr_not_ready'
+  | 'volume_not_ready'
+  | 'trend_not_aligned'
+  | 'atr_too_small'
+  | 'volume_too_small'
+  | 'impulse_too_small'
   | 'target_too_small_for_costs'
-  | 'too_far_from_vwap';
+  | 'too_far_from_vwap'
+  | 'no_signal';
 
-export interface MomentumScalpV2Params {
+export interface ScalpParams {
   riskPerTrade: number;
   maxRiskPerTrade: number;
   commissionRate: number;
   slippageRate: number;
 
-  atrPeriod1m: number;
-  atrPeriod5m: number;
-  emaFastPeriod5m: number;
-  emaSlowPeriod5m: number;
-  vwapPeriod1m: number;
-  volumeLookback1m: number;
-
-  trendAtrLookback5m: number;
-  trendAtrExpandRatio5m: number;
-
-  pullbackLookback1m: number;
-  breakoutBufferPct: number;
-  minPullbackPct: number;
-  minImpulseBodyPct: number;
-  volumeMinRatio1m: number;
-
+  atrPeriod: number;
   atrSlMult: number;
   atrTpMult: number;
-  timeStopBars: number;
-  cooldownBars: number;
 
+  emaFastPeriod: number;
+  emaSlowPeriod: number;
+  vwapPeriod: number;
+  volumeLookback: number;
+
+  volumeMinRatio: number;
+  minAtrPct: number;
+  minImpulsePct: number;
   minTargetMovePct: number;
   minCostCoverage: number;
-  maxEntryDistanceFromVwapPct: number;
   maxPositionNotionalPct: number;
+  maxEntryDistanceFromVwapPct: number;
 
+  timeStopBars: number;
   sessionStartHour: number;
   sessionEndHour: number;
+  afternoonStartHour: number;
+  afternoonEndHour: number;
+  cooldownBars: number;
 }
 
-export interface BarIndicators1m {
-  atr1m: number | null;
-  vwap1m: number | null;
-  volumeSma1m: number | null;
-}
-
-export interface BarIndicators5m {
-  atr5m: number | null;
-  atr5mSma: number | null;
-  emaFast5m: number | null;
-  emaSlow5m: number | null;
-  close5m: number | null;
-}
-
-export interface MomentumScalpSignalV2 {
+export interface ScalpSignal {
   side: ScalpSide;
   signalIndex: number;
   entryIndex: number;
@@ -82,256 +67,91 @@ export interface MomentumScalpSignalV2 {
   stopLossPrice: number;
   takeProfitPrice: number;
   riskDistance: number;
-  atr1m: number;
-  atr5m: number;
-  vwap1m: number;
-  impulseBodyPct: number;
-  pullbackPct: number;
+  atr: number;
+  emaFast: number;
+  emaSlow: number;
+  vwap: number;
   volumeRatio: number;
+  impulsePct: number;
 }
 
-export interface EntryDecisionV2 {
+export interface EntryDecision {
   accepted: boolean;
   reason?: EntryRejectReason;
-  signal?: MomentumScalpSignalV2;
+  signal?: ScalpSignal;
 }
 
-export const DEFAULT_SCALP_V2_PARAMS: MomentumScalpV2Params = {
+export interface ScalpBarIndicators {
+  atr: number | null;
+  emaFast: number | null;
+  emaSlow: number | null;
+  vwap: number | null;
+  volumeSma: number | null;
+}
+
+export const DEFAULT_SCALP_PARAMS: ScalpParams = {
   riskPerTrade: 0.005,
   maxRiskPerTrade: 0.005,
   commissionRate: 0.0002,
   slippageRate: 0.00015,
 
-  atrPeriod1m: 14,
-  atrPeriod5m: 14,
-  emaFastPeriod5m: 9,
-  emaSlowPeriod5m: 20,
-  vwapPeriod1m: 60,
-  volumeLookback1m: 60,
+  atrPeriod: 14,
+  atrSlMult: 1.2,
+  atrTpMult: 2.2,
 
-  trendAtrLookback5m: 20,
-  trendAtrExpandRatio5m: 1.1,
+  emaFastPeriod: 9,
+  emaSlowPeriod: 20,
+  vwapPeriod: 60,
+  volumeLookback: 60,
 
-  pullbackLookback1m: 6,
-  breakoutBufferPct: 0.00015,
-  minPullbackPct: 0.0006,
-  minImpulseBodyPct: 0.0008,
-  volumeMinRatio1m: 1.1,
-
-  atrSlMult: 1.15,
-  atrTpMult: 2.0,
-  timeStopBars: 16,
-  cooldownBars: 4,
-
-  minTargetMovePct: 0.0020,
+  volumeMinRatio: 1.1,
+  minAtrPct: 0.0008,
+  minImpulsePct: 0.0006,
+  minTargetMovePct: 0.0022,
   minCostCoverage: 2.0,
-  maxEntryDistanceFromVwapPct: 0.006,
   maxPositionNotionalPct: 0.2,
+  maxEntryDistanceFromVwapPct: 0.01,
 
+  timeStopBars: 12,
   sessionStartHour: 10,
-  sessionEndHour: 18.75
+  sessionEndHour: 18.75,
+  afternoonStartHour: 10,
+  afternoonEndHour: 18.75,
+  cooldownBars: 4
 };
-
-export function floorToStep(value: number, step: number): number {
-  return Math.floor(value / step) * step;
-}
-
-export function aggregateCandlesTo5m(candles: Candle[]): Candle[] {
-  const result: Candle[] = [];
-  if (candles.length === 0) return result;
-
-  let bucket: Candle[] = [];
-  let currentBucketStart: number | null = null;
-
-  for (const candle of candles) {
-    const bucketStart = Math.floor(candle.time / (5 * 60 * 1000)) * (5 * 60 * 1000);
-
-    if (currentBucketStart === null || bucketStart !== currentBucketStart) {
-      if (bucket.length > 0) {
-        result.push(mergeBucket(bucket, currentBucketStart));
-      }
-      bucket = [candle];
-      currentBucketStart = bucketStart;
-    } else {
-      bucket.push(candle);
-    }
-  }
-
-  if (bucket.length > 0 && currentBucketStart !== null) {
-    result.push(mergeBucket(bucket, currentBucketStart));
-  }
-
-  return result;
-}
-
-function mergeBucket(bucket: Candle[], bucketStart: number): Candle {
-  const open = bucket[0].open;
-  const close = bucket[bucket.length - 1].close;
-  let high = bucket[0].high;
-  let low = bucket[0].low;
-  let volume = 0;
-
-  for (const c of bucket) {
-    if (c.high > high) high = c.high;
-    if (c.low < low) low = c.low;
-    volume += c.volume;
-  }
-
-  return {
-    time: bucketStart,
-    open,
-    high,
-    low,
-    close,
-    volume
-  };
-}
 
 function padSeries(values: number[], totalLength: number): Array<number | null> {
   const missing = totalLength - values.length;
   const result: Array<number | null> = [];
-  for (let i = 0; i < missing; i++) result.push(null);
-  for (const v of values) result.push(v);
-  return result;
-}
 
-export function build1mIndicators(
-  candles: Candle[],
-  params: MomentumScalpV2Params
-): BarIndicators1m[] {
-  const atrRaw = ATR.calculate({
-    high: candles.map(c => c.high),
-    low: candles.map(c => c.low),
-    close: candles.map(c => c.close),
-    period: params.atrPeriod1m
-  });
-
-  const volumeSmaRaw = SMA.calculate({
-    period: params.volumeLookback1m,
-    values: candles.map(c => c.volume)
-  });
-
-  const atrSeries = padSeries(atrRaw, candles.length);
-  const volumeSmaSeries = padSeries(volumeSmaRaw, candles.length);
-
-  const indicators: BarIndicators1m[] = [];
-  const typicalPrices = candles.map(c => (c.high + c.low + c.close) / 3);
-
-  for (let i = 0; i < candles.length; i++) {
-    const start = Math.max(0, i - params.vwapPeriod1m + 1);
-    let pv = 0;
-    let vv = 0;
-
-    for (let j = start; j <= i; j++) {
-      pv += typicalPrices[j] * candles[j].volume;
-      vv += candles[j].volume;
-    }
-
-    indicators.push({
-      atr1m: atrSeries[i],
-      vwap1m: vv > 0 ? pv / vv : null,
-      volumeSma1m: volumeSmaSeries[i]
-    });
+  for (let i = 0; i < missing; i++) {
+    result.push(null);
   }
 
-  return indicators;
-}
-
-export function build5mIndicators(
-  candles5m: Candle[],
-  params: MomentumScalpV2Params
-): BarIndicators5m[] {
-  const closes = candles5m.map(c => c.close);
-
-  const atrRaw = ATR.calculate({
-    high: candles5m.map(c => c.high),
-    low: candles5m.map(c => c.low),
-    close: closes,
-    period: params.atrPeriod5m
-  });
-
-  const atrSmaRaw = SMA.calculate({
-    period: params.trendAtrLookback5m,
-    values: atrRaw
-  });
-
-  const emaFastRaw = EMA.calculate({
-    period: params.emaFastPeriod5m,
-    values: closes
-  });
-
-  const emaSlowRaw = EMA.calculate({
-    period: params.emaSlowPeriod5m,
-    values: closes
-  });
-
-  const atrSeries = padSeries(atrRaw, candles5m.length);
-  const emaFastSeries = padSeries(emaFastRaw, candles5m.length);
-  const emaSlowSeries = padSeries(emaSlowRaw, candles5m.length);
-
-  const atrSmaSeriesRaw = padSeries(atrSmaRaw, atrRaw.length);
-  const atrSmaSeries: Array<number | null> = [];
-  {
-    const atrMissing = candles5m.length - atrRaw.length;
-    for (let i = 0; i < atrMissing; i++) atrSmaSeries.push(null);
-    for (const v of atrSmaSeriesRaw) atrSmaSeries.push(v);
-  }
-
-  const result: BarIndicators5m[] = [];
-
-  for (let i = 0; i < candles5m.length; i++) {
-    result.push({
-      atr5m: atrSeries[i],
-      atr5mSma: atrSmaSeries[i] ?? null,
-      emaFast5m: emaFastSeries[i],
-      emaSlow5m: emaSlowSeries[i],
-      close5m: candles5m[i].close
-    });
+  for (const value of values) {
+    result.push(value);
   }
 
   return result;
 }
 
-export function map1mIndexTo5mIndex(candleTime: number, candles5m: Candle[]): number {
-  if (candles5m.length === 0) return -1;
-
-  const bucketStart = Math.floor(candleTime / (5 * 60 * 1000)) * (5 * 60 * 1000);
-
-  let left = 0;
-  let right = candles5m.length - 1;
-  let ans = -1;
-
-  while (left <= right) {
-    const mid = Math.floor((left + right) / 2);
-    if (candles5m[mid].time <= bucketStart) {
-      ans = mid;
-      left = mid + 1;
-    } else {
-      right = mid - 1;
-    }
-  }
-
-  return ans;
+function typicalPrice(candle: Candle): number {
+  return (candle.high + candle.low + candle.close) / 3;
 }
 
-function getHourFraction(time: number): number {
+function getHourFractionUtc(time: number): number {
   const d = new Date(time);
   return d.getUTCHours() + d.getUTCMinutes() / 60;
 }
 
-function inSession(time: number, params: MomentumScalpV2Params): boolean {
-  const hour = getHourFraction(time);
-  return hour >= params.sessionStartHour && hour <= params.sessionEndHour;
+function isInSession(time: number, params: ScalpParams): boolean {
+  const h = getHourFractionUtc(time);
+  return h >= params.sessionStartHour && h <= params.sessionEndHour;
 }
 
-function calcBodyPct(candle: Candle): number {
+function calcImpulsePct(candle: Candle): number {
   if (candle.open === 0) return 0;
   return Math.abs(candle.close - candle.open) / candle.open;
-}
-
-function calcVolumeRatio(candle: Candle, ind1m: BarIndicators1m): number {
-  if (!ind1m.volumeSma1m || ind1m.volumeSma1m <= 0) return 0;
-  return candle.volume / ind1m.volumeSma1m;
 }
 
 function calcDistancePct(a: number, b: number): number {
@@ -339,165 +159,166 @@ function calcDistancePct(a: number, b: number): number {
   return Math.abs(a - b) / b;
 }
 
-function highestHigh(candles: Candle[], from: number, to: number): number {
-  let h = -Infinity;
-  for (let i = from; i <= to; i++) {
-    if (candles[i].high > h) h = candles[i].high;
+export function floorToStep(value: number, step: number): number {
+  return Math.floor(value / step) * step;
+}
+
+export function buildScalpIndicators(
+  candles: Candle[],
+  params: ScalpParams = DEFAULT_SCALP_PARAMS
+): ScalpBarIndicators[] {
+  const closes = candles.map(c => c.close);
+
+  const atrRaw = ATR.calculate({
+    high: candles.map(c => c.high),
+    low: candles.map(c => c.low),
+    close: closes,
+    period: params.atrPeriod
+  });
+
+  const emaFastRaw = EMA.calculate({
+    values: closes,
+    period: params.emaFastPeriod
+  });
+
+  const emaSlowRaw = EMA.calculate({
+    values: closes,
+    period: params.emaSlowPeriod
+  });
+
+  const volumeSmaRaw = SMA.calculate({
+    values: candles.map(c => c.volume),
+    period: params.volumeLookback
+  });
+
+  const atrSeries = padSeries(atrRaw, candles.length);
+  const emaFastSeries = padSeries(emaFastRaw, candles.length);
+  const emaSlowSeries = padSeries(emaSlowRaw, candles.length);
+  const volumeSmaSeries = padSeries(volumeSmaRaw, candles.length);
+
+  const result: ScalpBarIndicators[] = [];
+
+  for (let i = 0; i < candles.length; i++) {
+    const start = Math.max(0, i - params.vwapPeriod + 1);
+    let pv = 0;
+    let vv = 0;
+
+    for (let j = start; j <= i; j++) {
+      const tp = typicalPrice(candles[j]);
+      pv += tp * candles[j].volume;
+      vv += candles[j].volume;
+    }
+
+    const vwap = vv > 0 ? pv / vv : null;
+
+    result.push({
+      atr: atrSeries[i],
+      emaFast: emaFastSeries[i],
+      emaSlow: emaSlowSeries[i],
+      vwap,
+      volumeSma: volumeSmaSeries[i]
+    });
   }
-  return h;
+
+  return result;
 }
 
-function lowestLow(candles: Candle[], from: number, to: number): number {
-  let l = Infinity;
-  for (let i = from; i <= to; i++) {
-    if (candles[i].low < l) l = candles[i].low;
-  }
-  return l;
+function getVolumeRatio(candle: Candle, volumeSma: number | null): number | null {
+  if (volumeSma == null || volumeSma <= 0) return null;
+  return candle.volume / volumeSma;
 }
 
-function detectPullbackLong(candles: Candle[], index: number, lookback: number): number | null {
-  const from = index - lookback;
-  if (from < 1) return null;
-
-  const recentHigh = highestHigh(candles, from, index - 1);
-  const recentLow = lowestLow(candles, from, index - 1);
-
-  if (recentHigh <= 0) return null;
-  const pullbackPct = (recentHigh - recentLow) / recentHigh;
-  return pullbackPct;
+function isLongTrend(emaFast: number, emaSlow: number, close: number, vwap: number): boolean {
+  return emaFast > emaSlow && close > emaFast && close > vwap;
 }
 
-function detectPullbackShort(candles: Candle[], index: number, lookback: number): number | null {
-  const from = index - lookback;
-  if (from < 1) return null;
-
-  const recentHigh = highestHigh(candles, from, index - 1);
-  const recentLow = lowestLow(candles, from, index - 1);
-
-  if (recentLow <= 0) return null;
-  const pullbackPct = (recentHigh - recentLow) / recentLow;
-  return pullbackPct;
+function isShortTrend(emaFast: number, emaSlow: number, close: number, vwap: number): boolean {
+  return emaFast < emaSlow && close < emaFast && close < vwap;
 }
 
-export function evaluateMomentumScalpEntryV2(
-  candles1m: Candle[],
-  indicators1m: BarIndicators1m[],
-  candles5m: Candle[],
-  indicators5m: BarIndicators5m[],
+export function evaluateMomentumScalpEntry(
+  candles: Candle[],
+  indicators: ScalpBarIndicators[],
   signalIndex: number,
-  params: MomentumScalpV2Params
-): EntryDecisionV2 {
-  if (signalIndex < 2 || signalIndex + 1 >= candles1m.length) {
+  params: ScalpParams = DEFAULT_SCALP_PARAMS
+): EntryDecision {
+  if (signalIndex < 1 || signalIndex + 1 >= candles.length) {
     return { accepted: false, reason: 'not_enough_history' };
   }
 
-  const signalCandle = candles1m[signalIndex];
-  const entryCandle = candles1m[signalIndex + 1];
-  const ind1m = indicators1m[signalIndex];
+  const signalCandle = candles[signalIndex];
+  const entryCandle = candles[signalIndex + 1];
+  const ind = indicators[signalIndex];
 
-  if (!inSession(signalCandle.time, params)) {
+  if (!isInSession(signalCandle.time, params)) {
     return { accepted: false, reason: 'outside_session' };
   }
 
-  if (!ind1m.atr1m || !ind1m.vwap1m || !ind1m.volumeSma1m) {
-    return { accepted: false, reason: 'not_enough_history' };
+  if (ind.emaFast == null || ind.emaSlow == null) {
+    return { accepted: false, reason: 'ema_not_ready' };
   }
 
-  const idx5m = map1mIndexTo5mIndex(signalCandle.time, candles5m);
-  if (idx5m < 1 || idx5m >= indicators5m.length) {
-    return { accepted: false, reason: 'missing_5m_context' };
+  if (ind.vwap == null) {
+    return { accepted: false, reason: 'vwap_not_ready' };
   }
 
-  const ctx5m = indicators5m[idx5m];
-  if (
-    !ctx5m.atr5m ||
-    !ctx5m.atr5mSma ||
-    !ctx5m.emaFast5m ||
-    !ctx5m.emaSlow5m ||
-    !ctx5m.close5m
-  ) {
-    return { accepted: false, reason: 'missing_5m_context' };
+  if (ind.atr == null) {
+    return { accepted: false, reason: 'atr_not_ready' };
   }
 
-  const atrExpanding = ctx5m.atr5m >= ctx5m.atr5mSma * params.trendAtrExpandRatio5m;
-  if (!atrExpanding) {
-    return { accepted: false, reason: '5m_atr_not_expanding' };
+  if (ind.volumeSma == null) {
+    return { accepted: false, reason: 'volume_not_ready' };
   }
 
-  const volumeRatio = calcVolumeRatio(signalCandle, ind1m);
-  if (volumeRatio < params.volumeMinRatio1m) {
-    return { accepted: false, reason: '1m_volume_too_small' };
+  const atrPct = signalCandle.close !== 0 ? ind.atr / signalCandle.close : 0;
+  if (atrPct < params.minAtrPct) {
+    return { accepted: false, reason: 'atr_too_small' };
   }
 
-  const bodyPct = calcBodyPct(signalCandle);
-  const vwapDistancePct = calcDistancePct(signalCandle.close, ind1m.vwap1m);
+  const volumeRatio = getVolumeRatio(signalCandle, ind.volumeSma);
+  if (volumeRatio == null) {
+    return { accepted: false, reason: 'volume_not_ready' };
+  }
 
-  if (vwapDistancePct > params.maxEntryDistanceFromVwapPct) {
+  if (volumeRatio < params.volumeMinRatio) {
+    return { accepted: false, reason: 'volume_too_small' };
+  }
+
+  const impulsePct = calcImpulsePct(signalCandle);
+  if (impulsePct < params.minImpulsePct) {
+    return { accepted: false, reason: 'impulse_too_small' };
+  }
+
+  const distanceFromVwapPct = calcDistancePct(signalCandle.close, ind.vwap);
+  if (distanceFromVwapPct > params.maxEntryDistanceFromVwapPct) {
     return { accepted: false, reason: 'too_far_from_vwap' };
   }
 
-  const is5mLongTrend = ctx5m.emaFast5m > ctx5m.emaSlow5m && ctx5m.close5m > ctx5m.emaFast5m;
-  const is5mShortTrend = ctx5m.emaFast5m < ctx5m.emaSlow5m && ctx5m.close5m < ctx5m.emaFast5m;
+  const longTrend = isLongTrend(ind.emaFast, ind.emaSlow, signalCandle.close, ind.vwap);
+  const shortTrend = isShortTrend(ind.emaFast, ind.emaSlow, signalCandle.close, ind.vwap);
 
-  const recentHigh = highestHigh(
-    candles1m,
-    Math.max(0, signalIndex - params.pullbackLookback1m),
-    signalIndex - 1
-  );
-  const recentLow = lowestLow(
-    candles1m,
-    Math.max(0, signalIndex - params.pullbackLookback1m),
-    signalIndex - 1
-  );
-
-  const longPullbackPct = detectPullbackLong(candles1m, signalIndex, params.pullbackLookback1m);
-  const shortPullbackPct = detectPullbackShort(candles1m, signalIndex, params.pullbackLookback1m);
-
-  const longBreakoutLevel = recentHigh * (1 + params.breakoutBufferPct);
-  const shortBreakoutLevel = recentLow * (1 - params.breakoutBufferPct);
-
-  const longBreakout = entryCandle.high >= longBreakoutLevel;
-  const shortBreakout = entryCandle.low <= shortBreakoutLevel;
-
-  const longCandidate =
-    is5mLongTrend &&
-    signalCandle.close > ind1m.vwap1m &&
-    bodyPct >= params.minImpulseBodyPct &&
-    longPullbackPct !== null &&
-    longPullbackPct >= params.minPullbackPct &&
-    longBreakout;
-
-  const shortCandidate =
-    is5mShortTrend &&
-    signalCandle.close < ind1m.vwap1m &&
-    bodyPct >= params.minImpulseBodyPct &&
-    shortPullbackPct !== null &&
-    shortPullbackPct >= params.minPullbackPct &&
-    shortBreakout;
-
-  if (!is5mLongTrend && !is5mShortTrend) {
-    return { accepted: false, reason: '5m_trend_not_aligned' };
+  if (!longTrend && !shortTrend) {
+    return { accepted: false, reason: 'trend_not_aligned' };
   }
 
-  if (is5mLongTrend && !is5mShortTrend) {
-    if (longPullbackPct === null || longPullbackPct < params.minPullbackPct) {
-      return { accepted: false, reason: '1m_pullback_missing' };
-    }
-    if (!longBreakout) {
-      return { accepted: false, reason: '1m_breakout_missing' };
-    }
-    if (!longCandidate) {
-      return { accepted: false, reason: '5m_trend_not_aligned' };
-    }
+  const prevHigh = candles[signalIndex - 1].high;
+  const prevLow = candles[signalIndex - 1].low;
 
-    const entryPrice = Math.max(entryCandle.open, longBreakoutLevel) * (1 + params.slippageRate);
-    const stopDistance = ind1m.atr1m * params.atrSlMult;
-    const stopLossPrice = entryPrice - stopDistance;
-    const takeProfitPrice = entryPrice + ind1m.atr1m * params.atrTpMult;
-    const targetMovePct = (takeProfitPrice - entryPrice) / entryPrice;
+  const longBreakout = signalCandle.high > prevHigh && signalCandle.close > signalCandle.open;
+  const shortBreakout = signalCandle.low < prevLow && signalCandle.close < signalCandle.open;
+
+  if (longTrend && longBreakout) {
+    const rawEntryPrice = Math.max(entryCandle.open, signalCandle.high);
+    const entryPrice = rawEntryPrice * (1 + params.slippageRate);
+    const stopLossPrice = entryPrice - ind.atr * params.atrSlMult;
+    const takeProfitPrice = entryPrice + ind.atr * params.atrTpMult;
+    const targetMovePct = entryPrice !== 0 ? (takeProfitPrice - entryPrice) / entryPrice : 0;
     const costPct = (params.commissionRate * 2) + (params.slippageRate * 2);
 
-    if (targetMovePct < params.minTargetMovePct || targetMovePct < costPct * params.minCostCoverage) {
+    if (
+      targetMovePct < params.minTargetMovePct ||
+      targetMovePct < costPct * params.minCostCoverage
+    ) {
       return { accepted: false, reason: 'target_too_small_for_costs' };
     }
 
@@ -512,36 +333,29 @@ export function evaluateMomentumScalpEntryV2(
         entryPrice,
         stopLossPrice,
         takeProfitPrice,
-        riskDistance: stopDistance,
-        atr1m: ind1m.atr1m,
-        atr5m: ctx5m.atr5m,
-        vwap1m: ind1m.vwap1m,
-        impulseBodyPct: bodyPct,
-        pullbackPct: longPullbackPct,
-        volumeRatio
+        riskDistance: entryPrice - stopLossPrice,
+        atr: ind.atr,
+        emaFast: ind.emaFast,
+        emaSlow: ind.emaSlow,
+        vwap: ind.vwap,
+        volumeRatio,
+        impulsePct
       }
     };
   }
 
-  if (is5mShortTrend && !is5mLongTrend) {
-    if (shortPullbackPct === null || shortPullbackPct < params.minPullbackPct) {
-      return { accepted: false, reason: '1m_pullback_missing' };
-    }
-    if (!shortBreakout) {
-      return { accepted: false, reason: '1m_breakout_missing' };
-    }
-    if (!shortCandidate) {
-      return { accepted: false, reason: '5m_trend_not_aligned' };
-    }
-
-    const entryPrice = Math.min(entryCandle.open, shortBreakoutLevel) * (1 - params.slippageRate);
-    const stopDistance = ind1m.atr1m * params.atrSlMult;
-    const stopLossPrice = entryPrice + stopDistance;
-    const takeProfitPrice = entryPrice - ind1m.atr1m * params.atrTpMult;
-    const targetMovePct = (entryPrice - takeProfitPrice) / entryPrice;
+  if (shortTrend && shortBreakout) {
+    const rawEntryPrice = Math.min(entryCandle.open, signalCandle.low);
+    const entryPrice = rawEntryPrice * (1 - params.slippageRate);
+    const stopLossPrice = entryPrice + ind.atr * params.atrSlMult;
+    const takeProfitPrice = entryPrice - ind.atr * params.atrTpMult;
+    const targetMovePct = entryPrice !== 0 ? (entryPrice - takeProfitPrice) / entryPrice : 0;
     const costPct = (params.commissionRate * 2) + (params.slippageRate * 2);
 
-    if (targetMovePct < params.minTargetMovePct || targetMovePct < costPct * params.minCostCoverage) {
+    if (
+      targetMovePct < params.minTargetMovePct ||
+      targetMovePct < costPct * params.minCostCoverage
+    ) {
       return { accepted: false, reason: 'target_too_small_for_costs' };
     }
 
@@ -556,16 +370,16 @@ export function evaluateMomentumScalpEntryV2(
         entryPrice,
         stopLossPrice,
         takeProfitPrice,
-        riskDistance: stopDistance,
-        atr1m: ind1m.atr1m,
-        atr5m: ctx5m.atr5m,
-        vwap1m: ind1m.vwap1m,
-        impulseBodyPct: bodyPct,
-        pullbackPct: shortPullbackPct,
-        volumeRatio
+        riskDistance: stopLossPrice - entryPrice,
+        atr: ind.atr,
+        emaFast: ind.emaFast,
+        emaSlow: ind.emaSlow,
+        vwap: ind.vwap,
+        volumeRatio,
+        impulsePct
       }
     };
   }
 
-  return { accepted: false, reason: '5m_trend_not_aligned' };
+  return { accepted: false, reason: 'no_signal' };
 }
