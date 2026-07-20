@@ -11,6 +11,8 @@ import {
   TP1_FRACTION
 } from '../services/strategy';
 
+export type SideFilter = 'both' | 'long' | 'short';
+
 export interface BacktestOptions {
   startingBalance?: number;
   commissionRate?: number;
@@ -26,6 +28,8 @@ export interface BacktestOptions {
   runnerTrailR?: number;
   htfFilter?: boolean;
   htfMinAdx1h?: number;
+  /** both = baseline; long/short = только эта сторона */
+  sideFilter?: SideFilter;
 }
 
 interface OpenPosition {
@@ -193,7 +197,6 @@ function incReason(map: Record<string, number>, reason: string, n = 1): void {
   map[reason] = (map[reason] ?? 0) + n;
 }
 
-/** Группируем ноги одной сделки (как в buildSummary). */
 function buildRegimeStats(
   trades: BacktestTrade[],
   barCounts: Record<string, number>
@@ -290,6 +293,7 @@ function tryOpenPosition(params: {
   htfMinAdx1h: number;
   precomputedHtf?: HtfBarState[];
   htfStats: HtfStats;
+  sideFilter: SideFilter;
 }): OpenPosition | null {
   const {
     visibleCandles,
@@ -297,7 +301,8 @@ function tryOpenPosition(params: {
     htfEnabled,
     htfMinAdx1h,
     precomputedHtf,
-    htfStats
+    htfStats,
+    sideFilter
   } = params;
 
   const signal = analyzeMarket(visibleCandles, currentBalance, {
@@ -305,6 +310,10 @@ function tryOpenPosition(params: {
     minAdx1h: htfMinAdx1h,
     precomputedHtf
   });
+
+  // side slice — до подсчёта HTF passes
+  if (sideFilter === 'long' && signal.side !== 'long') return null;
+  if (sideFilter === 'short' && signal.side !== 'short') return null;
 
   const reject = signal.indicators?.reject;
   if (htfEnabled) {
@@ -444,7 +453,6 @@ function buildTrade(params: {
 function stopReasonAfterTp1(position: OpenPosition): 'breakeven' | 'trail_stop' {
   const lockDist = position.initialR * PARTIAL_LOCK_R;
   const moved = Math.abs(position.stopLossPrice - position.entryPrice);
-  // lock=0 → SL на entry → всегда breakeven (не trail)
   if (lockDist <= 1e-12) return 'breakeven';
   return moved > lockDist * 1.15 ? 'trail_stop' : 'breakeven';
 }
@@ -733,7 +741,8 @@ export function runStrategyBacktest(
     earlyAbortMinR: options.earlyAbortMinR ?? 0.35,
     runnerTrailR: options.runnerTrailR ?? 0,
     htfFilter: options.htfFilter ?? false,
-    htfMinAdx1h: options.htfMinAdx1h ?? 18
+    htfMinAdx1h: options.htfMinAdx1h ?? 18,
+    sideFilter: options.sideFilter ?? 'both'
   };
 
   const emptyHtf: HtfStats = { rejects: 0, passes: 0, warmupRejects: 0 };
@@ -789,7 +798,6 @@ export function runStrategyBacktest(
     const currentCandle = sortedCandles[i];
     const barsHeld = openPosition ? i - openPositionIndex : 0;
 
-    // regime bar histogram (causal, same window as strategy)
     const regInfo = detectMarketRegime(visibleCandles);
     const regName = regInfo.ready ? regInfo.regime : 'unknown';
     barCounts[regName] = (barCounts[regName] ?? 0) + 1;
@@ -932,7 +940,8 @@ export function runStrategyBacktest(
       htfEnabled: resolvedOptions.htfFilter,
       htfMinAdx1h: resolvedOptions.htfMinAdx1h,
       precomputedHtf,
-      htfStats
+      htfStats,
+      sideFilter: resolvedOptions.sideFilter
     });
     if (maybeOpen) {
       openPosition = maybeOpen;
@@ -984,5 +993,4 @@ export function runStrategyBacktest(
   };
 }
 
-// re-export for consumers that expect HTF_WARMUP on backtest module
 export { HTF_WARMUP_15M };
