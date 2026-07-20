@@ -86,6 +86,11 @@ export interface DailyUniverseBacktestResult {
   selectionStats: DailySelectionStats;
 }
 
+interface ScoredSignal {
+  signal: DailyBreakoutSignal;
+  score: number;
+}
+
 function round(value: number, digits = 8): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
@@ -201,7 +206,7 @@ function pickBestSignal(
   accepted: number;
   rejected: number;
 } {
-  let best: DailyBreakoutSignal | null = null;
+  let bestScored: ScoredSignal | null = null;
   let accepted = 0;
   let rejected = 0;
 
@@ -229,33 +234,22 @@ function pickBestSignal(
     accepted += 1;
 
     const signalScore =
-      (signal.indicators.atrPct ?? 0) * 100 +
+      signal.indicators.atrPct * 100 +
       ((signal.breakoutDistancePct != null ? 0.05 - signal.breakoutDistancePct : 0) * 10);
 
-    if (!best) {
-      best = {
-        ...signal,
-        indicators: {
-          ...signal.indicators,
-          signalScore: round(signalScore, 6)
-        }
-      };
-      continue;
-    }
-
-    const bestScore = Number((best.indicators as Record<string, unknown>).signalScore ?? -Infinity);
-    if (signalScore > bestScore) {
-      best = {
-        ...signal,
-        indicators: {
-          ...signal.indicators,
-          signalScore: round(signalScore, 6)
-        }
+    if (!bestScored || signalScore > bestScored.score) {
+      bestScored = {
+        signal,
+        score: signalScore
       };
     }
   }
 
-  return { best, accepted, rejected };
+  return {
+    best: bestScored ? bestScored.signal : null,
+    accepted,
+    rejected
+  };
 }
 
 function buildTrade(params: {
@@ -345,8 +339,7 @@ function buildSummary(params: {
 
   const avgRet = mean(equityReturns);
   const stdRet = stddevSample(equityReturns);
-  const sharpe =
-    stdRet > 0 ? (avgRet / stdRet) * Math.sqrt(252) : 0;
+  const sharpe = stdRet > 0 ? (avgRet / stdRet) * Math.sqrt(252) : 0;
 
   const dd = calculateDrawdown(equityCurve);
 
@@ -495,11 +488,18 @@ export function runDailyUniverseBacktest(
     }
 
     if (openPosition) {
-      const candle = last(visibleBySymbol[openPosition.symbol]);
+      const symbolCandles: Candle[] | undefined = visibleBySymbol[openPosition.symbol];
+      const candle: Candle | undefined = symbolCandles ? last(symbolCandles) : undefined;
       if (!candle) continue;
 
+      const updatedPosition: DailyBreakoutPosition = updateDailyBreakoutTrailingStop(
+        openPosition,
+        candle,
+        resolvedOptions
+      );
+
       openPosition = {
-        ...updateDailyBreakoutTrailingStop(openPosition, candle, resolvedOptions),
+        ...updatedPosition,
         balanceBefore: openPosition.balanceBefore,
         openIndex: openPosition.openIndex
       };
@@ -560,7 +560,9 @@ export function runDailyUniverseBacktest(
   }
 
   if (openPosition) {
-    const lastCandle = last(sortedBySymbol[openPosition.symbol]);
+    const finalCandles: Candle[] = sortedBySymbol[openPosition.symbol];
+    const lastCandle: Candle = last(finalCandles);
+
     const trade = buildTrade({
       position: openPosition,
       exitPrice: lastCandle.close,
