@@ -523,7 +523,7 @@ async function main(): Promise<void> {
     warmupCandles: 30,
     progressLogEvery: 250,
     onePositionAtTime: true,
-    minSignalAtrPct: 0.005,
+    minSignalAtrPct: 0.0055,
     riskPerTrade: 0.01,
     stopAtrMult: 2.75,
     trailingAtrMult: 2.0,
