@@ -5,4 +5,18 @@ cd trade_bot_tbank/trade_bot_tbank
 docker compose up -d --build
 docker network connect n8n-docker_default trade_bot_tbank
 npm install
+
+
 npm run backtest -- src/backtest/data/SBER_15m.json SBER
+
+npx tsx src/backtest/runDailyUniverseBacktest.ts \
+  ./src/backtest/data/SBER_D.json:SBER \
+  ./src/backtest/data/GAZP_D.json:GAZP \
+  ./src/backtest/data/LKOH_D.json:LKOH \
+  ./src/backtest/data/ROSN_D.json:ROSN \
+  --balance=50000 \
+  --risk=0.01 \
+  --stopAtr=2.5 \
+  --trailAtr=2.0 \
+  --minAtrPct=0.008 \
+  --maxAtrPct=0.12
