@@ -10,11 +10,11 @@ npm install
 npm run backtest -- src/backtest/data/SBER_15m.json SBER
 
 npx tsx src/backtest/runDailyUniverseBacktest.ts
-  ./src/backtest/data/GAZP_15m.json:GAZP \
   ./src/backtest/data/LKOH_15m.json:LKOH \
   ./src/backtest/data/ROSN_15m.json:ROSN \
   ./src/backtest/data/SBER_15m.json:SBER \
   ./src/backtest/data/MTSS_15m.json:MTSS \
   ./src/backtest/data/VTBR_15m.json:VTBR \
   ./src/backtest/data/GMKN_15m.json:GMKN \
+  ./src/backtest/data/GAZP_15m.json:GAZP \
   ./src/backtest/data/T_15m.json:T
