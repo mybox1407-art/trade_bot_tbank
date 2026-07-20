@@ -528,7 +528,7 @@ async function main(): Promise<void> {
     stopAtrMult: 2.75,
     trailingAtrMult: 2.0,
     minAtrPct: 0.0035,
-    maxAtrPct: 0.02,
+    maxAtrPct: 0.5,
     maxBreakoutDistancePct: 0.02,
     allowLongs: true,
     allowShorts: false
