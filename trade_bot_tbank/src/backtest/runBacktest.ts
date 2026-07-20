@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { runStrategyBacktest } from './strategyBacktest';
+import { runStrategyBacktest, SideFilter } from './strategyBacktest';
 import {
   Candle,
   HTF_WARMUP_15M,
@@ -112,8 +112,89 @@ function parseHtfArg(value: string | undefined): {
     return { htfFilter: false, htfMinAdx1h: 18 };
   }
 
-  console.warn(`Неизвестный 4-й аргумент "${value}", HTF выкл.`);
+  console.warn(`Неизвестный HTF-аргумент "${value}", HTF выкл.`);
   return { htfFilter: false, htfMinAdx1h: 18 };
+}
+
+/** argv: both | long | short (default both) */
+function parseSideFilter(value: string | undefined): SideFilter {
+  if (value == null || value === '') return 'both';
+  const v = value.trim().toLowerCase();
+  if (v === 'both' || v === 'all') return 'both';
+  if (v === 'long' || v === 'l') return 'long';
+  if (v === 'short' || v === 's') return 'short';
+  console.warn(`Неизвестный sideFilter="${value}", default both`);
+  return 'both';
+}
+
+/**
+ * 4-й и 5-й argv: htf и/или side в любом порядке.
+ * Примеры: htf short | short htf | htf=18 long | both
+ */
+function parseHtfAndSide(
+  arg4: string | undefined,
+  arg5: string | undefined
+): {
+  htfFilter: boolean;
+  htfMinAdx1h: number;
+  sideFilter: SideFilter;
+} {
+  let htfFilter = false;
+  let htfMinAdx1h = 18;
+  let sideFilter: SideFilter = 'both';
+  let htfSet = false;
+  let sideSet = false;
+
+  const apply = (raw: string | undefined) => {
+    if (raw == null || raw === '') return;
+    const v = raw.trim().toLowerCase();
+
+    if (
+      v === 'both' ||
+      v === 'all' ||
+      v === 'long' ||
+      v === 'l' ||
+      v === 'short' ||
+      v === 's'
+    ) {
+      sideFilter = parseSideFilter(v);
+      sideSet = true;
+      return;
+    }
+
+    if (
+      v === 'htf' ||
+      v === 'htf=on' ||
+      v.startsWith('htf=') ||
+      v === 'nohtf' ||
+      v === 'htf=off'
+    ) {
+      const p = parseHtfArg(v);
+      htfFilter = p.htfFilter;
+      htfMinAdx1h = p.htfMinAdx1h;
+      htfSet = true;
+      return;
+    }
+
+    // fallback: пробуем как htf, иначе side
+    if (!htfSet && (v === '1' || v === 'true' || v === '0' || v === 'false')) {
+      const p = parseHtfArg(v);
+      htfFilter = p.htfFilter;
+      htfMinAdx1h = p.htfMinAdx1h;
+      htfSet = true;
+      return;
+    }
+
+    console.warn(`Неизвестный аргумент "${raw}", игнор`);
+  };
+
+  apply(arg4);
+  apply(arg5);
+
+  void htfSet;
+  void sideSet;
+
+  return { htfFilter, htfMinAdx1h, sideFilter };
 }
 
 function formatDuration(seconds: number): string {
@@ -146,6 +227,7 @@ function printSummary(result: ReturnType<typeof runStrategyBacktest>): void {
 
   console.log('\n========== ИТОГИ БЭКТЕСТА ==========');
   console.log(`Инструмент: ${s.symbol}`);
+  console.log(`Side filter: ${result.options.sideFilter}`);
   console.log(`Сделок (групп): ${s.tradesCount}`);
   console.log(`Побед: ${colorize(String(s.wins), 'green')}`);
   console.log(`Поражений: ${colorize(String(s.losses), 'red')}`);
@@ -207,6 +289,7 @@ function printRegimeStats(
 
   console.log('\n========== REGIME STATS ==========');
   console.log(`Баров после warmup: ${rs.totalBars}`);
+  console.log(`Side filter: ${result.options.sideFilter}`);
 
   const barParts: string[] = [];
   const regimesSeen = new Set([
@@ -262,7 +345,7 @@ function printRegimeStats(
   const trendPct = rs.totalBars > 0 ? (100 * trendBars) / rs.totalBars : 0;
   console.log(
     `\nNote: trend_up+trend_down ≈ ${trendPct.toFixed(1)}% баров ` +
-      `(стратегия торгует только там).`
+      `(стратегия торгует только там; side=${result.options.sideFilter}).`
   );
 }
 
@@ -316,24 +399,29 @@ function printTrades(
 function printUsage(): void {
   console.log(`
 Использование:
-npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [htf|htf=18|nohtf]
+npm run backtest -- <path-to-json> <symbol> [cooldown] [htf|nohtf] [both|long|short]
+
+htf и side — в любом порядке (4-й / 5-й аргумент).
 
 Примеры:
-npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
 npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 htf
-npm run backtest -- ./src/backtest/data/NVTK_15m.json NVTK 12 htf=18
+npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 htf short
+npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 short htf
+npm run backtest -- ./src/backtest/data/NVTK_15m.json NVTK 12 htf long
+npm run backtest -- ./src/backtest/data/NVTK_15m.json NVTK 12 htf=18 both
 `);
 }
 
 function main(): void {
-  const [, , inputPathArg, symbolArg, cooldownCandlesArg, htfArg] = process.argv;
+  const [, , inputPathArg, symbolArg, cooldownCandlesArg, arg4, arg5] =
+    process.argv;
   if (!inputPathArg || !symbolArg) {
     printUsage();
     process.exit(1);
   }
 
   const cooldownCandles = parseCooldownCandles(cooldownCandlesArg);
-  const { htfFilter, htfMinAdx1h } = parseHtfArg(htfArg);
+  const { htfFilter, htfMinAdx1h, sideFilter } = parseHtfAndSide(arg4, arg5);
   const absolutePath = path.resolve(process.cwd(), inputPathArg);
   if (!fs.existsSync(absolutePath)) {
     console.error(`Файл не найден: ${absolutePath}`);
@@ -374,6 +462,7 @@ function main(): void {
     )}`
   );
   console.log(`Cooldown после сделки: ${cooldownCandles} свеч. (после любой)`);
+  console.log(`Side filter: ${sideFilter}`);
   console.log(
     `Оценка времени: ~ ${formatDuration(estimated.minSec)} - ${formatDuration(
       estimated.maxSec
@@ -420,7 +509,8 @@ function main(): void {
       earlyAbortMinR: 0.35,
       runnerTrailR: 0,
       htfFilter,
-      htfMinAdx1h
+      htfMinAdx1h,
+      sideFilter
     });
   } finally {
     clearInterval(heartbeat);
