@@ -4,13 +4,13 @@ import {
   Candle,
   DEFAULT_SCALP_V2_PARAMS,
   MomentumScalpV2Params
-} from '../services/momentumScalpStrategyV2';
+} from '../services/momentumScalpStrategy';
 import {
   runMomentumScalpBacktestV2,
   ScalpBacktestResultV2,
   ScalpTradeV2,
   RejectStat
-} from './momentumScalpBacktestV2';
+} from './momentumScalpBacktest';
 
 type PresetName = 'base' | 'balanced' | 'aggressive';
 type SideFilter = 'both' | 'long' | 'short';
