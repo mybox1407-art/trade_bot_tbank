@@ -201,6 +201,7 @@ function printLaunchParams(candlesBySymbol: Record<string, Candle[]>): void {
   console.log('Stop ATR: 2.5');
   console.log('Trail ATR: 2');
   console.log('Min ATR %: 0.006');
+  console.log('Min signal ATR %: 0.006');
   console.log('Max ATR %: 0.12');
   console.log('Max breakout distance %: 0.04');
   console.log('Longs: ON');
@@ -225,7 +226,9 @@ function printSummary(result: DailyUniverseBacktestResult): void {
   console.log(`Avg net pnl: ${money(s.avgNetPnl)}`);
   console.log(`Avg win: ${money(s.avgWin)}`);
   console.log(`Avg loss: ${money(s.avgLoss)}`);
-  console.log(`Profit factor: ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 3) : 'Infinity'}`);
+  console.log(
+    `Profit factor: ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 3) : 'Infinity'}`
+  );
   console.log(`Sharpe: ${round(s.sharpe, 3)}`);
   console.log(`Стартовый баланс: ${money(s.startBalance)}`);
   console.log(`Финальный баланс: ${money(s.endBalance)}`);
@@ -425,51 +428,68 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
 
   if (!firstActiveMonth) {
     console.log(
-      'Стратегия не активировалась ни в одном месяце: либо сигналы не генерируются, либо фильтры/ограничения полностью блокируют входы.'
+      'Стратегия не активировалась ни в одном месяце: либо сигналы не генерируются, либо фильтры полностью блокируют входы.'
     );
   } else {
     console.log(`Первый месяц с активностью сигналов: ${firstActiveMonth}`);
-
-    if (firstTradeMonth) {
-      console.log(`Первый месяц с закрытыми сделками: ${firstTradeMonth}`);
-    } else {
-      console.log('Закрытых сделок не было.');
-    }
+    console.log(
+      firstTradeMonth
+        ? `Первый месяц с закрытыми сделками: ${firstTradeMonth}`
+        : 'Закрытых сделок не было.'
+    );
   }
 
-  const atrDenom = f.atrFilterPassed + f.atrFilterRejected;
-  const atrPassRate = atrDenom > 0 ? f.atrFilterPassed / atrDenom : 0;
-  const acceptDenom = f.acceptedSignals + f.rejectedSignals;
-  const acceptRate = acceptDenom > 0 ? f.acceptedSignals / acceptDenom : 0;
+  const symbolsSeen = f.symbolsSeen;
+  const noSignalCount = rejects.side_none ?? 0;
+  const atrRejectCount = rejects.min_signal_atr_pct ?? 0;
+  const acceptedCount = f.acceptedSignals;
+  const selectedCount = f.selectedSignals;
+  const openedCount = f.openedPositions;
 
-  if (f.breakoutCandidates === 0) {
-    console.log(
-      'Похоже, стратегия почти не видит breakout-кандидатов: сначала проверь саму логику пробоя, таймфрейм и корректность previous-day уровней.'
-    );
+  const noSignalRate = symbolsSeen > 0 ? noSignalCount / symbolsSeen : 0;
+  const atrRejectRate = symbolsSeen > 0 ? atrRejectCount / symbolsSeen : 0;
+  const acceptedRate = symbolsSeen > 0 ? acceptedCount / symbolsSeen : 0;
+  const selectedFromAcceptedRate = acceptedCount > 0 ? selectedCount / acceptedCount : 0;
+  const openedFromSelectedRate = selectedCount > 0 ? openedCount / selectedCount : 0;
+
+  console.log('');
+  console.log(`Symbols seen: ${symbolsSeen}`);
+  console.log(`No signal (side_none): ${noSignalCount} (${pct(noSignalRate)})`);
+  console.log(`ATR reject (min_signal_atr_pct): ${atrRejectCount} (${pct(atrRejectRate)})`);
+  console.log(`Accepted signals: ${acceptedCount} (${pct(acceptedRate)})`);
+  console.log(
+    `Selected from accepted: ${selectedCount}/${acceptedCount} (${pct(selectedFromAcceptedRate)})`
+  );
+  console.log(
+    `Opened from selected: ${openedCount}/${selectedCount} (${pct(openedFromSelectedRate)})`
+  );
+
+  console.log('');
+
+  if (symbolsSeen === 0) {
+    console.log('Нет обработанных баров: сначала проверь загрузку данных и пересечение временных меток.');
     return;
   }
 
-  if (atrDenom > 0 && atrPassRate < 0.2) {
+  if (noSignalRate >= 0.8) {
     console.log(
-      'Основной подозреваемый — ATR-фильтр: слишком мало баров проходит фильтр волатильности.'
+      'Главный узкий этап — генерация сигнала: в большинстве наблюдений стратегия не видит breakout и остаётся в side_none.'
     );
-  }
-
-  if (acceptDenom > 0 && acceptRate < 0.1) {
+  } else if (atrRejectRate >= 0.1) {
     console.log(
-      'Сигналы в основном отбрасываются после первичного анализа: проверь entry/stop/size и дополнительные условия допуска.'
+      'Главный узкий этап — дополнительный ATR-порог: значимая часть сигналов отбрасывается фильтром min_signal_atr_pct.'
     );
-  }
-
-  if (f.acceptedSignals > 0 && f.selectedSignals === 0) {
+  } else if (acceptedCount > 0 && selectedCount === 0) {
     console.log(
-      'Есть принятые сигналы, но ни один не выбирается как лучший: проблема может быть в логике score/selection.'
+      'Сигналы доходят до accepted, но не проходят selection: проверь score и логику выбора лучшего кандидата.'
     );
-  }
-
-  if (f.selectedSignals > 0 && f.openedPositions === 0) {
+  } else if (selectedCount > 0 && openedCount === 0) {
     console.log(
       'Сигналы выбираются, но позиции не открываются: проверь buildDailyBreakoutPositionFromSignal и ограничения размера позиции.'
+    );
+  } else if (openedCount > 0) {
+    console.log(
+      'Конвейер сигналов работает штатно: проблема не в открытии позиции, а в том, насколько редко рынок даёт валидный setup.'
     );
   }
 
@@ -497,12 +517,13 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
       0
     );
 
+    console.log('');
     console.log(`Opened positions, first half: ${firstHalfOpened}`);
     console.log(`Opened positions, second half: ${secondHalfOpened}`);
 
     if (firstHalfOpened === 0 && secondHalfOpened > 0) {
       console.log(
-        'Это действительно красный флаг: стратегия была выключена в первой половине истории и "проснулась" только позже. Проверь regime dependency, фильтры и сдвиги в данных.'
+        'Это признак сильной зависимости от режима рынка: стратегия была пассивной в первой половине истории и активировалась только позже.'
       );
     }
   }
