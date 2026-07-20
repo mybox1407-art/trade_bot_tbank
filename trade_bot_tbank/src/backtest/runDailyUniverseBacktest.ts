@@ -518,18 +518,18 @@ async function main(): Promise<void> {
 
   const startedAt = Date.now();
   const result = runDailyUniverseBacktest(candlesBySymbol, {
-    startingBalance: 500000,
+    startingBalance: 50000,
     commissionRate: 0.0005,
     warmupCandles: 30,
     progressLogEvery: 250,
     onePositionAtTime: true,
     minSignalAtrPct: 0.004,
-    riskPerTrade: 0.03,
+    riskPerTrade: 0.01,
     stopAtrMult: 2.5,
     trailingAtrMult: 2.0,
     minAtrPct: 0.0035,
-    maxAtrPct: 0.2,
-    maxBreakoutDistancePct: 0.01,
+    maxAtrPct: 0.12,
+    maxBreakoutDistancePct: 0.04,
     allowLongs: true,
     allowShorts: true
   });
