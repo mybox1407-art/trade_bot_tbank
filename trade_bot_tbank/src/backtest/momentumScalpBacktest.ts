@@ -1,16 +1,26 @@
-import { Candle, ScalpPosition, ScalpParams, analyzeMomentumScalp, buildScalpPosition, evaluateScalpExit } from '../services/momentumScalpStrategy';
+import {
+  Candle,
+  ScalpPosition,
+  ScalpParams,
+  analyzeMomentumScalp,
+  buildScalpPositionFromSignal,
+  evaluateScalpExit
+} from '../services/momentumScalpStrategy';
 
 export interface ScalpTrade {
+  signalTime: number;
   entryTime: number;
   exitTime: number;
   side: 'long' | 'short';
   entryPrice: number;
   exitPrice: number;
-  pnl: number;
+  size: number;
+  grossPnl: number;
+  commission: number;
+  netPnl: number;
   pnlPct: number;
   barsHeld: number;
   exitReason: string;
-  size: number;
 }
 
 export interface ScalpBacktestResult {
@@ -30,6 +40,29 @@ export interface ScalpBacktestResult {
   commissionTotal: number;
 }
 
+function calcTradeGrossPnl(
+  side: 'long' | 'short',
+  entryPrice: number,
+  exitPrice: number,
+  size: number
+): number {
+  if (side === 'long') {
+    return (exitPrice - entryPrice) * size;
+  }
+
+  return (entryPrice - exitPrice) * size;
+}
+
+function calcTradeCommission(
+  entryPrice: number,
+  exitPrice: number,
+  size: number,
+  commissionRate: number
+): number {
+  const turnover = entryPrice * size + exitPrice * size;
+  return turnover * commissionRate;
+}
+
 export function runMomentumScalpBacktest(
   candles: Candle[],
   params: ScalpParams,
@@ -39,8 +72,10 @@ export function runMomentumScalpBacktest(
   let balance = startingBalance;
   const equity: number[] = [balance];
   const timestamps: number[] = [candles[0]?.time || 0];
+
   let position: ScalpPosition | null = null;
-  let lastTradeIndex = -params.cooldownBars - 1;
+  let lastTradeExitIndex = -params.cooldownBars - 1;
+
   let maxEquity = balance;
   let maxDrawdown = 0;
   let grossProfit = 0;
@@ -51,87 +86,166 @@ export function runMomentumScalpBacktest(
     const candle = candles[i];
     timestamps.push(candle.time);
 
-    if (position) {
-      const exit = evaluateScalpExit(position, candle, i);
+    if (position && i >= position.entryIndex) {
+      const exit = evaluateScalpExit(position, candle, i, params);
+
       if (exit.exit && exit.exitPrice !== null) {
-        const rawPnl = position.side === 'long'
-          ? (exit.exitPrice - position.entryPrice) * position.size
-          : (position.entryPrice - exit.exitPrice) * position.size;
+        const grossPnl = calcTradeGrossPnl(
+          position.side,
+          position.entryPrice,
+          exit.exitPrice,
+          position.size
+        );
 
-        const commission = (position.entryPrice * position.size + exit.exitPrice * position.size) * params.commissionRate;
+        const commission = calcTradeCommission(
+          position.entryPrice,
+          exit.exitPrice,
+          position.size,
+          params.commissionRate
+        );
+
+        const netPnl = grossPnl - commission;
+        const pnlPct = balance > 0 ? (netPnl / balance) * 100 : 0;
+
+        if (netPnl >= 0) {
+          grossProfit += netPnl;
+        } else {
+          grossLoss += Math.abs(netPnl);
+        }
+
         commissionTotal += commission;
-        const pnl = rawPnl - commission;
-        const pnlPct = (pnl / balance) * 100;
+        balance += netPnl;
 
-        if (pnl > 0) grossProfit += pnl;
-        else grossLoss += Math.abs(pnl);
-
-        balance += pnl;
         trades.push({
+          signalTime: position.signalTime,
           entryTime: position.entryTime,
           exitTime: candle.time,
           side: position.side,
           entryPrice: position.entryPrice,
           exitPrice: exit.exitPrice,
-          pnl,
-          pnlPct,
-          barsHeld: i - position.entryIndex,
-          exitReason: exit.reason || 'unknown',
           size: position.size,
+          grossPnl,
+          commission,
+          netPnl,
+          pnlPct,
+          barsHeld: i - position.entryIndex + 1,
+          exitReason: exit.reason || 'unknown'
         });
 
-        lastTradeIndex = i;
+        lastTradeExitIndex = i;
         position = null;
       }
     }
 
-    if (!position && i - lastTradeIndex > params.cooldownBars) {
+    const canSearchEntry =
+      !position &&
+      i < candles.length - 1 &&
+      i - lastTradeExitIndex > params.cooldownBars &&
+      balance > 0;
+
+    if (canSearchEntry) {
       const signal = analyzeMomentumScalp(candles, i, params);
+
       if (signal.side === 'long' || signal.side === 'short') {
-        const pos = buildScalpPosition(signal, params, balance);
-        pos.entryIndex = i;
-        position = pos;
+        const nextCandle = candles[i + 1];
+
+        const newPosition = buildScalpPositionFromSignal(
+          signal,
+          nextCandle,
+          params,
+          balance,
+          i + 1
+        );
+
+        if (newPosition) {
+          position = newPosition;
+        }
       }
     }
 
     equity.push(balance);
-    if (balance > maxEquity) maxEquity = balance;
-    const dd = maxEquity - balance;
-    if (dd > maxDrawdown) maxDrawdown = dd;
+
+    if (balance > maxEquity) {
+      maxEquity = balance;
+    }
+
+    const drawdown = maxEquity - balance;
+    if (drawdown > maxDrawdown) {
+      maxDrawdown = drawdown;
+    }
   }
 
   if (position) {
     const lastCandle = candles[candles.length - 1];
-    const rawPnl = position.side === 'long'
-      ? (lastCandle.close - position.entryPrice) * position.size
-      : (position.entryPrice - lastCandle.close) * position.size;
-    const commission = (position.entryPrice * position.size + lastCandle.close * position.size) * params.commissionRate;
+    const forcedExitPrice =
+      position.side === 'long'
+        ? lastCandle.close * (1 - params.slippageRate)
+        : lastCandle.close * (1 + params.slippageRate);
+
+    const grossPnl = calcTradeGrossPnl(
+      position.side,
+      position.entryPrice,
+      forcedExitPrice,
+      position.size
+    );
+
+    const commission = calcTradeCommission(
+      position.entryPrice,
+      forcedExitPrice,
+      position.size,
+      params.commissionRate
+    );
+
+    const netPnl = grossPnl - commission;
+    const pnlPct = balance > 0 ? (netPnl / balance) * 100 : 0;
+
+    if (netPnl >= 0) {
+      grossProfit += netPnl;
+    } else {
+      grossLoss += Math.abs(netPnl);
+    }
+
     commissionTotal += commission;
-    const pnl = rawPnl - commission;
-    if (pnl > 0) grossProfit += pnl;
-    else grossLoss += Math.abs(pnl);
-    balance += pnl;
+    balance += netPnl;
+
     trades.push({
+      signalTime: position.signalTime,
       entryTime: position.entryTime,
       exitTime: lastCandle.time,
       side: position.side,
       entryPrice: position.entryPrice,
-      exitPrice: lastCandle.close,
-      pnl,
-      pnlPct: (pnl / startingBalance) * 100,
-      barsHeld: candles.length - 1 - position.entryIndex,
-      exitReason: 'end_of_data',
+      exitPrice: forcedExitPrice,
       size: position.size,
+      grossPnl,
+      commission,
+      netPnl,
+      pnlPct,
+      barsHeld: candles.length - position.entryIndex,
+      exitReason: 'end_of_data'
     });
+
     equity[equity.length - 1] = balance;
   }
 
-  const winningTrades = trades.filter((t: ScalpTrade) => t.pnl > 0);
   const totalTrades = trades.length;
-  const winRate = totalTrades === 0 ? 0 : winningTrades.length / totalTrades;
-  const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? Infinity : 0) : grossProfit / grossLoss;
-  const avgTrade = totalTrades === 0 ? 0 : trades.reduce((s: number, t: ScalpTrade) => s + t.pnl, 0) / totalTrades;
-  const avgBars = totalTrades === 0 ? 0 : trades.reduce((s: number, t: ScalpTrade) => s + t.barsHeld, 0) / totalTrades;
+  const winningTrades = trades.filter((t: ScalpTrade) => t.netPnl > 0);
+  const winRate = totalTrades > 0 ? winningTrades.length / totalTrades : 0;
+  const profitFactor =
+    grossLoss > 0
+      ? grossProfit / grossLoss
+      : grossProfit > 0
+        ? Infinity
+        : 0;
+
+  const avgTrade =
+    totalTrades > 0
+      ? trades.reduce((sum: number, t: ScalpTrade) => sum + t.netPnl, 0) / totalTrades
+      : 0;
+
+  const avgBars =
+    totalTrades > 0
+      ? trades.reduce((sum: number, t: ScalpTrade) => sum + t.barsHeld, 0) / totalTrades
+      : 0;
 
   return {
     trades,
@@ -147,6 +261,6 @@ export function runMomentumScalpBacktest(
     totalTrades,
     grossProfit,
     grossLoss,
-    commissionTotal,
+    commissionTotal
   };
 }
