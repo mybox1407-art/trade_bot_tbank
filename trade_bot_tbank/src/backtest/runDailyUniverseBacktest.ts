@@ -515,7 +515,6 @@ async function main(): Promise<void> {
     onePositionAtTime: true,
     minSignalAtrPct: 0.006,
     riskPerTrade: 0.01,
-    minScore: 4.0,
     stopAtrMult: 2.5,
     trailingAtrMult: 2.0,
     minAtrPct: 0.006,
