@@ -382,6 +382,7 @@ function calcScoreForSide(params: {
   return {
     symbol,
     side,
+    // Пока detectMarketState не отдаёт отдельный regime, используем state как alias.
     regime: stateInfo.state,
     state: stateInfo.state,
     sideBias: stateInfo.sideBias,
@@ -530,7 +531,13 @@ export function pickBestUniverseSignal(
 
   if (!best) {
     const fallbackSymbol = Object.keys(candlesBySymbol)[0] ?? 'UNKNOWN';
-    return buildEmptySignal(fallbackSymbol, 0, 'no_ranked_candidates', {
+    const fallbackCandles = candlesBySymbol[fallbackSymbol] ?? [];
+    const fallbackPrice =
+      fallbackCandles.length > 0
+        ? fallbackCandles[fallbackCandles.length - 1].close
+        : 0;
+
+    return buildEmptySignal(fallbackSymbol, fallbackPrice, 'no_ranked_candidates', {
       minScore
     });
   }
@@ -550,6 +557,7 @@ export function pickBestUniverseSignal(
       state: best.signal.state,
       sideBias: best.signal.sideBias,
       coherence: best.signal.coherence,
+      score: best.signal.score,
       rawScore: best.signal.rawScore,
       price: best.signal.price
     };
