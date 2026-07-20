@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Candle, DEFAULT_SCALP_PARAMS } from '../services/momentumScalpStrategy';
-import { runMomentumScalpBacktest, ScalpBacktestResult } from './momentumScalpBacktest';
+import { runMomentumScalpBacktest, ScalpBacktestResult, ScalpTrade } from './momentumScalpBacktest';
 
 function loadCandles(filePath: string): Candle[] {
   const raw = fs.readFileSync(filePath, 'utf-8');
@@ -40,7 +40,7 @@ function printTrades(result: ScalpBacktestResult) {
   if (result.trades.length === 0) return;
   console.log('\n=== TRADES ===');
   console.log('# | Entry Time | Side | Entry | Exit | PnL | PnL% | Bars | Reason');
-  result.trades.forEach((t, i) => {
+  result.trades.forEach((t: ScalpTrade, i: number) => {
     const time = new Date(t.entryTime).toISOString();
     console.log(`${i + 1} | ${time} | ${t.side.toUpperCase()} | ${t.entryPrice.toFixed(2)} | ${t.exitPrice.toFixed(2)} | ${formatCurrency(t.pnl)} | ${t.pnlPct.toFixed(3)}% | ${t.barsHeld} | ${t.exitReason}`);
   });
@@ -48,10 +48,10 @@ function printTrades(result: ScalpBacktestResult) {
 
 function printExitDistribution(result: ScalpBacktestResult) {
   const counts: Record<string, number> = {};
-  result.trades.forEach(t => {
+  result.trades.forEach((t: ScalpTrade) => {
     counts[t.exitReason] = (counts[t.exitReason] || 0) + 1;
   });
-  const rows = Object.entries(counts).map(([reason, count]) => ({ reason, count }));
+  const rows = Object.entries(counts).map(([reason, count]: [string, number]) => ({ reason, count }));
   if (rows.length) {
     console.log('\n=== EXIT REASONS ===');
     console.table(rows);
