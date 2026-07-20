@@ -1,14 +1,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Candle, DEFAULT_SCALP_PARAMS, ScalpParams } from '../services/momentumScalpStrategy';
 import {
-  runMomentumScalpBacktest,
-  ScalpBacktestResult,
-  ScalpTrade,
+  Candle,
+  DEFAULT_SCALP_V2_PARAMS,
+  MomentumScalpV2Params
+} from '../services/momentumScalpStrategyV2';
+import {
+  runMomentumScalpBacktestV2,
+  ScalpBacktestResultV2,
+  ScalpTradeV2,
   RejectStat
-} from './momentumScalpBacktest';
+} from './momentumScalpBacktestV2';
 
-type PresetName = 'base' | 'presetA' | 'presetB' | 'presetC' | 'presetD';
+type PresetName = 'base' | 'balanced' | 'aggressive';
+type SideFilter = 'both' | 'long' | 'short';
 
 function loadCandles(filePath: string): Candle[] {
   const raw = fs.readFileSync(filePath, 'utf-8');
@@ -48,61 +53,55 @@ function formatFractionPct(n: number): string {
   return `${(n * 100).toFixed(2)}%`;
 }
 
-function buildParams(preset: PresetName): ScalpParams {
-  const base: ScalpParams = { ...DEFAULT_SCALP_PARAMS };
+function parsePreset(value: string | undefined): PresetName {
+  if (value === 'balanced') return 'balanced';
+  if (value === 'aggressive') return 'aggressive';
+  return 'base';
+}
+
+function parseSide(value: string | undefined): SideFilter {
+  if (value === 'long') return 'long';
+  if (value === 'short') return 'short';
+  return 'both';
+}
+
+function buildParams(preset: PresetName): MomentumScalpV2Params {
+  const base: MomentumScalpV2Params = { ...DEFAULT_SCALP_V2_PARAMS };
 
   if (preset === 'base') {
     return base;
   }
 
-  if (preset === 'presetA') {
+  if (preset === 'balanced') {
     return {
       ...base,
-      sessionStartHour: 10,
-      sessionEndHour: 18.75,
-      afternoonStartHour: 10,
-      afternoonEndHour: 18.75
-    };
-  }
-
-  if (preset === 'presetB') {
-    return {
-      ...base,
-      sessionStartHour: 10,
-      sessionEndHour: 18.75,
-      afternoonStartHour: 10,
-      afternoonEndHour: 18.75,
-      minAtrPct: 0.0005
-    };
-  }
-
-  if (preset === 'presetC') {
-    return {
-      ...base,
-      sessionStartHour: 10,
-      sessionEndHour: 18.75,
-      afternoonStartHour: 10,
-      afternoonEndHour: 18.75,
-      minAtrPct: 0.0005,
-      volumeMinRatio: 1.05
+      volumeMinRatio1m: 1.05,
+      minPullbackPct: 0.0005,
+      breakoutBufferPct: 0.0001,
+      trendAtrExpandRatio5m: 1.05,
+      atrTpMult: 2.1,
+      timeStopBars: 18
     };
   }
 
   return {
     ...base,
-    sessionStartHour: 10,
-    sessionEndHour: 18.75,
-    afternoonStartHour: 10,
-    afternoonEndHour: 18.75,
-    minAtrPct: 0.0005,
-    volumeMinRatio: 1.05,
-    minImpulsePct: 0.00035
+    volumeMinRatio1m: 1.0,
+    minPullbackPct: 0.0004,
+    breakoutBufferPct: 0.00005,
+    trendAtrExpandRatio5m: 1.0,
+    atrTpMult: 2.2,
+    atrSlMult: 1.05,
+    timeStopBars: 20
   };
 }
 
-function printParams(params: ScalpParams, preset: PresetName) {
+function printParams(params: MomentumScalpV2Params, preset: PresetName, side: SideFilter) {
   console.log('\n=== PRESET ===');
   console.log(preset);
+
+  console.log('\n=== SIDE FILTER ===');
+  console.log(side);
 
   console.log('\n=== PARAMS ===');
   console.table([
@@ -110,37 +109,40 @@ function printParams(params: ScalpParams, preset: PresetName) {
     { name: 'maxRiskPerTrade', value: params.maxRiskPerTrade },
     { name: 'commissionRate', value: params.commissionRate },
     { name: 'slippageRate', value: params.slippageRate },
-    { name: 'atrPeriod', value: params.atrPeriod },
+    { name: 'atrPeriod1m', value: params.atrPeriod1m },
+    { name: 'atrPeriod5m', value: params.atrPeriod5m },
+    { name: 'emaFastPeriod5m', value: params.emaFastPeriod5m },
+    { name: 'emaSlowPeriod5m', value: params.emaSlowPeriod5m },
+    { name: 'vwapPeriod1m', value: params.vwapPeriod1m },
+    { name: 'volumeLookback1m', value: params.volumeLookback1m },
+    { name: 'trendAtrLookback5m', value: params.trendAtrLookback5m },
+    { name: 'trendAtrExpandRatio5m', value: params.trendAtrExpandRatio5m },
+    { name: 'pullbackLookback1m', value: params.pullbackLookback1m },
+    { name: 'breakoutBufferPct', value: params.breakoutBufferPct },
+    { name: 'minPullbackPct', value: params.minPullbackPct },
+    { name: 'minImpulseBodyPct', value: params.minImpulseBodyPct },
+    { name: 'volumeMinRatio1m', value: params.volumeMinRatio1m },
     { name: 'atrSlMult', value: params.atrSlMult },
     { name: 'atrTpMult', value: params.atrTpMult },
-    { name: 'emaFastPeriod', value: params.emaFastPeriod },
-    { name: 'emaSlowPeriod', value: params.emaSlowPeriod },
-    { name: 'vwapPeriod', value: params.vwapPeriod },
-    { name: 'volumeLookback', value: params.volumeLookback },
-    { name: 'volumeMinRatio', value: params.volumeMinRatio },
-    { name: 'minAtrPct', value: params.minAtrPct },
-    { name: 'minImpulsePct', value: params.minImpulsePct },
+    { name: 'timeStopBars', value: params.timeStopBars },
+    { name: 'cooldownBars', value: params.cooldownBars },
     { name: 'minTargetMovePct', value: params.minTargetMovePct },
     { name: 'minCostCoverage', value: params.minCostCoverage },
-    { name: 'maxPositionNotionalPct', value: params.maxPositionNotionalPct },
     { name: 'maxEntryDistanceFromVwapPct', value: params.maxEntryDistanceFromVwapPct },
-    { name: 'timeStopBars', value: params.timeStopBars },
+    { name: 'maxPositionNotionalPct', value: params.maxPositionNotionalPct },
     { name: 'sessionStartHour', value: params.sessionStartHour },
-    { name: 'sessionEndHour', value: params.sessionEndHour },
-    { name: 'afternoonStartHour', value: params.afternoonStartHour },
-    { name: 'afternoonEndHour', value: params.afternoonEndHour },
-    { name: 'cooldownBars', value: params.cooldownBars }
+    { name: 'sessionEndHour', value: params.sessionEndHour }
   ]);
 }
 
-function printSummary(result: ScalpBacktestResult) {
+function printSummary(result: ScalpBacktestResultV2) {
   const startingBalance = result.equity[0] ?? 0;
   const absoluteReturn = result.finalBalance - startingBalance;
   const drawdownPct = startingBalance > 0
     ? (result.maxDrawdown / startingBalance) * 100
     : 0;
 
-  console.log('\n=== MOMENTUM SCALP BACKTEST RESULT ===');
+  console.log('\n=== MOMENTUM SCALP V2 BACKTEST RESULT ===');
   console.log(`Starting Balance: ${formatCurrency(startingBalance)} ₽`);
   console.log(`Final Balance:    ${formatCurrency(result.finalBalance)} ₽`);
   console.log(`Total Return:     ${formatSignedCurrency(absoluteReturn)} ₽ (${formatPct(result.totalReturn)})`);
@@ -157,32 +159,28 @@ function printSummary(result: ScalpBacktestResult) {
   console.log(`Commission Total: ${formatCurrency(result.commissionTotal)} ₽`);
 }
 
-function printTradeStats(result: ScalpBacktestResult) {
+function printTradeStats(result: ScalpBacktestResultV2) {
   if (result.trades.length === 0) {
     console.log('\n=== TRADE STATS ===');
     console.log('No trades');
     return;
   }
 
-  const positiveNet = result.trades.filter((t: ScalpTrade) => t.netPnl > 0).length;
-  const negativeNet = result.trades.filter((t: ScalpTrade) => t.netPnl < 0).length;
-  const positiveGross = result.trades.filter((t: ScalpTrade) => t.grossPnl > 0).length;
-  const negativeTakeProfits = result.trades.filter(
-    (t: ScalpTrade) => t.exitReason === 'take_profit' && t.netPnl < 0
-  ).length;
-  const longTrades = result.trades.filter((t: ScalpTrade) => t.side === 'long').length;
-  const shortTrades = result.trades.filter((t: ScalpTrade) => t.side === 'short').length;
+  const positiveNet = result.trades.filter((t: ScalpTradeV2) => t.netPnl > 0).length;
+  const negativeNet = result.trades.filter((t: ScalpTradeV2) => t.netPnl < 0).length;
+  const positiveGross = result.trades.filter((t: ScalpTradeV2) => t.grossPnl > 0).length;
+  const longTrades = result.trades.filter((t: ScalpTradeV2) => t.side === 'long').length;
+  const shortTrades = result.trades.filter((t: ScalpTradeV2) => t.side === 'short').length;
 
   console.log('\n=== TRADE STATS ===');
   console.log(`Positive net trades: ${positiveNet}`);
   console.log(`Negative net trades: ${negativeNet}`);
   console.log(`Positive gross trades: ${positiveGross}`);
-  console.log(`Negative take_profit trades after costs: ${negativeTakeProfits}`);
   console.log(`Long trades: ${longTrades}`);
   console.log(`Short trades: ${shortTrades}`);
 }
 
-function printRejectStats(result: ScalpBacktestResult) {
+function printRejectStats(result: ScalpBacktestResultV2) {
   console.log('\n=== REJECT REASONS ===');
 
   if (!result.rejectStats || result.rejectStats.length === 0) {
@@ -205,35 +203,19 @@ function printRejectStats(result: ScalpBacktestResult) {
   console.log(`Total rejects: ${totalRejects}`);
 }
 
-function printTopRejectComment(result: ScalpBacktestResult) {
-  if (!result.rejectStats || result.rejectStats.length === 0) {
-    return;
-  }
-
-  const top = result.rejectStats[0];
-  const totalRejects = result.rejectStats.reduce(
-    (sum: number, row: RejectStat) => sum + row.count,
-    0
-  );
-  const share = totalRejects > 0 ? (top.count / totalRejects) * 100 : 0;
-
-  console.log('\n=== TOP REJECT ===');
-  console.log(`${top.reason}: ${top.count} (${share.toFixed(2)}%)`);
-}
-
-function printTrades(result: ScalpBacktestResult, limit: number = 200) {
+function printTrades(result: ScalpBacktestResultV2, limit: number = 200) {
   if (result.trades.length === 0) {
     return;
   }
 
   console.log('\n=== TRADES ===');
   console.log(
-    '# | Signal Time | Entry Time | Side | Entry | Exit | Size | GrossPnL | Commission | NetPnL | PnL% | Bars | Reason'
+    '# | Signal Time | Entry Time | Side | Entry | Exit | Size | GrossPnL | Commission | NetPnL | PnL% | Bars | Reason | VolRatio | PullbackPct | BodyPct | ATR1m | ATR5m'
   );
 
   const rows = result.trades.slice(0, limit);
 
-  rows.forEach((t: ScalpTrade, i: number) => {
+  rows.forEach((t: ScalpTradeV2, i: number) => {
     const signalTime = new Date(t.signalTime).toISOString();
     const entryTime = new Date(t.entryTime).toISOString();
 
@@ -251,7 +233,12 @@ function printTrades(result: ScalpBacktestResult, limit: number = 200) {
         formatSignedCurrency(t.netPnl),
         `${t.pnlPct.toFixed(3)}%`,
         t.barsHeld,
-        t.exitReason
+        t.exitReason,
+        t.volumeRatio.toFixed(2),
+        t.pullbackPct.toFixed(4),
+        t.impulseBodyPct.toFixed(4),
+        t.atr1m.toFixed(4),
+        t.atr5m.toFixed(4)
       ].join(' | ')
     );
   });
@@ -261,16 +248,16 @@ function printTrades(result: ScalpBacktestResult, limit: number = 200) {
   }
 }
 
-function printExitDistribution(result: ScalpBacktestResult) {
+function printExitDistribution(result: ScalpBacktestResultV2) {
   const counts: Record<string, number> = {};
 
-  result.trades.forEach((t: ScalpTrade) => {
+  result.trades.forEach((t: ScalpTradeV2) => {
     counts[t.exitReason] = (counts[t.exitReason] || 0) + 1;
   });
 
   const rows = Object.entries(counts)
     .map(([reason, count]: [string, number]) => ({ reason, count }))
-    .sort((a: { reason: string; count: number }, b: { reason: string; count: number }) => b.count - a.count);
+    .sort((a, b) => b.count - a.count);
 
   console.log('\n=== EXIT REASONS ===');
 
@@ -282,19 +269,12 @@ function printExitDistribution(result: ScalpBacktestResult) {
   console.table(rows);
 }
 
-function parsePreset(value: string | undefined): PresetName {
-  if (value === 'presetA') return 'presetA';
-  if (value === 'presetB') return 'presetB';
-  if (value === 'presetC') return 'presetC';
-  if (value === 'presetD') return 'presetD';
-  return 'base';
-}
-
 function main() {
   const args = process.argv.slice(2);
   const filePath = args[0] || path.join(__dirname, 'data', 'SBER_1m.json');
   const ticker = args[1] || 'SBER';
   const preset = parsePreset(args[2]);
+  const side = parseSide(args[3]);
 
   console.log(`Loading 1m candles for ${ticker} from ${filePath}...`);
   const candles = loadCandles(filePath);
@@ -303,14 +283,16 @@ function main() {
   const params = buildParams(preset);
 
   const startedAt = Date.now();
-  const result = runMomentumScalpBacktest(candles, params);
+  const result = runMomentumScalpBacktestV2(candles, params, {
+    allowLongs: side !== 'short',
+    allowShorts: side !== 'long'
+  });
   const elapsedMs = Date.now() - startedAt;
 
-  printParams(params, preset);
+  printParams(params, preset, side);
   printSummary(result);
   printTradeStats(result);
   printRejectStats(result);
-  printTopRejectComment(result);
   printTrades(result, 200);
   printExitDistribution(result);
 
