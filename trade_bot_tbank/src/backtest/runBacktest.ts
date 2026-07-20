@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runStrategyBacktest } from './strategyBacktest';
-import { Candle } from '../services/strategy';
+import {
+  Candle,
+  HTF_WARMUP_15M,
+  MAX_RISK_PER_TRADE,
+  STARTING_BALANCE
+} from '../services/strategy';
 
 const DEFAULT_COOLDOWN_CANDLES = 12;
 const PROGRESS_LOG_EVERY = 5000;
@@ -77,7 +82,7 @@ function parseCooldownCandles(value: string | undefined): number {
   return parsed;
 }
 
-/** argv: htf | htf=18 | htf=0 */
+/** argv: htf | htf=18 | htf=0 | nohtf */
 function parseHtfArg(value: string | undefined): {
   htfFilter: boolean;
   htfMinAdx1h: number;
@@ -210,12 +215,12 @@ function printTrades(result: ReturnType<typeof runStrategyBacktest>, limit?: num
 function printUsage() {
   console.log(`
 Использование:
-  npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [htf|htf=18|htf=0]
+  npm run backtest -- <path-to-json> <symbol> [cooldownCandles] [htf|htf=18|nohtf]
 
 Примеры:
   npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12
   npm run backtest -- ./src/backtest/data/SBER_15m.json SBER 12 htf
-  npm run backtest -- ./src/backtest/data/RTKM_15m.json RTKM 12 htf=18
+  npm run backtest -- ./src/backtest/data/NVTK_15m.json NVTK 12 htf=18
 `);
 }
 
@@ -256,7 +261,7 @@ function main() {
   }
 
   const estimated = estimateBacktestTime(candles.length);
-  const warmup = htfFilter ? Math.max(250, 850) : 250;
+  const warmup = htfFilter ? Math.max(250, HTF_WARMUP_15M) : 250;
 
   console.log('\n========== ПАРАМЕТРЫ ЗАПУСКА ==========');
   console.log(`Файл: ${absolutePath}`);
@@ -274,11 +279,13 @@ function main() {
     )}`
   );
   console.log(`Лог прогресса: каждые ${PROGRESS_LOG_EVERY} свечей`);
-  console.log(`Риск на сделку: 2%`);
-  console.log(`Модель выхода: TP1 50%@1.2R → lock 0.2R → TP2@2.5R (без trail)`);
+  console.log(`Риск на сделку: ${MAX_RISK_PER_TRADE * 100}%`);
+  console.log(
+    `Модель выхода: TP1 40%@1.5R → lock 0R → TP2@2.0R | abort 16b/0.35R | TS 64`
+  );
   console.log(`Лимит входов в день: выкл.`);
-  console.log(`Time-stop / abort: 120 бар / выкл.`);
-  console.log(`Кап стопа: ≤ 1.8% цены`);
+  console.log(`Time-stop / abort: 64 бар / 16 бар @ 0.35R`);
+  console.log(`Кап стопа: ≤ 1.2% цены`);
   console.log(`Warmup: ${warmup} бар`);
   console.log(
     htfFilter
@@ -299,7 +306,7 @@ function main() {
   try {
     console.log(`Прогресс: 0/${candles.length} свечей`);
     result = runStrategyBacktest(symbolArg, candles, {
-      startingBalance: 50000,
+      startingBalance: STARTING_BALANCE,
       commissionRate: 0.0005,
       warmupCandles: warmup,
       onePositionAtTime: true,
@@ -307,9 +314,9 @@ function main() {
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
       maxTradesPerDay: 0,
-      timeStopBars: 120,
-      earlyAbortBars: 0,
-      earlyAbortMinR: 0.25,
+      timeStopBars: 64,
+      earlyAbortBars: 16,
+      earlyAbortMinR: 0.35,
       runnerTrailR: 0,
       htfFilter,
       htfMinAdx1h
