@@ -28,6 +28,8 @@ interface OpenUniversePosition {
   symbol: string;
   side: 'long' | 'short';
   regime: string;
+  state: string;
+  coherence: number;
   openedAt: number;
   entryPrice: number;
   stopLossPrice: number;
@@ -48,6 +50,8 @@ export interface UniverseBacktestTrade {
   symbol: string;
   side: 'long' | 'short';
   regime: string;
+  state: string;
+  coherence: number;
   openedAt: number;
   closedAt: number;
   entryPrice: number;
@@ -113,6 +117,29 @@ export interface UniverseRegimeStats {
       grossLoss: number;
       profitFactor: number;
       avgBarsHeld: number;
+      avgCoherence: number;
+      closeReasons: Record<string, number>;
+    }
+  >;
+  closeReasonsAll: Record<string, number>;
+}
+
+export interface UniverseStateStats {
+  totalBars: number;
+  barsByState: Record<string, { bars: number; pct: number }>;
+  tradesByState: Record<
+    string,
+    {
+      trades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      netProfit: number;
+      grossProfit: number;
+      grossLoss: number;
+      profitFactor: number;
+      avgBarsHeld: number;
+      avgCoherence: number;
       closeReasons: Record<string, number>;
     }
   >;
@@ -124,12 +151,16 @@ export interface UniverseSelectionStats {
   noSignalBars: number;
   pickedBySymbol: Record<string, number>;
   pickedBySide: Record<string, number>;
+  pickedByState: Record<string, number>;
   topScores: Array<{
     time: number;
     symbol: string;
     score: number;
+    rawScore: number;
     side: 'long' | 'short';
     regime: string;
+    state: string;
+    coherence: number;
   }>;
 }
 
@@ -139,6 +170,7 @@ export interface UniverseBacktestResult {
   trades: UniverseBacktestTrade[];
   equityCurve: Array<{ time: number; balance: number }>;
   regimeStats: UniverseRegimeStats;
+  stateStats: UniverseStateStats;
   selectionStats: UniverseSelectionStats;
 }
 
@@ -263,6 +295,8 @@ function buildTrade(params: {
     symbol: position.symbol,
     side: position.side,
     regime: position.regime,
+    state: position.state,
+    coherence: round(position.coherence, 6),
     openedAt: position.openedAt,
     closedAt,
     entryPrice: round(position.entryPrice),
@@ -492,51 +526,77 @@ function calculateDrawdown(
   };
 }
 
-function buildRegimeStats(
-  trades: UniverseBacktestTrade[],
-  barCounts: Record<string, number>
-): UniverseRegimeStats {
-  const totalBars = Object.values(barCounts).reduce((a, b) => a + b, 0);
-  const barsByRegime: Record<string, { bars: number; pct: number }> = {};
-  for (const [reg, bars] of Object.entries(barCounts)) {
-    barsByRegime[reg] = {
-      bars,
-      pct: totalBars > 0 ? round(bars / totalBars, 6) : 0
-    };
+function buildGroupedTradeStats<
+  T extends { regime: string; state: string; netPnl: number; barsHeld: number; closeReason: string; coherence: number }
+>(
+  trades: T[],
+  keyField: 'regime' | 'state'
+): Record<
+  string,
+  {
+    trades: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    netProfit: number;
+    grossProfit: number;
+    grossLoss: number;
+    profitFactor: number;
+    avgBarsHeld: number;
+    avgCoherence: number;
+    closeReasons: Record<string, number>;
   }
-
+> {
   type Agg = {
-    regime: string;
+    key: string;
     net: number;
     barsMax: number;
-    reasons: Record<string, number>;
+    coherenceSum: number;
+    closeReasons: Record<string, number>;
   };
 
-  const groups = new Map<string, Agg>();
+  const groupedByPosition = new Map<string, Agg>();
+
   for (const t of trades) {
-    const key = `${t.symbol}|${t.openedAt}|${t.side}|${t.entryPrice}`;
-    let g = groups.get(key);
-    if (!g) {
-      g = {
-        regime: t.regime || 'unknown',
+    const posKey = `${(t as unknown as UniverseBacktestTrade).symbol}|${(t as unknown as UniverseBacktestTrade).openedAt}|${(t as unknown as UniverseBacktestTrade).side}|${(t as unknown as UniverseBacktestTrade).entryPrice}`;
+    let agg = groupedByPosition.get(posKey);
+    if (!agg) {
+      agg = {
+        key: t[keyField] || 'unknown',
         net: 0,
         barsMax: 0,
-        reasons: {}
+        coherenceSum: 0,
+        closeReasons: {}
       };
-      groups.set(key, g);
+      groupedByPosition.set(posKey, agg);
     }
-    g.net += t.netPnl;
-    g.barsMax = Math.max(g.barsMax, t.barsHeld);
-    inc(g.reasons, t.closeReason);
+    agg.net += t.netPnl;
+    agg.barsMax = Math.max(agg.barsMax, t.barsHeld);
+    agg.coherenceSum += t.coherence;
+    inc(agg.closeReasons, t.closeReason);
   }
 
-  const tradesByRegime: UniverseRegimeStats['tradesByRegime'] = {};
-  const closeReasonsAll: Record<string, number> = {};
+  const out: Record<
+    string,
+    {
+      trades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      netProfit: number;
+      grossProfit: number;
+      grossLoss: number;
+      profitFactor: number;
+      avgBarsHeld: number;
+      avgCoherence: number;
+      closeReasons: Record<string, number>;
+    }
+  > = {};
 
-  for (const g of groups.values()) {
-    const reg = g.regime || 'unknown';
-    if (!tradesByRegime[reg]) {
-      tradesByRegime[reg] = {
+  for (const agg of groupedByPosition.values()) {
+    const key = agg.key || 'unknown';
+    if (!out[key]) {
+      out[key] = {
         trades: 0,
         wins: 0,
         losses: 0,
@@ -546,42 +606,95 @@ function buildRegimeStats(
         grossLoss: 0,
         profitFactor: 0,
         avgBarsHeld: 0,
+        avgCoherence: 0,
         closeReasons: {}
       };
     }
-    const bucket = tradesByRegime[reg];
+
+    const bucket = out[key];
     bucket.trades += 1;
-    bucket.netProfit += g.net;
-    if (g.net > 0) {
+    bucket.netProfit += agg.net;
+    bucket.avgBarsHeld += agg.barsMax;
+    bucket.avgCoherence += agg.coherenceSum;
+
+    if (agg.net > 0) {
       bucket.wins += 1;
-      bucket.grossProfit += g.net;
+      bucket.grossProfit += agg.net;
     } else {
       bucket.losses += 1;
-      bucket.grossLoss += g.net;
+      bucket.grossLoss += agg.net;
     }
-    bucket.avgBarsHeld += g.barsMax;
-    for (const [reason, n] of Object.entries(g.reasons)) {
+
+    for (const [reason, n] of Object.entries(agg.closeReasons)) {
       inc(bucket.closeReasons, reason, n);
-      inc(closeReasonsAll, reason, n);
     }
   }
 
-  for (const bucket of Object.values(tradesByRegime)) {
-    const gl = Math.abs(bucket.grossLoss);
+  for (const bucket of Object.values(out)) {
+    const absLoss = Math.abs(bucket.grossLoss);
     bucket.winRate = bucket.trades > 0 ? round(bucket.wins / bucket.trades, 6) : 0;
     bucket.netProfit = round(bucket.netProfit);
     bucket.grossProfit = round(bucket.grossProfit);
     bucket.grossLoss = round(bucket.grossLoss);
     bucket.profitFactor =
-      gl > 0 ? round(bucket.grossProfit / gl, 6) : bucket.grossProfit > 0 ? Infinity : 0;
+      absLoss > 0 ? round(bucket.grossProfit / absLoss, 6) : bucket.grossProfit > 0 ? Infinity : 0;
     bucket.avgBarsHeld =
       bucket.trades > 0 ? round(bucket.avgBarsHeld / bucket.trades, 2) : 0;
+    bucket.avgCoherence =
+      bucket.trades > 0 ? round(bucket.avgCoherence / bucket.trades, 6) : 0;
+  }
+
+  return out;
+}
+
+function buildRegimeStats(
+  trades: UniverseBacktestTrade[],
+  barCounts: Record<string, number>
+): UniverseRegimeStats {
+  const totalBars = Object.values(barCounts).reduce((a, b) => a + b, 0);
+  const barsByRegime: Record<string, { bars: number; pct: number }> = {};
+  for (const [regime, bars] of Object.entries(barCounts)) {
+    barsByRegime[regime] = {
+      bars,
+      pct: totalBars > 0 ? round(bars / totalBars, 6) : 0
+    };
+  }
+
+  const closeReasonsAll: Record<string, number> = {};
+  for (const t of trades) {
+    inc(closeReasonsAll, t.closeReason);
   }
 
   return {
     totalBars,
     barsByRegime,
-    tradesByRegime,
+    tradesByRegime: buildGroupedTradeStats(trades, 'regime'),
+    closeReasonsAll
+  };
+}
+
+function buildStateStats(
+  trades: UniverseBacktestTrade[],
+  barCounts: Record<string, number>
+): UniverseStateStats {
+  const totalBars = Object.values(barCounts).reduce((a, b) => a + b, 0);
+  const barsByState: Record<string, { bars: number; pct: number }> = {};
+  for (const [state, bars] of Object.entries(barCounts)) {
+    barsByState[state] = {
+      bars,
+      pct: totalBars > 0 ? round(bars / totalBars, 6) : 0
+    };
+  }
+
+  const closeReasonsAll: Record<string, number> = {};
+  for (const t of trades) {
+    inc(closeReasonsAll, t.closeReason);
+  }
+
+  return {
+    totalBars,
+    barsByState,
+    tradesByState: buildGroupedTradeStats(trades, 'state'),
     closeReasonsAll
   };
 }
@@ -718,11 +831,18 @@ export function runUniverseBacktest(
         tradesByRegime: {},
         closeReasonsAll: {}
       },
+      stateStats: {
+        totalBars: 0,
+        barsByState: {},
+        tradesByState: {},
+        closeReasonsAll: {}
+      },
       selectionStats: {
         totalDecisionBars: 0,
         noSignalBars: 0,
         pickedBySymbol: {},
         pickedBySide: {},
+        pickedByState: {},
         topScores: []
       }
     };
@@ -743,12 +863,15 @@ export function runUniverseBacktest(
   const entriesPerDay = new Map<string, number>();
   const trades: UniverseBacktestTrade[] = [];
   const equityCurve: Array<{ time: number; balance: number }> = [];
-  const barCounts: Record<string, number> = {};
+  const regimeBarCounts: Record<string, number> = {};
+  const stateBarCounts: Record<string, number> = {};
+
   const selectionStats: UniverseSelectionStats = {
     totalDecisionBars: 0,
     noSignalBars: 0,
     pickedBySymbol: {},
     pickedBySide: {},
+    pickedByState: {},
     topScores: []
   };
 
@@ -766,11 +889,6 @@ export function runUniverseBacktest(
     const ts = timeAxis[i];
     const visibleBySymbol = buildVisibleSlices(sortedBySymbol, lookup, ts);
 
-    for (const candles of Object.values(visibleBySymbol)) {
-      const lastCandle = last(candles);
-      if (!lastCandle) continue;
-    }
-
     const ranked = rankUniverseCandidates(visibleBySymbol, balance, {
       minScore: resolvedOptions.minScore,
       warmupCandles: resolvedOptions.warmupCandles
@@ -784,16 +902,22 @@ export function runUniverseBacktest(
     } else {
       inc(selectionStats.pickedBySymbol, bestNow.symbol);
       inc(selectionStats.pickedBySide, bestNow.side);
+      inc(selectionStats.pickedByState, bestNow.state || 'unknown');
+      inc(regimeBarCounts, bestNow.regime || 'unknown');
+      inc(stateBarCounts, bestNow.state || 'unknown');
+
       if (selectionStats.topScores.length < 1000) {
         selectionStats.topScores.push({
           time: ts,
           symbol: bestNow.symbol,
-          score: bestNow.score,
+          score: round(bestNow.score, 6),
+          rawScore: round(bestNow.rawScore, 6),
           side: bestNow.side,
-          regime: bestNow.regime
+          regime: bestNow.regime,
+          state: bestNow.state,
+          coherence: round(bestNow.coherence, 6)
         });
       }
-      inc(barCounts, bestNow.regime || 'unknown');
     }
 
     if (resolvedOptions.progressLogEvery > 0) {
@@ -802,15 +926,15 @@ export function runUniverseBacktest(
         processedBars > 0 &&
         (processedBars % resolvedOptions.progressLogEvery === 0 ||
           i === timeAxis.length - 1);
+
       if (shouldLog) {
         const elapsedSec = (Date.now() - startedAt) / 1000;
         const speed = processedBars / Math.max(elapsedSec, 1e-9);
         const remainingBars = Math.max(totalBarsToProcess - processedBars, 0);
         const etaSec = remainingBars / Math.max(speed, 1e-9);
         const progressPct =
-          totalBarsToProcess > 0
-            ? (processedBars / totalBarsToProcess) * 100
-            : 100;
+          totalBarsToProcess > 0 ? (processedBars / totalBarsToProcess) * 100 : 100;
+
         console.log(
           [
             `[UNIVERSE]`,
@@ -900,8 +1024,10 @@ export function runUniverseBacktest(
         barsHeld: i - openPosition.openIndex,
         openCommissionRemaining
       });
+
       balance = result.balance;
       openCommissionRemaining = result.openCommissionRemaining;
+
       for (const t of result.trades) {
         trades.push(t);
         equityCurve.push({ time: candle.time, balance: round(balance) });
@@ -944,6 +1070,8 @@ export function runUniverseBacktest(
         symbol: bestSignal.symbol,
         side: bestSignal.side,
         regime: bestSignal.regime,
+        state: bestSignal.state,
+        coherence: bestSignal.coherence,
         openedAt: ts,
         entryPrice: bestSignal.price,
         stopLossPrice: bestSignal.stopLossPrice,
@@ -994,7 +1122,8 @@ export function runUniverseBacktest(
     }),
     trades,
     equityCurve,
-    regimeStats: buildRegimeStats(trades, barCounts),
+    regimeStats: buildRegimeStats(trades, regimeBarCounts),
+    stateStats: buildStateStats(trades, stateBarCounts),
     selectionStats
   };
 }
