@@ -13,6 +13,8 @@ type CliInput = {
   symbol: string;
 };
 
+type JsonObject = Record<string, unknown>;
+
 function round(value: number, digits = 2): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
@@ -36,47 +38,45 @@ function printHeader(title: string): void {
   console.log('='.repeat(80));
 }
 
-function parseCliInputs(argv: string[]): CliInput[] {
-  const rawArgs = argv.slice(2);
-
-  if (!rawArgs.length) {
-    throw new Error(
-      'Не переданы JSON-файлы. Пример:\n' +
-        'npx tsx src/backtest/runDailyUniverseBacktest.ts ' +
-        './src/backtest/data/SBER_15m.json:SBER ' +
-        './src/backtest/data/GAZP_15m.json:GAZP'
-    );
-  }
-
-  return rawArgs.map((arg) => {
-    const idx = arg.lastIndexOf(':');
-    if (idx <= 0 || idx === arg.length - 1) {
-      throw new Error(`Неверный аргумент "${arg}". Ожидается формат: путь_к_json:SYMBOL`);
-    }
-
-    const filePath = arg.slice(0, idx).trim();
-    const symbol = arg.slice(idx + 1).trim().toUpperCase();
-
-    if (!filePath || !symbol) {
-      throw new Error(`Неверный аргумент "${arg}". Путь или тикер пустой.`);
-    }
-
-    return { filePath, symbol };
-  });
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function toNumber(value: unknown): number {
-  const n = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(n) ? n : NaN;
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  return NaN;
 }
 
-function normalizeCandle(raw: any): Candle {
-  const time =
-    toNumber(raw.time) ||
-    toNumber(raw.timestamp) ||
-    toNumber(raw.openTime) ||
-    Date.parse(raw.date ?? raw.datetime ?? raw.open_time ?? '');
+function parseTimestamp(raw: JsonObject): number {
+  const directTime = toNumber(raw.time);
+  if (Number.isFinite(directTime)) return directTime;
 
+  const timestamp = toNumber(raw.timestamp);
+  if (Number.isFinite(timestamp)) return timestamp;
+
+  const openTime = toNumber(raw.openTime);
+  if (Number.isFinite(openTime)) return openTime;
+
+  const maybeDate =
+    (typeof raw.date === 'string' && raw.date) ||
+    (typeof raw.datetime === 'string' && raw.datetime) ||
+    (typeof raw.open_time === 'string' && raw.open_time) ||
+    '';
+
+  const parsedDate = Date.parse(maybeDate);
+  return Number.isFinite(parsedDate) ? parsedDate : NaN;
+}
+
+function normalizeCandle(raw: unknown): Candle {
+  if (!isObject(raw)) {
+    throw new Error(`Некорректная свеча: ${JSON.stringify(raw)}`);
+  }
+
+  const time = parseTimestamp(raw);
   const open = toNumber(raw.open);
   const high = toNumber(raw.high);
   const low = toNumber(raw.low);
@@ -104,31 +104,66 @@ function normalizeCandle(raw: any): Candle {
   };
 }
 
-async function loadCandlesFromJsonFiles(inputs: CliInput[]): Promise<Record<string, Candle[]>> {
+function extractRows(parsed: unknown, resolvedPath: string): unknown[] {
+  if (Array.isArray(parsed)) return parsed;
+
+  if (isObject(parsed)) {
+    if (Array.isArray(parsed.candles)) return parsed.candles;
+    if (Array.isArray(parsed.data)) return parsed.data;
+    if (Array.isArray(parsed.items)) return parsed.items;
+  }
+
+  throw new Error(
+    `Файл ${resolvedPath} не содержит массив свечей. Ожидался массив или поле candles/data/items.`
+  );
+}
+
+function parseCliInputs(argv: string[]): CliInput[] {
+  const rawArgs = argv.slice(2);
+
+  if (!rawArgs.length) {
+    throw new Error(
+      'Не переданы JSON-файлы. Пример:\n' +
+        'npx tsx src/backtest/runDailyUniverseBacktest.ts ' +
+        './src/backtest/data/SBER_15m.json:SBER ' +
+        './src/backtest/data/GAZP_15m.json:GAZP ' +
+        './src/backtest/data/LKOH_15m.json:LKOH ' +
+        './src/backtest/data/ROSN_15m.json:ROSN'
+    );
+  }
+
+  return rawArgs.map((arg: string) => {
+    const idx = arg.lastIndexOf(':');
+
+    if (idx <= 0 || idx === arg.length - 1) {
+      throw new Error(`Неверный аргумент "${arg}". Ожидается формат: путь_к_json:SYMBOL`);
+    }
+
+    const filePath = arg.slice(0, idx).trim();
+    const symbol = arg.slice(idx + 1).trim().toUpperCase();
+
+    if (!filePath || !symbol) {
+      throw new Error(`Неверный аргумент "${arg}". Путь или тикер пустой.`);
+    }
+
+    return { filePath, symbol };
+  });
+}
+
+async function loadCandlesFromJsonFiles(
+  inputs: CliInput[]
+): Promise<Record<string, Candle[]>> {
   const out: Record<string, Candle[]> = {};
 
   for (const input of inputs) {
     const resolvedPath = path.resolve(input.filePath);
     const rawText = await fs.readFile(resolvedPath, 'utf-8');
-    const parsed = JSON.parse(rawText);
-
-    const rows = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed?.candles)
-        ? parsed.candles
-        : Array.isArray(parsed?.data)
-          ? parsed.data
-          : null;
-
-    if (!rows) {
-      throw new Error(
-        `Файл ${resolvedPath} не содержит массив свечей. Ожидался массив или поле candles/data.`
-      );
-    }
+    const parsed: unknown = JSON.parse(rawText);
+    const rows = extractRows(parsed, resolvedPath);
 
     const candles = rows
-      .map(normalizeCandle)
-      .sort((a, b) => a.time - b.time);
+      .map((row: unknown) => normalizeCandle(row))
+      .sort((a: Candle, b: Candle) => a.time - b.time);
 
     if (!candles.length) {
       throw new Error(`Файл ${resolvedPath} не содержит свечей после нормализации.`);
@@ -159,25 +194,26 @@ function printLaunchParams(candlesBySymbol: Record<string, Candle[]>): void {
     );
   }
 
-  console.log(`Стартовый баланс: 50000`);
-  console.log(`Комиссия: 0.0005`);
-  console.log(`Warmup: 30`);
-  console.log(`Risk per trade: 1%`);
-  console.log(`Stop ATR: 2.5`);
-  console.log(`Trail ATR: 2`);
-  console.log(`Min ATR %: 0.006`);
-  console.log(`Max ATR %: 0.12`);
-  console.log(`Max breakout distance %: 0.04`);
-  console.log(`Longs: ON`);
-  console.log(`Shorts: OFF`);
-  console.log(`Preset default: long-only + minAtrPct=0.006`);
-  console.log(`Лог прогресса: каждые 250 баров`);
+  console.log('Стартовый баланс: 50000');
+  console.log('Комиссия: 0.0005');
+  console.log('Warmup: 30');
+  console.log('Risk per trade: 1%');
+  console.log('Stop ATR: 2.5');
+  console.log('Trail ATR: 2');
+  console.log('Min ATR %: 0.006');
+  console.log('Max ATR %: 0.12');
+  console.log('Max breakout distance %: 0.04');
+  console.log('Longs: ON');
+  console.log('Shorts: OFF');
+  console.log('Preset default: long-only + minAtrPct=0.006');
+  console.log('Лог прогресса: каждые 250 баров');
 }
 
 function printSummary(result: DailyUniverseBacktestResult): void {
   const s = result.summary;
 
   printHeader('ИТОГИ DAILY UNIVERSE БЭКТЕСТА');
+
   console.log(`Universe: ${s.universe.join(', ')}`);
   console.log(`Сделок: ${s.tradesCount}`);
   console.log(`Побед: ${s.wins}`);
@@ -189,7 +225,7 @@ function printSummary(result: DailyUniverseBacktestResult): void {
   console.log(`Avg net pnl: ${money(s.avgNetPnl)}`);
   console.log(`Avg win: ${money(s.avgWin)}`);
   console.log(`Avg loss: ${money(s.avgLoss)}`);
-  console.log(`Profit factor: ${round(s.profitFactor, 3)}`);
+  console.log(`Profit factor: ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 3) : 'Infinity'}`);
   console.log(`Sharpe: ${round(s.sharpe, 3)}`);
   console.log(`Стартовый баланс: ${money(s.startBalance)}`);
   console.log(`Финальный баланс: ${money(s.endBalance)}`);
@@ -203,23 +239,142 @@ function printSelectionStats(result: DailyUniverseBacktestResult): void {
   const s = result.selectionStats;
 
   printHeader('SELECTION STATS');
+
   console.log(`Decision days: ${s.totalDecisionDays}`);
   console.log(`No-signal days: ${s.noSignalDays}`);
   console.log(`Signals accepted: ${s.signalsAccepted}`);
   console.log(`Signals rejected: ${s.signalsRejected}`);
 
   const pickedSides = Object.entries(s.pickedBySide)
-    .sort((a, b) => b[1] - a[1])
-    .map(([side, count]) => `${side}=${count}`)
+    .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
+    .map(([side, count]: [string, number]) => `${side}=${count}`)
     .join(' | ');
 
   const pickedSymbols = Object.entries(s.pickedBySymbol)
-    .sort((a, b) => b[1] - a[1])
-    .map(([symbol, count]) => `${symbol}=${count}`)
+    .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
+    .map(([symbol, count]: [string, number]) => `${symbol}=${count}`)
     .join(' | ');
 
-  if (pickedSides) console.log(`Picked by side: ${pickedSides}`);
-  if (pickedSymbols) console.log(`Picked by symbol: ${pickedSymbols}`);
+  if (pickedSides) {
+    console.log(`Picked by side: ${pickedSides}`);
+  }
+
+  if (pickedSymbols) {
+    console.log(`Picked by symbol: ${pickedSymbols}`);
+  }
+}
+
+function printFilterDiagnostics(result: DailyUniverseBacktestResult): void {
+  const f = result.diagnostics.filters;
+
+  printHeader('FILTER DIAGNOSTICS');
+
+  const rows = [
+    { metric: 'Bars processed', value: f.barsProcessed },
+    { metric: 'Symbols seen', value: f.symbolsSeen },
+    { metric: 'Warm symbols', value: f.warmSymbols },
+    { metric: 'ATR filter passed', value: f.atrFilterPassed },
+    { metric: 'ATR filter rejected', value: f.atrFilterRejected },
+    { metric: 'Breakout candidates', value: f.breakoutCandidates },
+    { metric: 'Long candidates', value: f.longCandidates },
+    { metric: 'Short candidates', value: f.shortCandidates },
+    { metric: 'Accepted signals', value: f.acceptedSignals },
+    { metric: 'Rejected signals', value: f.rejectedSignals },
+    { metric: 'Selected signals', value: f.selectedSignals },
+    { metric: 'Opened positions', value: f.openedPositions }
+  ];
+
+  console.table(rows);
+
+  const warmRate = f.symbolsSeen > 0 ? f.warmSymbols / f.symbolsSeen : 0;
+  const atrDenom = f.atrFilterPassed + f.atrFilterRejected;
+  const atrPassRate = atrDenom > 0 ? f.atrFilterPassed / atrDenom : 0;
+  const acceptDenom = f.acceptedSignals + f.rejectedSignals;
+  const acceptRate = acceptDenom > 0 ? f.acceptedSignals / acceptDenom : 0;
+  const selectRate = f.acceptedSignals > 0 ? f.selectedSignals / f.acceptedSignals : 0;
+  const openRate = f.selectedSignals > 0 ? f.openedPositions / f.selectedSignals : 0;
+
+  console.log(`Warm coverage: ${pct(warmRate)}`);
+  console.log(`ATR pass rate: ${pct(atrPassRate)}`);
+  console.log(`Signal accept rate: ${pct(acceptRate)}`);
+  console.log(`Selection rate: ${pct(selectRate)}`);
+  console.log(`Open rate after selection: ${pct(openRate)}`);
+}
+
+function printMonthlyStats(result: DailyUniverseBacktestResult): void {
+  const months = result.diagnostics.months;
+
+  printHeader('MONTHLY STATS');
+
+  if (!months.length) {
+    console.log('No monthly stats.');
+    return;
+  }
+
+  const rows = months.map((m: DailyMonthStats) => ({
+    month: m.month,
+    decisionDays: m.decisionDays,
+    acceptedSignals: m.acceptedSignals,
+    rejectedSignals: m.rejectedSignals,
+    selectedSignals: m.selectedSignals,
+    openedPositions: m.openedPositions,
+    closedTrades: m.closedTrades,
+    netPnl: money(m.netPnl)
+  }));
+
+  console.table(rows);
+}
+
+function printRejectDiagnostics(result: DailyUniverseBacktestResult): void {
+  const r = result.diagnostics.rejects;
+
+  printHeader('REJECT DIAGNOSTICS');
+
+  const byReasonRows = Object.entries(r.rejectsByReason)
+    .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
+    .map(([reason, count]: [string, number]) => ({ reason, count }));
+
+  if (!byReasonRows.length) {
+    console.log('No reject diagnostics.');
+    return;
+  }
+
+  console.log('Reject reasons:');
+  console.table(byReasonRows);
+
+  const byMonthRows = Object.entries(r.rejectsByMonth)
+    .sort(
+      (a: [string, Record<string, number>], b: [string, Record<string, number>]) =>
+        a[0].localeCompare(b[0])
+    )
+    .map(([month, reasons]: [string, Record<string, number>]) => ({
+      month,
+      total: Object.values(reasons).reduce((sum: number, n: number) => sum + n, 0),
+      ...reasons
+    }));
+
+  if (byMonthRows.length) {
+    console.log('');
+    console.log('Reject reasons by month:');
+    console.table(byMonthRows);
+  }
+
+  const bySymbolRows = Object.entries(r.rejectsBySymbol)
+    .sort(
+      (a: [string, Record<string, number>], b: [string, Record<string, number>]) =>
+        a[0].localeCompare(b[0])
+    )
+    .map(([symbol, reasons]: [string, Record<string, number>]) => ({
+      symbol,
+      total: Object.values(reasons).reduce((sum: number, n: number) => sum + n, 0),
+      ...reasons
+    }));
+
+  if (bySymbolRows.length) {
+    console.log('');
+    console.log('Reject reasons by symbol:');
+    console.table(bySymbolRows);
+  }
 }
 
 function printTradesPreview(result: DailyUniverseBacktestResult, limit = 20): void {
@@ -254,65 +409,103 @@ function printTradesPreview(result: DailyUniverseBacktestResult, limit = 20): vo
   });
 }
 
-function printFilterDiagnostics(result: DailyUniverseBacktestResult): void {
+function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
   const f = result.diagnostics.filters;
-
-  printHeader('FILTER DIAGNOSTICS');
-  console.table([
-    { metric: 'Bars processed', value: f.barsProcessed },
-    { metric: 'Symbols seen', value: f.symbolsSeen },
-    { metric: 'Warm symbols', value: f.warmSymbols },
-    { metric: 'ATR filter passed', value: f.atrFilterPassed },
-    { metric: 'ATR filter rejected', value: f.atrFilterRejected },
-    { metric: 'Breakout candidates', value: f.breakoutCandidates },
-    { metric: 'Long candidates', value: f.longCandidates },
-    { metric: 'Short candidates', value: f.shortCandidates },
-    { metric: 'Accepted signals', value: f.acceptedSignals },
-    { metric: 'Rejected signals', value: f.rejectedSignals },
-    { metric: 'Selected signals', value: f.selectedSignals },
-    { metric: 'Opened positions', value: f.openedPositions }
-  ]);
-}
-
-function printMonthlyStats(result: DailyUniverseBacktestResult): void {
   const months = result.diagnostics.months;
+  const rejects = result.diagnostics.rejects.rejectsByReason;
 
-  printHeader('MONTHLY STATS');
+  printHeader('INTERPRETATION');
 
-  if (!months.length) {
-    console.log('No monthly stats.');
+  const activeMonths = months.filter(
+    (m: DailyMonthStats) => m.openedPositions > 0 || m.closedTrades > 0 || m.acceptedSignals > 0
+  );
+
+  const firstActiveMonth = activeMonths.length ? activeMonths[0].month : null;
+  const firstTradeMonth = months.find((m: DailyMonthStats) => m.closedTrades > 0)?.month ?? null;
+
+  if (!firstActiveMonth) {
+    console.log(
+      'Стратегия не активировалась ни в одном месяце: либо сигналы не генерируются, либо фильтры/ограничения полностью блокируют входы.'
+    );
+  } else {
+    console.log(`Первый месяц с активностью сигналов: ${firstActiveMonth}`);
+
+    if (firstTradeMonth) {
+      console.log(`Первый месяц с закрытыми сделками: ${firstTradeMonth}`);
+    } else {
+      console.log('Закрытых сделок не было.');
+    }
+  }
+
+  const atrDenom = f.atrFilterPassed + f.atrFilterRejected;
+  const atrPassRate = atrDenom > 0 ? f.atrFilterPassed / atrDenom : 0;
+  const acceptDenom = f.acceptedSignals + f.rejectedSignals;
+  const acceptRate = acceptDenom > 0 ? f.acceptedSignals / acceptDenom : 0;
+
+  if (f.breakoutCandidates === 0) {
+    console.log(
+      'Похоже, стратегия почти не видит breakout-кандидатов: сначала проверь саму логику пробоя, таймфрейм и корректность previous-day уровней.'
+    );
     return;
   }
 
-  const rows = months.map((m: DailyMonthStats) => ({
-    month: m.month,
-    decisionDays: m.decisionDays,
-    acceptedSignals: m.acceptedSignals,
-    rejectedSignals: m.rejectedSignals,
-    selectedSignals: m.selectedSignals,
-    openedPositions: m.openedPositions,
-    closedTrades: m.closedTrades,
-    netPnl: money(m.netPnl)
-  }));
-
-  console.table(rows);
-}
-
-function printRejectDiagnostics(result: DailyUniverseBacktestResult): void {
-  const r = result.diagnostics.rejects;
-
-  printHeader('REJECT DIAGNOSTICS');
-
-  const byReasonRows = Object.entries(r.rejectsByReason)
-    .sort((a, b) => b[1] - a[1])
-    .map(([reason, count]) => ({ reason, count }));
-
-  if (!byReasonRows.length) {
-    console.log('No reject diagnostics.');
-    return;
+  if (atrDenom > 0 && atrPassRate < 0.2) {
+    console.log(
+      'Основной подозреваемый — ATR-фильтр: слишком мало баров проходит фильтр волатильности.'
+    );
   }
 
-  console.table(byReasonRows);
+  if (acceptDenom > 0 && acceptRate < 0.1) {
+    console.log(
+      'Сигналы в основном отбрасываются после первичного анализа: проверь entry/stop/size и дополнительные условия допуска.'
+    );
+  }
+
+  if (f.acceptedSignals > 0 && f.selectedSignals === 0) {
+    console.log(
+      'Есть принятые сигналы, но ни один не выбирается как лучший: проблема может быть в логике score/selection.'
+    );
+  }
+
+  if (f.selectedSignals > 0 && f.openedPositions === 0) {
+    console.log(
+      'Сигналы выбираются, но позиции не открываются: проверь buildDailyBreakoutPositionFromSignal и ограничения размера позиции.'
+    );
+  }
+
+  const topRejects = Object.entries(rejects)
+    .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
+    .slice(0, 5);
+
+  if (topRejects.length) {
+    console.log('');
+    console.log(
+      `Топ причин отказа: ${topRejects.map(([k, v]: [string, number]) => `${k}=${v}`).join(', ')}`
+    );
+  }
+
+  if (activeMonths.length > 0) {
+    const firstHalf = months.slice(0, Math.floor(months.length / 2));
+    const secondHalf = months.slice(Math.floor(months.length / 2));
+
+    const firstHalfOpened = firstHalf.reduce(
+      (sum: number, m: DailyMonthStats) => sum + m.openedPositions,
+      0
+    );
+    const secondHalfOpened = secondHalf.reduce(
+      (sum: number, m: DailyMonthStats) => sum + m.openedPositions,
+      0
+    );
+
+    console.log(`Opened positions, first half: ${firstHalfOpened}`);
+    console.log(`Opened positions, second half: ${secondHalfOpened}`);
+
+    if (firstHalfOpened === 0 && secondHalfOpened > 0) {
+      console.log(
+        'Это действительно красный флаг: стратегия была выключена в первой половине истории и "проснулась" только позже. Проверь regime dependency, фильтры и сдвиги в данных.'
+      );
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -342,7 +535,6 @@ async function main(): Promise<void> {
     allowShorts: false
   });
 
-  console.log('');
   printHeader('ВРЕМЯ ВЫПОЛНЕНИЯ');
   console.log(`Фактическое время: ${Math.round((Date.now() - startedAt) / 1000)} сек`);
 
@@ -352,6 +544,7 @@ async function main(): Promise<void> {
   printMonthlyStats(result);
   printRejectDiagnostics(result);
   printTradesPreview(result, 20);
+  printSilenceDiagnosis(result);
 }
 
 main().catch((error: unknown) => {
