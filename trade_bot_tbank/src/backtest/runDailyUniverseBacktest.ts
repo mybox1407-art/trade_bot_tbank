@@ -43,7 +43,9 @@ function printSummary(result: DailyUniverseBacktestResult): void {
   console.log(`End balance: ${money(s.endBalance)}`);
   console.log(`Net profit: ${money(s.netProfit)}`);
   console.log(`Return: ${pct(s.returnPct)}`);
-  console.log(`Profit factor: ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 2) : 'Infinity'}`);
+  console.log(
+    `Profit factor: ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 2) : 'Infinity'}`
+  );
   console.log(`Sharpe: ${round(s.sharpe, 2)}`);
   console.log(`Avg trade: ${money(s.avgNetPnl)}`);
   console.log(`Avg win: ${money(s.avgWin)}`);
@@ -106,12 +108,14 @@ function printFilterDiagnostics(result: DailyUniverseBacktestResult): void {
   console.table(rows);
 
   const warmRate = f.symbolsSeen > 0 ? f.warmSymbols / f.symbolsSeen : 0;
-  const atrPassRate = (f.atrFilterPassed + f.atrFilterRejected) > 0
-    ? f.atrFilterPassed / (f.atrFilterPassed + f.atrFilterRejected)
-    : 0;
-  const acceptRate = (f.acceptedSignals + f.rejectedSignals) > 0
-    ? f.acceptedSignals / (f.acceptedSignals + f.rejectedSignals)
-    : 0;
+  const atrPassRate =
+    f.atrFilterPassed + f.atrFilterRejected > 0
+      ? f.atrFilterPassed / (f.atrFilterPassed + f.atrFilterRejected)
+      : 0;
+  const acceptRate =
+    f.acceptedSignals + f.rejectedSignals > 0
+      ? f.acceptedSignals / (f.acceptedSignals + f.rejectedSignals)
+      : 0;
   const selectRate = f.acceptedSignals > 0 ? f.selectedSignals / f.acceptedSignals : 0;
   const openRate = f.selectedSignals > 0 ? f.openedPositions / f.selectedSignals : 0;
 
@@ -146,6 +150,52 @@ function printMonthlyStats(result: DailyUniverseBacktestResult): void {
   console.table(rows);
 }
 
+function printRejectDiagnostics(result: DailyUniverseBacktestResult): void {
+  const r = result.diagnostics.rejects;
+
+  printHeader('REJECT DIAGNOSTICS');
+
+  const byReasonRows = Object.entries(r.rejectsByReason)
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, count]) => ({ reason, count }));
+
+  if (!byReasonRows.length) {
+    console.log('No reject diagnostics.');
+    return;
+  }
+
+  console.log('Reject reasons:');
+  console.table(byReasonRows);
+
+  const byMonthRows = Object.entries(r.rejectsByMonth)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([month, reasons]) => ({
+      month,
+      total: Object.values(reasons).reduce((sum, n) => sum + n, 0),
+      ...reasons
+    }));
+
+  if (byMonthRows.length) {
+    console.log('');
+    console.log('Reject reasons by month:');
+    console.table(byMonthRows);
+  }
+
+  const bySymbolRows = Object.entries(r.rejectsBySymbol)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([symbol, reasons]) => ({
+      symbol,
+      total: Object.values(reasons).reduce((sum, n) => sum + n, 0),
+      ...reasons
+    }));
+
+  if (bySymbolRows.length) {
+    console.log('');
+    console.log('Reject reasons by symbol:');
+    console.table(bySymbolRows);
+  }
+}
+
 function printTradesPreview(result: DailyUniverseBacktestResult, limit = 20): void {
   const trades = result.trades.slice(-limit);
 
@@ -175,6 +225,7 @@ function printTradesPreview(result: DailyUniverseBacktestResult, limit = 20): vo
 function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
   const f = result.diagnostics.filters;
   const months = result.diagnostics.months;
+  const rejects = result.diagnostics.rejects.rejectsByReason;
 
   printHeader('INTERPRETATION');
 
@@ -235,6 +286,17 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
     );
   }
 
+  const topRejects = Object.entries(rejects)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  if (topRejects.length) {
+    console.log('');
+    console.log(
+      `Топ причин отказа: ${topRejects.map(([k, v]) => `${k}=${v}`).join(', ')}`
+    );
+  }
+
   if (activeMonths.length > 0) {
     const firstHalf = months.slice(0, Math.floor(months.length / 2));
     const secondHalf = months.slice(Math.floor(months.length / 2));
@@ -285,6 +347,7 @@ async function main(): Promise<void> {
   printSelectionStats(result);
   printFilterDiagnostics(result);
   printMonthlyStats(result);
+  printRejectDiagnostics(result);
   printTradesPreview(result, 25);
   printSilenceDiagnosis(result);
 }
