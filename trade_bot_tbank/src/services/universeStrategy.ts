@@ -1,11 +1,11 @@
 import { EMA, ADX, ATR } from 'technicalindicators';
 import {
   Candle,
-  detectMarketRegime,
   MAX_RISK_PER_TRADE,
   STARTING_BALANCE,
   TP1_FRACTION
 } from './strategy';
+import { detectMarketState } from './marketState';
 
 export type UniverseSignalSide = 'long' | 'short' | 'none';
 
@@ -13,7 +13,11 @@ export interface UniverseSignal {
   symbol: string;
   side: UniverseSignalSide;
   regime: string;
+  state: 'resonant' | 'transition' | 'chaotic' | 'unknown';
+  sideBias: 'long' | 'short' | 'neutral';
+  coherence: number;
   score: number;
+  rawScore: number;
   price: number;
   stopLossPrice: number | null;
   takeProfit1Price: number | null;
@@ -23,14 +27,18 @@ export interface UniverseSignal {
   positionSize: number | null;
   tp1Fraction: number;
   initialR: number | null;
+  riskMultiplier: number;
   indicators: Record<string, unknown>;
 }
 
 export interface UniverseRankCandidate {
   symbol: string;
   score: number;
+  rawScore: number;
   side: 'long' | 'short';
   regime: string;
+  state: 'resonant' | 'transition' | 'chaotic' | 'unknown';
+  coherence: number;
   signal: UniverseSignal;
 }
 
@@ -70,7 +78,11 @@ function buildEmptySignal(symbol: string, price = 0): UniverseSignal {
     symbol,
     side: 'none',
     regime: 'unknown',
+    state: 'unknown',
+    sideBias: 'neutral',
+    coherence: 0,
     score: 0,
+    rawScore: 0,
     price,
     stopLossPrice: null,
     takeProfit1Price: null,
@@ -80,6 +92,7 @@ function buildEmptySignal(symbol: string, price = 0): UniverseSignal {
     positionSize: null,
     tp1Fraction: TP1_FRACTION,
     initialR: null,
+    riskMultiplier: 0,
     indicators: { ready: false }
   };
 }
@@ -92,15 +105,40 @@ function calcRelativeStrength(closes: number[], lookback: number): number {
   return (to - from) / from;
 }
 
+function getStateScoreMultiplier(
+  state: 'resonant' | 'transition' | 'chaotic',
+  coherence: number
+): number {
+  if (state === 'chaotic') return 0;
+  if (state === 'transition') {
+    return clamp(0.35 + coherence * 0.35, 0.35, 0.7);
+  }
+  return clamp(0.85 + coherence * 0.25, 0.85, 1.1);
+}
+
+function getStateRiskMultiplier(
+  state: 'resonant' | 'transition' | 'chaotic',
+  coherence: number
+): number {
+  if (state === 'chaotic') return 0;
+  if (state === 'transition') {
+    return clamp(0.25 + coherence * 0.35, 0.25, 0.5);
+  }
+  return clamp(0.75 + coherence * 0.35, 0.75, 1.0);
+}
+
 function calcScoreForSide(params: {
   side: 'long' | 'short';
-  closes: number[];
-  highs: number[];
-  lows: number[];
-  volumes: number[];
+  candles: Candle[];
   symbol: string;
 }): UniverseSignal {
-  const { side, closes, highs, lows, volumes, symbol } = params;
+  const { side, candles, symbol } = params;
+
+  const closes = candles.map(c => c.close);
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const volumes = candles.map(c => c.volume);
+
   const price = last(closes) ?? 0;
   if (!Number.isFinite(price) || price <= 0) return buildEmptySignal(symbol, price);
 
@@ -120,16 +158,12 @@ function calcScoreForSide(params: {
     return buildEmptySignal(symbol, price);
   }
 
-  const regimeInfo = detectMarketRegime(
-    closes.map((close, i) => ({
-      time: i,
-      open: closes[Math.max(i - 1, 0)] ?? close,
-      high: highs[i],
-      low: lows[i],
-      close,
-      volume: volumes[i]
-    }))
-  );
+  const stateInfo = detectMarketState(candles);
+  if (!stateInfo.ready) return buildEmptySignal(symbol, price);
+  if (stateInfo.state === 'chaotic') return buildEmptySignal(symbol, price);
+  if (stateInfo.sideBias !== 'neutral' && stateInfo.sideBias !== side) {
+    return buildEmptySignal(symbol, price);
+  }
 
   const lastEma20 = last(ema20);
   const prevEma20 = prev(ema20);
@@ -158,23 +192,23 @@ function calcScoreForSide(params: {
   const pullbackLong = price >= lastEma20 * 0.997 && price <= lastEma20 * 1.01;
   const pullbackShort = price <= lastEma20 * 1.003 && price >= lastEma20 * 0.99;
 
-  let score = 0;
+  let rawScore = 0;
   let sideOk = false;
 
   if (side === 'long') {
-    if (price > lastEma200) score += 1.2;
-    if (stackUp) score += 1.4;
-    if (emaSlope20 > 0) score += 0.8;
-    if (rs48 > 0.02) score += clamp(rs48 * 30, 0, 2.2);
-    if (rs16 > 0.005) score += clamp(rs16 * 40, 0, 1.2);
-    if (lastAdx.adx >= 18) score += 1.0;
-    if (adxRising) score += 0.6;
-    if (pullbackLong) score += 0.8;
-    if (nearEma20) score += 0.5;
-    if (volBoost >= 0.9 && volBoost <= 1.8) score += 0.4;
-    if (!notTooDead) score -= 1.0;
-    if (!notTooWild) score -= 1.2;
-    if (extension > 0.018) score -= 1.5;
+    if (price > lastEma200) rawScore += 1.2;
+    if (stackUp) rawScore += 1.4;
+    if (emaSlope20 > 0) rawScore += 0.8;
+    if (rs48 > 0.02) rawScore += clamp(rs48 * 30, 0, 2.2);
+    if (rs16 > 0.005) rawScore += clamp(rs16 * 40, 0, 1.2);
+    if (lastAdx.adx >= 18) rawScore += 1.0;
+    if (adxRising) rawScore += 0.6;
+    if (pullbackLong) rawScore += 0.8;
+    if (nearEma20) rawScore += 0.5;
+    if (volBoost >= 0.9 && volBoost <= 1.8) rawScore += 0.4;
+    if (!notTooDead) rawScore -= 1.0;
+    if (!notTooWild) rawScore -= 1.2;
+    if (extension > 0.018) rawScore -= 1.5;
 
     sideOk =
       price > lastEma200 &&
@@ -186,19 +220,19 @@ function calcScoreForSide(params: {
       notTooDead &&
       notTooWild;
   } else {
-    if (price < lastEma200) score += 1.2;
-    if (stackDown) score += 1.4;
-    if (emaSlope20 < 0) score += 0.8;
-    if (rs48 < -0.02) score += clamp(Math.abs(rs48) * 30, 0, 2.2);
-    if (rs16 < -0.005) score += clamp(Math.abs(rs16) * 40, 0, 1.2);
-    if (lastAdx.adx >= 18) score += 1.0;
-    if (adxRising) score += 0.6;
-    if (pullbackShort) score += 0.8;
-    if (nearEma20) score += 0.5;
-    if (volBoost >= 0.9 && volBoost <= 1.8) score += 0.4;
-    if (!notTooDead) score -= 1.0;
-    if (!notTooWild) score -= 1.2;
-    if (extension > 0.018) score -= 1.5;
+    if (price < lastEma200) rawScore += 1.2;
+    if (stackDown) rawScore += 1.4;
+    if (emaSlope20 < 0) rawScore += 0.8;
+    if (rs48 < -0.02) rawScore += clamp(Math.abs(rs48) * 30, 0, 2.2);
+    if (rs16 < -0.005) rawScore += clamp(Math.abs(rs16) * 40, 0, 1.2);
+    if (lastAdx.adx >= 18) rawScore += 1.0;
+    if (adxRising) rawScore += 0.6;
+    if (pullbackShort) rawScore += 0.8;
+    if (nearEma20) rawScore += 0.5;
+    if (volBoost >= 0.9 && volBoost <= 1.8) rawScore += 0.4;
+    if (!notTooDead) rawScore -= 1.0;
+    if (!notTooWild) rawScore -= 1.2;
+    if (extension > 0.018) rawScore -= 1.5;
 
     sideOk =
       price < lastEma200 &&
@@ -212,6 +246,22 @@ function calcScoreForSide(params: {
   }
 
   if (!sideOk) return buildEmptySignal(symbol, price);
+
+  const scoreMultiplier = getStateScoreMultiplier(
+    stateInfo.state,
+    stateInfo.coherence
+  );
+  const riskMultiplier = getStateRiskMultiplier(
+    stateInfo.state,
+    stateInfo.coherence
+  );
+
+  if (riskMultiplier <= 0 || scoreMultiplier <= 0) {
+    return buildEmptySignal(symbol, price);
+  }
+
+  const adjustedRaw = rawScore + stateInfo.coherence * 1.25;
+  const score = adjustedRaw * scoreMultiplier;
 
   const stopDistance = Math.max(lastAtr * 1.35, price * 0.0045);
   const stopLossPrice =
@@ -230,8 +280,12 @@ function calcScoreForSide(params: {
   return {
     symbol,
     side,
-    regime: regimeInfo.ready ? regimeInfo.regime : 'unknown',
+    regime: stateInfo.state,
+    state: stateInfo.state,
+    sideBias: stateInfo.sideBias,
+    coherence: round(stateInfo.coherence, 6),
     score: round(score, 4),
+    rawScore: round(adjustedRaw, 4),
     price: round(price),
     stopLossPrice: round(stopLossPrice),
     takeProfit1Price: round(takeProfit1Price),
@@ -241,6 +295,7 @@ function calcScoreForSide(params: {
     positionSize: null,
     tp1Fraction: TP1_FRACTION,
     initialR: round(initialR),
+    riskMultiplier: round(riskMultiplier, 6),
     indicators: {
       ready: true,
       rs48: round(rs48, 6),
@@ -254,7 +309,18 @@ function calcScoreForSide(params: {
       atr: round(lastAtr),
       atrPct: round(atrPct, 6),
       volBoost: round(volBoost, 4),
-      extension: round(extension, 6)
+      extension: round(extension, 6),
+      state: stateInfo.state,
+      sideBias: stateInfo.sideBias,
+      coherence: round(stateInfo.coherence, 6),
+      trendScore: stateInfo.trendScore,
+      adxScore: stateInfo.adxScore,
+      alignmentScore: stateInfo.alignmentScore,
+      noiseScore: stateInfo.noiseScore,
+      volatilityScore: stateInfo.volatilityScore,
+      volumeScore: stateInfo.volumeScore,
+      extensionScore: stateInfo.extensionScore,
+      stateDetails: stateInfo.details
     }
   };
 }
@@ -274,7 +340,12 @@ function applyRiskToSignal(
     return signal;
   }
 
-  const riskCapital = balance * riskPerTrade;
+  const effectiveRisk = riskPerTrade * signal.riskMultiplier;
+  if (!Number.isFinite(effectiveRisk) || effectiveRisk <= 0) {
+    return buildEmptySignal(signal.symbol, signal.price);
+  }
+
+  const riskCapital = balance * effectiveRisk;
   let quantity = Math.floor(riskCapital / signal.initialR);
 
   if (!Number.isFinite(quantity) || quantity < 1) quantity = 1;
@@ -300,18 +371,14 @@ export function rankUniverseCandidates(
   for (const [symbol, candles] of Object.entries(candlesBySymbol)) {
     if (!Array.isArray(candles) || candles.length < warmupCandles) continue;
 
-    const closes = candles.map(c => c.close);
-    const highs = candles.map(c => c.high);
-    const lows = candles.map(c => c.low);
-    const volumes = candles.map(c => c.volume);
-
     const longSignal = applyRiskToSignal(
-      calcScoreForSide({ side: 'long', closes, highs, lows, volumes, symbol }),
+      calcScoreForSide({ side: 'long', candles, symbol }),
       balance,
       riskPerTrade
     );
+
     const shortSignal = applyRiskToSignal(
-      calcScoreForSide({ side: 'short', closes, highs, lows, volumes, symbol }),
+      calcScoreForSide({ side: 'short', candles, symbol }),
       balance,
       riskPerTrade
     );
@@ -323,8 +390,11 @@ export function rankUniverseCandidates(
       ranked.push({
         symbol,
         score: best.score,
+        rawScore: best.rawScore,
         side: best.side as 'long' | 'short',
         regime: best.regime,
+        state: best.state,
+        coherence: best.coherence,
         signal: best
       });
     }
@@ -341,6 +411,7 @@ export function pickBestUniverseSignal(
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
   const ranked = rankUniverseCandidates(candlesBySymbol, balance, options);
   const best = ranked[0];
+
   if (!best || best.score < minScore) {
     const fallbackSymbol = Object.keys(candlesBySymbol)[0] ?? 'UNKNOWN';
     return buildEmptySignal(fallbackSymbol, 0);
