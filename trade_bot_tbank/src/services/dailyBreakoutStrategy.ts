@@ -11,6 +11,22 @@ export interface Candle {
 
 export type BreakoutSide = 'long' | 'short' | 'none';
 
+export type DailyBreakoutRejectReason =
+  | 'not_ready'
+  | 'indicator_not_ready'
+  | 'price_invalid'
+  | 'atr_too_low'
+  | 'atr_too_high'
+  | 'no_breakout_setup'
+  | 'long_not_allowed'
+  | 'short_not_allowed'
+  | 'long_not_above_sma20'
+  | 'short_not_below_sma20'
+  | 'long_no_prev_day_breakout'
+  | 'short_no_prev_day_breakout'
+  | 'breakout_too_far'
+  | 'risk_per_share_invalid';
+
 export interface DailyBreakoutSignal {
   symbol: string;
   side: BreakoutSide;
@@ -37,6 +53,10 @@ export interface DailyBreakoutSignal {
     atrPct: number | null;
     trailingAtrMult: number;
     stopAtrMult: number;
+    rejectReason?: DailyBreakoutRejectReason;
+    reject?: DailyBreakoutRejectReason;
+    failedConditions?: DailyBreakoutRejectReason[];
+    primaryFailedCondition?: DailyBreakoutRejectReason;
   };
 }
 
@@ -110,7 +130,23 @@ function resolveOptions(
   };
 }
 
-function buildEmptySignal(symbol: string): DailyBreakoutSignal {
+function buildEmptySignal(
+  symbol: string,
+  params: {
+    ready?: boolean;
+    rejectReason?: DailyBreakoutRejectReason;
+    failedConditions?: DailyBreakoutRejectReason[];
+    close?: number | null;
+    aboveSma20?: boolean;
+    belowSma20?: boolean;
+    atrPct?: number | null;
+    trailingAtrMult?: number;
+    stopAtrMult?: number;
+  } = {}
+): DailyBreakoutSignal {
+  const rejectReason = params.rejectReason ?? 'not_ready';
+  const failedConditions = params.failedConditions ?? [rejectReason];
+
   return {
     symbol,
     side: 'none',
@@ -130,13 +166,17 @@ function buildEmptySignal(symbol: string): DailyBreakoutSignal {
     breakoutDistancePct: null,
     regime: 'none',
     indicators: {
-      ready: false,
-      close: null,
-      aboveSma20: false,
-      belowSma20: false,
-      atrPct: null,
-      trailingAtrMult: DEFAULT_OPTIONS.trailingAtrMult,
-      stopAtrMult: DEFAULT_OPTIONS.stopAtrMult
+      ready: params.ready ?? false,
+      close: params.close ?? null,
+      aboveSma20: params.aboveSma20 ?? false,
+      belowSma20: params.belowSma20 ?? false,
+      atrPct: params.atrPct ?? null,
+      trailingAtrMult: params.trailingAtrMult ?? DEFAULT_OPTIONS.trailingAtrMult,
+      stopAtrMult: params.stopAtrMult ?? DEFAULT_OPTIONS.stopAtrMult,
+      rejectReason,
+      reject: rejectReason,
+      failedConditions,
+      primaryFailedCondition: failedConditions[0] ?? rejectReason
     }
   };
 }
@@ -158,7 +198,11 @@ export function analyzeDailyBreakout(
 
   const minBars = getDailyBreakoutWarmup(resolved);
   if (!Array.isArray(candles) || candles.length < minBars) {
-    return buildEmptySignal(symbol);
+    return buildEmptySignal(symbol, {
+      ready: false,
+      rejectReason: 'not_ready',
+      failedConditions: ['not_ready']
+    });
   }
 
   const closes = candles.map(c => c.close);
@@ -178,7 +222,11 @@ export function analyzeDailyBreakout(
   });
 
   if (!smaSeries.length || !atrSeries.length) {
-    return buildEmptySignal(symbol);
+    return buildEmptySignal(symbol, {
+      ready: false,
+      rejectReason: 'indicator_not_ready',
+      failedConditions: ['indicator_not_ready']
+    });
   }
 
   const current = last(candles);
@@ -187,12 +235,23 @@ export function analyzeDailyBreakout(
   const atr = last(atrSeries);
 
   if (!current || !prev || !Number.isFinite(sma20) || !Number.isFinite(atr)) {
-    return buildEmptySignal(symbol);
+    return buildEmptySignal(symbol, {
+      ready: false,
+      rejectReason: 'indicator_not_ready',
+      failedConditions: ['indicator_not_ready']
+    });
   }
 
   const price = current.close;
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(atr) || atr <= 0) {
-    return buildEmptySignal(symbol);
+    return buildEmptySignal(symbol, {
+      ready: true,
+      rejectReason: 'price_invalid',
+      failedConditions: ['price_invalid'],
+      close: Number.isFinite(price) ? round(price) : null,
+      trailingAtrMult: resolved.trailingAtrMult,
+      stopAtrMult: resolved.stopAtrMult
+    });
   }
 
   const prevDayHigh = prev.high;
@@ -202,21 +261,25 @@ export function analyzeDailyBreakout(
   const atrPct = atr / price;
 
   if (atrPct < resolved.minAtrPct || atrPct > resolved.maxAtrPct) {
+    const rejectReason: DailyBreakoutRejectReason =
+      atrPct < resolved.minAtrPct ? 'atr_too_low' : 'atr_too_high';
+
     return {
-      ...buildEmptySignal(symbol),
-      sma20: round(sma20),
-      atr: round(atr),
-      prevDayHigh: round(prevDayHigh),
-      prevDayLow: round(prevDayLow),
-      indicators: {
+      ...buildEmptySignal(symbol, {
         ready: true,
+        rejectReason,
+        failedConditions: [rejectReason],
         close: round(price),
         aboveSma20,
         belowSma20,
         atrPct: round(atrPct, 6),
         trailingAtrMult: resolved.trailingAtrMult,
         stopAtrMult: resolved.stopAtrMult
-      }
+      }),
+      sma20: round(sma20),
+      atr: round(atr),
+      prevDayHigh: round(prevDayHigh),
+      prevDayLow: round(prevDayLow)
     };
   }
 
@@ -238,44 +301,66 @@ export function analyzeDailyBreakout(
   }
 
   if (side === 'none' || entryPrice == null || reverseLevel == null) {
+    const failedConditions: DailyBreakoutRejectReason[] = [];
+
+    if (!resolved.allowLongs) {
+      failedConditions.push('long_not_allowed');
+    } else {
+      if (!aboveSma20) failedConditions.push('long_not_above_sma20');
+      if (!(current.high > prevDayHigh)) failedConditions.push('long_no_prev_day_breakout');
+    }
+
+    if (!resolved.allowShorts) {
+      failedConditions.push('short_not_allowed');
+    } else {
+      if (!belowSma20) failedConditions.push('short_not_below_sma20');
+      if (!(current.low < prevDayLow)) failedConditions.push('short_no_prev_day_breakout');
+    }
+
+    const normalizedFailedConditions = failedConditions.length
+      ? failedConditions
+      : ['no_breakout_setup'];
+
     return {
-      ...buildEmptySignal(symbol),
-      sma20: round(sma20),
-      atr: round(atr),
-      prevDayHigh: round(prevDayHigh),
-      prevDayLow: round(prevDayLow),
-      regime: 'none',
-      indicators: {
+      ...buildEmptySignal(symbol, {
         ready: true,
+        rejectReason: 'no_breakout_setup',
+        failedConditions: normalizedFailedConditions,
         close: round(price),
         aboveSma20,
         belowSma20,
         atrPct: round(atrPct, 6),
         trailingAtrMult: resolved.trailingAtrMult,
         stopAtrMult: resolved.stopAtrMult
-      }
+      }),
+      sma20: round(sma20),
+      atr: round(atr),
+      prevDayHigh: round(prevDayHigh),
+      prevDayLow: round(prevDayLow),
+      regime: 'none'
     };
   }
 
   const breakoutDistancePct = Math.abs(entryPrice - price) / price;
   if (breakoutDistancePct > resolved.maxBreakoutDistancePct) {
     return {
-      ...buildEmptySignal(symbol),
-      sma20: round(sma20),
-      atr: round(atr),
-      prevDayHigh: round(prevDayHigh),
-      prevDayLow: round(prevDayLow),
-      breakoutDistancePct: round(breakoutDistancePct, 6),
-      regime: 'none',
-      indicators: {
+      ...buildEmptySignal(symbol, {
         ready: true,
+        rejectReason: 'breakout_too_far',
+        failedConditions: ['breakout_too_far'],
         close: round(price),
         aboveSma20,
         belowSma20,
         atrPct: round(atrPct, 6),
         trailingAtrMult: resolved.trailingAtrMult,
         stopAtrMult: resolved.stopAtrMult
-      }
+      }),
+      sma20: round(sma20),
+      atr: round(atr),
+      prevDayHigh: round(prevDayHigh),
+      prevDayLow: round(prevDayLow),
+      breakoutDistancePct: round(breakoutDistancePct, 6),
+      regime: 'none'
     };
   }
 
@@ -291,7 +376,24 @@ export function analyzeDailyBreakout(
 
   const riskPerShare = Math.abs(entryPrice - stopLossPrice);
   if (!Number.isFinite(riskPerShare) || riskPerShare <= 0) {
-    return buildEmptySignal(symbol);
+    return {
+      ...buildEmptySignal(symbol, {
+        ready: true,
+        rejectReason: 'risk_per_share_invalid',
+        failedConditions: ['risk_per_share_invalid'],
+        close: round(price),
+        aboveSma20,
+        belowSma20,
+        atrPct: round(atrPct, 6),
+        trailingAtrMult: resolved.trailingAtrMult,
+        stopAtrMult: resolved.stopAtrMult
+      }),
+      sma20: round(sma20),
+      atr: round(atr),
+      prevDayHigh: round(prevDayHigh),
+      prevDayLow: round(prevDayLow),
+      regime: 'none'
+    };
   }
 
   const riskCapital = balance * resolved.riskPerTrade;
@@ -326,7 +428,11 @@ export function analyzeDailyBreakout(
       belowSma20,
       atrPct: round(atrPct, 6),
       trailingAtrMult: resolved.trailingAtrMult,
-      stopAtrMult: resolved.stopAtrMult
+      stopAtrMult: resolved.stopAtrMult,
+      rejectReason: undefined,
+      reject: undefined,
+      failedConditions: [],
+      primaryFailedCondition: undefined
     }
   };
 }
