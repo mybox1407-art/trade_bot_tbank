@@ -1,24 +1,40 @@
 import {
-  analyzeDailyBreakout,
-  buildDailyBreakoutPositionFromSignal,
   Candle,
-  DailyBreakoutOptions,
-  DailyBreakoutPosition,
-  DailyBreakoutSignal,
-  shouldExitDailyBreakoutPosition,
-  updateDailyBreakoutTrailingStop
-} from '../services/dailyBreakoutStrategy';
+  UniverseSignal,
+  UniverseStrategyOptions,
+  evaluateUniverseSymbol
+} from '../services/universeStrategy';
 
-export interface DailyUniverseBacktestOptions extends DailyBreakoutOptions {
+export interface DailyUniverseBacktestOptions extends UniverseStrategyOptions {
   startingBalance?: number;
   commissionRate?: number;
   warmupCandles?: number;
   progressLogEvery?: number;
   onePositionAtTime?: boolean;
   minSignalAtrPct?: number;
+  stopAtrMult?: number;
+  trailingAtrMult?: number;
+  minAtrPct?: number;
+  maxAtrPct?: number;
+  maxBreakoutDistancePct?: number;
+  allowLongs?: boolean;
+  allowShorts?: boolean;
 }
 
-interface OpenPosition extends DailyBreakoutPosition {
+interface OpenPosition {
+  symbol: string;
+  side: 'long' | 'short';
+  regime: string;
+  openedAt: number;
+  entryPrice: number;
+  stopLossPrice: number;
+  trailingStopPrice: number;
+  reverseLevel: number;
+  quantity: number;
+  positionSize: number;
+  initialR: number;
+  highestHigh: number;
+  lowestLow: number;
   balanceBefore: number;
   openIndex: number;
 }
@@ -26,7 +42,7 @@ interface OpenPosition extends DailyBreakoutPosition {
 export interface DailyUniverseTrade {
   symbol: string;
   side: 'long' | 'short';
-  regime: 'trend_up' | 'trend_down';
+  regime: string;
   openedAt: number;
   closedAt: number;
   entryPrice: number;
@@ -126,7 +142,7 @@ export interface DailyUniverseBacktestResult {
 }
 
 interface ScoredSignal {
-  signal: DailyBreakoutSignal;
+  signal: UniverseSignal;
   score: number;
 }
 
@@ -277,28 +293,72 @@ function incNestedCounter(
   map[outer][inner] = (map[outer][inner] ?? 0) + 1;
 }
 
-function extractRejectReason(signal: DailyBreakoutSignal): string {
-  const indicators = signal.indicators as Record<string, unknown> | undefined;
+function getIndicatorNumber(
+  signal: UniverseSignal,
+  key: string
+): number | null {
+  const value = signal.indicators?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function extractRejectReason(signal: UniverseSignal): string {
   const reason =
-    indicators?.rejectReason ??
-    indicators?.reject ??
+    signal.indicators?.rejectReason ??
+    signal.indicators?.reject ??
     (signal.side === 'none' ? 'side_none' : null);
 
   return typeof reason === 'string' && reason.trim() ? reason : 'unknown_reject';
 }
 
+function isTradableSignal(signal: UniverseSignal): boolean {
+  return !!(
+    signal.side !== 'none' &&
+    signal.price > 0 &&
+    signal.stopLossPrice != null &&
+    signal.quantity != null &&
+    signal.quantity > 0 &&
+    signal.positionSize != null &&
+    signal.positionSize > 0 &&
+    signal.initialR != null &&
+    signal.initialR > 0 &&
+    getIndicatorNumber(signal, 'atrPct') != null
+  );
+}
+
+function chooseSymbolSignal(
+  signals: UniverseSignal[]
+): UniverseSignal | null {
+  if (!signals.length) return null;
+
+  return signals.reduce((best, cur) => {
+    if (!best) return cur;
+
+    if (best.side === 'none' && cur.side !== 'none') return cur;
+    if (best.side !== 'none' && cur.side === 'none') return best;
+
+    if (cur.score !== best.score) {
+      return cur.score > best.score ? cur : best;
+    }
+
+    if (cur.rawScore !== best.rawScore) {
+      return cur.rawScore > best.rawScore ? cur : best;
+    }
+
+    return best;
+  }, signals[0]);
+}
+
 function pickBestSignal(
   visibleBySymbol: Record<string, Candle[]>,
   balance: number,
-  strategyOptions: DailyBreakoutOptions,
-  minSignalAtrPct: number,
+  strategyOptions: Required<DailyUniverseBacktestOptions>,
   filterStats: DailyFilterStats,
   monthStats: DailyMonthStats,
   rejectsByReason: Record<string, number>,
   rejectsByMonth: Record<string, Record<string, number>>,
   rejectsBySymbol: Record<string, Record<string, number>>
 ): {
-  best: DailyBreakoutSignal | null;
+  best: UniverseSignal | null;
   accepted: number;
   rejected: number;
 } {
@@ -309,24 +369,32 @@ function pickBestSignal(
   for (const [symbol, candles] of Object.entries(visibleBySymbol)) {
     filterStats.symbolsSeen += 1;
 
-    const warmupNeeded = Math.max(
-      (strategyOptions.smaPeriod ?? 20) + 2,
-      (strategyOptions.atrPeriod ?? 14) + 2,
-      30
-    );
-
+    const warmupNeeded = Math.max(strategyOptions.warmupCandles, 30);
     if (!Array.isArray(candles) || candles.length < warmupNeeded) {
       continue;
     }
 
     filterStats.warmSymbols += 1;
 
-    const signal = analyzeDailyBreakout(symbol, candles, balance, strategyOptions);
+    const evaluated = evaluateUniverseSymbol(symbol, candles, balance, {
+      riskPerTrade: strategyOptions.riskPerTrade,
+      minScore: strategyOptions.minScore,
+      warmupCandles: strategyOptions.warmupCandles
+    });
 
-    if (signal.indicators.ready && signal.indicators.atrPct != null) {
+    const candidates: UniverseSignal[] = [];
+    if (strategyOptions.allowLongs) candidates.push(evaluated.longSignal);
+    if (strategyOptions.allowShorts) candidates.push(evaluated.shortSignal);
+
+    const signal = chooseSymbolSignal(candidates);
+    if (!signal) continue;
+
+    const atrPct = getIndicatorNumber(signal, 'atrPct');
+
+    if (signal.indicators.ready && atrPct != null) {
       if (
-        signal.indicators.atrPct >= (strategyOptions.minAtrPct ?? 0) &&
-        signal.indicators.atrPct <= (strategyOptions.maxAtrPct ?? Number.POSITIVE_INFINITY)
+        atrPct >= strategyOptions.minAtrPct &&
+        atrPct <= strategyOptions.maxAtrPct
       ) {
         filterStats.atrFilterPassed += 1;
       } else {
@@ -342,15 +410,7 @@ function pickBestSignal(
       filterStats.shortCandidates += 1;
     }
 
-    if (
-      signal.side === 'none' ||
-      signal.entryPrice == null ||
-      signal.stopLossPrice == null ||
-      signal.quantity == null ||
-      signal.positionSize == null ||
-      signal.atr == null ||
-      signal.indicators.atrPct == null
-    ) {
+    if (!isTradableSignal(signal)) {
       const rejectReason = extractRejectReason(signal);
 
       rejected += 1;
@@ -364,7 +424,7 @@ function pickBestSignal(
       continue;
     }
 
-    if (signal.indicators.atrPct < minSignalAtrPct) {
+    if (atrPct == null || atrPct < strategyOptions.minSignalAtrPct) {
       const rejectReason = 'min_signal_atr_pct';
 
       rejected += 1;
@@ -382,9 +442,7 @@ function pickBestSignal(
     filterStats.acceptedSignals += 1;
     monthStats.acceptedSignals += 1;
 
-    const signalScore =
-      signal.indicators.atrPct * 100 +
-      ((signal.breakoutDistancePct != null ? 0.05 - signal.breakoutDistancePct : 0) * 10);
+    const signalScore = signal.score;
 
     if (!bestScored || signalScore > bestScored.score) {
       bestScored = {
@@ -404,6 +462,145 @@ function pickBestSignal(
     accepted,
     rejected
   };
+}
+
+function buildPositionFromSignal(
+  signal: UniverseSignal,
+  openedAt: number
+): OpenPosition | null {
+  if (!isTradableSignal(signal)) return null;
+
+  const ema20 = getIndicatorNumber(signal, 'ema20');
+  const reverseLevel =
+    ema20 != null && Number.isFinite(ema20)
+      ? ema20
+      : signal.stopLossPrice ?? signal.price;
+
+  return {
+    symbol: signal.symbol,
+    side: signal.side as 'long' | 'short',
+    regime: signal.regime,
+    openedAt,
+    entryPrice: signal.price,
+    stopLossPrice: signal.stopLossPrice as number,
+    trailingStopPrice: signal.stopLossPrice as number,
+    reverseLevel,
+    quantity: signal.quantity as number,
+    positionSize: signal.positionSize as number,
+    initialR: signal.initialR as number,
+    highestHigh: signal.price,
+    lowestLow: signal.price,
+    balanceBefore: 0,
+    openIndex: 0
+  };
+}
+
+function updatePositionTrailingStop(
+  position: OpenPosition,
+  candle: Candle,
+  options: Required<DailyUniverseBacktestOptions>
+): OpenPosition {
+  const trailFactor =
+    options.stopAtrMult > 0
+      ? options.trailingAtrMult / options.stopAtrMult
+      : 1;
+
+  const trailDistance = position.initialR * trailFactor;
+
+  if (position.side === 'long') {
+    const highestHigh = Math.max(position.highestHigh, candle.high);
+    const trailingStopPrice = Math.max(
+      position.trailingStopPrice,
+      highestHigh - trailDistance
+    );
+
+    return {
+      ...position,
+      highestHigh,
+      trailingStopPrice: round(trailingStopPrice)
+    };
+  }
+
+  const lowestLow = Math.min(position.lowestLow, candle.low);
+  const trailingStopPrice = Math.min(
+    position.trailingStopPrice,
+    lowestLow + trailDistance
+  );
+
+  return {
+    ...position,
+    lowestLow,
+    trailingStopPrice: round(trailingStopPrice)
+  };
+}
+
+function shouldExitPosition(
+  position: OpenPosition,
+  candle: Candle
+): {
+  exit: boolean;
+  exitPrice: number | null;
+  reason: DailyUniverseTrade['closeReason'] | null;
+} {
+  if (position.side === 'long') {
+    if (
+      position.trailingStopPrice > position.stopLossPrice &&
+      candle.low <= position.trailingStopPrice
+    ) {
+      return {
+        exit: true,
+        exitPrice: position.trailingStopPrice,
+        reason: 'trailing_stop'
+      };
+    }
+
+    if (candle.low <= position.stopLossPrice) {
+      return {
+        exit: true,
+        exitPrice: position.stopLossPrice,
+        reason: 'stop_loss'
+      };
+    }
+
+    if (candle.close < position.reverseLevel) {
+      return {
+        exit: true,
+        exitPrice: candle.close,
+        reason: 'reverse_signal'
+      };
+    }
+
+    return { exit: false, exitPrice: null, reason: null };
+  }
+
+  if (
+    position.trailingStopPrice < position.stopLossPrice &&
+    candle.high >= position.trailingStopPrice
+  ) {
+    return {
+      exit: true,
+      exitPrice: position.trailingStopPrice,
+      reason: 'trailing_stop'
+    };
+  }
+
+  if (candle.high >= position.stopLossPrice) {
+    return {
+      exit: true,
+      exitPrice: position.stopLossPrice,
+      reason: 'stop_loss'
+    };
+  }
+
+  if (candle.close > position.reverseLevel) {
+    return {
+      exit: true,
+      exitPrice: candle.close,
+      reason: 'reverse_signal'
+    };
+  }
+
+  return { exit: false, exitPrice: null, reason: null };
 }
 
 function buildTrade(params: {
@@ -542,13 +739,12 @@ export function runDailyUniverseBacktest(
     warmupCandles: options.warmupCandles ?? 30,
     progressLogEvery: options.progressLogEvery ?? 250,
     onePositionAtTime: options.onePositionAtTime ?? true,
-    minSignalAtrPct: options.minSignalAtrPct ?? 0.008,
+    minSignalAtrPct: options.minSignalAtrPct ?? 0.006,
     riskPerTrade: options.riskPerTrade ?? 0.01,
+    minScore: options.minScore ?? 4.0,
     stopAtrMult: options.stopAtrMult ?? 2.5,
     trailingAtrMult: options.trailingAtrMult ?? 2.0,
-    smaPeriod: options.smaPeriod ?? 20,
-    atrPeriod: options.atrPeriod ?? 14,
-    minAtrPct: options.minAtrPct ?? 0.008,
+    minAtrPct: options.minAtrPct ?? 0.006,
     maxAtrPct: options.maxAtrPct ?? 0.12,
     maxBreakoutDistancePct: options.maxBreakoutDistancePct ?? 0.04,
     allowLongs: options.allowLongs ?? true,
@@ -623,7 +819,6 @@ export function runDailyUniverseBacktest(
     signalsAccepted: 0,
     signalsRejected: 0
   };
-
   const filterStats: DailyFilterStats = {
     barsProcessed: 0,
     symbolsSeen: 0,
@@ -687,23 +882,13 @@ export function runDailyUniverseBacktest(
     }
 
     if (openPosition) {
-      const symbolCandles: Candle[] | undefined = visibleBySymbol[openPosition.symbol];
-      const candle: Candle | undefined = symbolCandles ? last(symbolCandles) : undefined;
+      const symbolCandles = visibleBySymbol[openPosition.symbol];
+      const candle = symbolCandles ? last(symbolCandles) : undefined;
       if (!candle) continue;
 
-      const updatedPosition: DailyBreakoutPosition = updateDailyBreakoutTrailingStop(
-        openPosition,
-        candle,
-        resolvedOptions
-      );
+      openPosition = updatePositionTrailingStop(openPosition, candle, resolvedOptions);
 
-      openPosition = {
-        ...updatedPosition,
-        balanceBefore: openPosition.balanceBefore,
-        openIndex: openPosition.openIndex
-      };
-
-      const exitCheck = shouldExitDailyBreakoutPosition(openPosition, candle);
+      const exitCheck = shouldExitPosition(openPosition, candle);
       if (exitCheck.exit && exitCheck.exitPrice != null && exitCheck.reason != null) {
         const trade = buildTrade({
           position: openPosition,
@@ -735,7 +920,6 @@ export function runDailyUniverseBacktest(
       visibleBySymbol,
       balance,
       resolvedOptions,
-      resolvedOptions.minSignalAtrPct,
       filterStats,
       currentMonthStats,
       rejectsByReason,
@@ -757,7 +941,7 @@ export function runDailyUniverseBacktest(
     selectionStats.pickedBySide[pick.best.side] =
       (selectionStats.pickedBySide[pick.best.side] ?? 0) + 1;
 
-    const built = buildDailyBreakoutPositionFromSignal(pick.best, ts);
+    const built = buildPositionFromSignal(pick.best, ts);
     if (!built) continue;
 
     filterStats.openedPositions += 1;
@@ -771,8 +955,8 @@ export function runDailyUniverseBacktest(
   }
 
   if (openPosition) {
-    const finalCandles: Candle[] = sortedBySymbol[openPosition.symbol];
-    const lastCandle: Candle = last(finalCandles);
+    const finalCandles = sortedBySymbol[openPosition.symbol];
+    const lastCandle = last(finalCandles);
     const finalMonthStats = ensureMonthStats(monthStatsMap, lastCandle.time);
 
     const trade = buildTrade({
@@ -806,9 +990,7 @@ export function runDailyUniverseBacktest(
     selectionStats,
     diagnostics: {
       filters: filterStats,
-      months: Object.values(monthStatsMap).sort((a, b) =>
-        a.month.localeCompare(b.month)
-      ),
+      months: Object.values(monthStatsMap).sort((a, b) => a.month.localeCompare(b.month)),
       rejects: {
         rejectsByReason,
         rejectsByMonth,
