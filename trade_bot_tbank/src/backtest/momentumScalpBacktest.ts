@@ -9,7 +9,7 @@ import {
   build5mIndicators,
   evaluateMomentumScalpEntryV2,
   floorToStep
-} from '../services/momentumScalpStrategyV2';
+} from '../services/momentumScalpStrategy';
 
 export type ExitReason = 'stop_loss' | 'take_profit' | 'time_stop' | 'end_of_data';
 
