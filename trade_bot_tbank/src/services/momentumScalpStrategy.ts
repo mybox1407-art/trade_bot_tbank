@@ -139,8 +139,13 @@ function padSeries(values: number[], totalLength: number): Array<number | null> 
   const missing = totalLength - values.length;
   const result: Array<number | null> = [];
 
-  for (let i = 0; i < missing; i++) result.push(null);
-  for (const v of values) result.push(v);
+  for (let i = 0; i < missing; i++) {
+    result.push(null);
+  }
+
+  for (const v of values) {
+    result.push(v);
+  }
 
   return result;
 }
@@ -179,9 +184,10 @@ export function aggregateCandlesTo5m(candles: Candle[]): Candle[] {
     const bucketStart = Math.floor(candle.time / (5 * 60 * 1000)) * (5 * 60 * 1000);
 
     if (currentBucketStart === null || bucketStart !== currentBucketStart) {
-      if (bucket.length > 0) {
+      if (bucket.length > 0 && currentBucketStart !== null) {
         result.push(mergeBucket(bucket, currentBucketStart));
       }
+
       bucket = [candle];
       currentBucketStart = bucketStart;
     } else {
@@ -273,8 +279,14 @@ export function build5mIndicators(
   const atrSmaSeriesRaw = padSeries(atrSmaRaw, atrRaw.length);
   const atrSmaSeries: Array<number | null> = [];
   const atrMissing = candles5m.length - atrRaw.length;
-  for (let i = 0; i < atrMissing; i++) atrSmaSeries.push(null);
-  for (const v of atrSmaSeriesRaw) atrSmaSeries.push(v);
+
+  for (let i = 0; i < atrMissing; i++) {
+    atrSmaSeries.push(null);
+  }
+
+  for (const v of atrSmaSeriesRaw) {
+    atrSmaSeries.push(v);
+  }
 
   const result: BarIndicators5m[] = [];
 
@@ -302,6 +314,7 @@ export function map1mIndexTo5mIndex(candleTime: number, candles5m: Candle[]): nu
 
   while (left <= right) {
     const mid = Math.floor((left + right) / 2);
+
     if (candles5m[mid].time <= bucketStart) {
       ans = mid;
       left = mid + 1;
@@ -340,17 +353,21 @@ function calcDistancePct(a: number, b: number): number {
 
 function highestHigh(candles: Candle[], from: number, to: number): number {
   let h = -Infinity;
+
   for (let i = from; i <= to; i++) {
     if (candles[i].high > h) h = candles[i].high;
   }
+
   return h;
 }
 
 function lowestLow(candles: Candle[], from: number, to: number): number {
   let l = Infinity;
+
   for (let i = from; i <= to; i++) {
     if (candles[i].low < l) l = candles[i].low;
   }
+
   return l;
 }
 
@@ -439,8 +456,10 @@ export function evaluateMomentumScalpEntry(
     return { accepted: false, reason: 'too_far_from_vwap' };
   }
 
-  const is5mLongTrend = ctx5m.emaFast5m > ctx5m.emaSlow5m && ctx5m.close5m > ctx5m.emaFast5m;
-  const is5mShortTrend = ctx5m.emaFast5m < ctx5m.emaSlow5m && ctx5m.close5m < ctx5m.emaFast5m;
+  const is5mLongTrend =
+    ctx5m.emaFast5m > ctx5m.emaSlow5m && ctx5m.close5m > ctx5m.emaFast5m;
+  const is5mShortTrend =
+    ctx5m.emaFast5m < ctx5m.emaSlow5m && ctx5m.close5m < ctx5m.emaFast5m;
 
   const recentHigh = highestHigh(
     candles1m,
@@ -453,8 +472,16 @@ export function evaluateMomentumScalpEntry(
     signalIndex - 1
   );
 
-  const longPullbackPct = detectPullbackLong(candles1m, signalIndex, params.pullbackLookback1m);
-  const shortPullbackPct = detectPullbackShort(candles1m, signalIndex, params.pullbackLookback1m);
+  const longPullbackPct = detectPullbackLong(
+    candles1m,
+    signalIndex,
+    params.pullbackLookback1m
+  );
+  const shortPullbackPct = detectPullbackShort(
+    candles1m,
+    signalIndex,
+    params.pullbackLookback1m
+  );
 
   const longBreakoutLevel = recentHigh * (1 + params.breakoutBufferPct);
   const shortBreakoutLevel = recentLow * (1 - params.breakoutBufferPct);
@@ -470,18 +497,23 @@ export function evaluateMomentumScalpEntry(
     if (longPullbackPct === null || longPullbackPct < params.minPullbackPct) {
       return { accepted: false, reason: 'pullback_too_small' };
     }
+
     if (!longBreakout) {
       return { accepted: false, reason: 'breakout_missing' };
     }
 
-    const entryPrice = Math.max(entryCandle.open, longBreakoutLevel) * (1 + params.slippageRate);
+    const entryPrice =
+      Math.max(entryCandle.open, longBreakoutLevel) * (1 + params.slippageRate);
     const stopDistance = ind1m.atr1m * params.atrSlMult;
     const stopLossPrice = entryPrice - stopDistance;
     const takeProfitPrice = entryPrice + ind1m.atr1m * params.atrTpMult;
     const targetMovePct = (takeProfitPrice - entryPrice) / entryPrice;
-    const costPct = (params.commissionRate * 2) + (params.slippageRate * 2);
+    const costPct = params.commissionRate * 2 + params.slippageRate * 2;
 
-    if (targetMovePct < params.minTargetMovePct || targetMovePct < costPct * params.minCostCoverage) {
+    if (
+      targetMovePct < params.minTargetMovePct ||
+      targetMovePct < costPct * params.minCostCoverage
+    ) {
       return { accepted: false, reason: 'target_too_small_for_costs' };
     }
 
@@ -511,18 +543,23 @@ export function evaluateMomentumScalpEntry(
     if (shortPullbackPct === null || shortPullbackPct < params.minPullbackPct) {
       return { accepted: false, reason: 'pullback_too_small' };
     }
+
     if (!shortBreakout) {
       return { accepted: false, reason: 'breakout_missing' };
     }
 
-    const entryPrice = Math.min(entryCandle.open, shortBreakoutLevel) * (1 - params.slippageRate);
+    const entryPrice =
+      Math.min(entryCandle.open, shortBreakoutLevel) * (1 - params.slippageRate);
     const stopDistance = ind1m.atr1m * params.atrSlMult;
     const stopLossPrice = entryPrice + stopDistance;
     const takeProfitPrice = entryPrice - ind1m.atr1m * params.atrTpMult;
     const targetMovePct = (entryPrice - takeProfitPrice) / entryPrice;
-    const costPct = (params.commissionRate * 2) + (params.slippageRate * 2);
+    const costPct = params.commissionRate * 2 + params.slippageRate * 2;
 
-    if (targetMovePct < params.minTargetMovePct || targetMovePct < costPct * params.minCostCoverage) {
+    if (
+      targetMovePct < params.minTargetMovePct ||
+      targetMovePct < costPct * params.minCostCoverage
+    ) {
       return { accepted: false, reason: 'target_too_small_for_costs' };
     }
 
