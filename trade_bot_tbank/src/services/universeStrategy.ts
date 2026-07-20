@@ -13,21 +13,41 @@ export type UniverseRejectReason =
   | 'state_not_ready'
   | 'state_chaotic'
   | 'side_bias_mismatch'
+  | 'long_side_bias_short'
+  | 'short_side_bias_long'
   | 'price_invalid'
   | 'long_conditions_failed'
   | 'short_conditions_failed'
+  | 'long_below_ema200'
+  | 'long_stack_not_up'
+  | 'long_ema_slope_nonpositive'
+  | 'long_adx_too_low'
+  | 'long_no_pullback'
+  | 'long_too_far_from_ema20'
+  | 'short_above_ema200'
+  | 'short_stack_not_down'
+  | 'short_ema_slope_nonnegative'
+  | 'short_adx_too_low'
+  | 'short_no_pullback'
+  | 'short_too_far_from_ema20'
+  | 'atr_too_low'
+  | 'atr_too_high'
+  | 'extension_too_large'
   | 'risk_multiplier_zero'
   | 'initial_r_invalid'
   | 'risk_invalid'
   | 'min_score'
   | 'no_ranked_candidates';
 
+type UniverseState = 'resonant' | 'transition' | 'chaotic' | 'unknown';
+type UniverseSideBias = 'long' | 'short' | 'neutral';
+
 export interface UniverseSignal {
   symbol: string;
   side: UniverseSignalSide;
   regime: string;
-  state: 'resonant' | 'transition' | 'chaotic' | 'unknown';
-  sideBias: 'long' | 'short' | 'neutral';
+  state: UniverseState;
+  sideBias: UniverseSideBias;
   coherence: number;
   score: number;
   rawScore: number;
@@ -53,7 +73,7 @@ export interface UniverseRankCandidate {
   rawScore: number;
   side: 'long' | 'short';
   regime: string;
-  state: 'resonant' | 'transition' | 'chaotic' | 'unknown';
+  state: UniverseState;
   coherence: number;
   signal: UniverseSignal;
 }
@@ -93,7 +113,8 @@ function buildEmptySignal(
   symbol: string,
   price = 0,
   rejectReason: UniverseRejectReason = 'not_ready',
-  extraIndicators: Record<string, unknown> = {}
+  extraIndicators: Record<string, unknown> = {},
+  ready = false
 ): UniverseSignal {
   return {
     symbol,
@@ -115,7 +136,59 @@ function buildEmptySignal(
     initialR: null,
     riskMultiplier: 0,
     indicators: {
-      ready: false,
+      ready,
+      rejectReason,
+      ...extraIndicators
+    }
+  };
+}
+
+function buildRejectedSignal(params: {
+  symbol: string;
+  price: number;
+  rejectReason: UniverseRejectReason;
+  regime: string;
+  state: UniverseState;
+  sideBias: UniverseSideBias;
+  coherence: number;
+  score?: number;
+  rawScore?: number;
+  extraIndicators?: Record<string, unknown>;
+}): UniverseSignal {
+  const {
+    symbol,
+    price,
+    rejectReason,
+    regime,
+    state,
+    sideBias,
+    coherence,
+    score = 0,
+    rawScore = 0,
+    extraIndicators = {}
+  } = params;
+
+  return {
+    symbol,
+    side: 'none',
+    regime,
+    state,
+    sideBias,
+    coherence: round(coherence, 6),
+    score: round(score, 4),
+    rawScore: round(rawScore, 4),
+    price: round(price),
+    stopLossPrice: null,
+    takeProfit1Price: null,
+    takeProfit2Price: null,
+    takeProfitPrice: null,
+    quantity: null,
+    positionSize: null,
+    tp1Fraction: TP1_FRACTION,
+    initialR: null,
+    riskMultiplier: 0,
+    indicators: {
+      ready: true,
       rejectReason,
       ...extraIndicators
     }
@@ -150,6 +223,137 @@ function getStateRiskMultiplier(
     return clamp(0.25 + coherence * 0.35, 0.25, 0.5);
   }
   return clamp(0.75 + coherence * 0.35, 0.75, 1.0);
+}
+
+function pickFirstReason(
+  failed: UniverseRejectReason[],
+  priority: UniverseRejectReason[],
+  fallback: UniverseRejectReason
+): UniverseRejectReason {
+  for (const reason of priority) {
+    if (failed.includes(reason)) return reason;
+  }
+  return fallback;
+}
+
+function resolveLongRejectReason(params: {
+  price: number;
+  lastEma200: number;
+  stackUp: boolean;
+  emaSlope20: number;
+  adx: number;
+  pullbackLong: boolean;
+  nearEma20: boolean;
+  notTooDead: boolean;
+  notTooWild: boolean;
+  extension: number;
+}): {
+  rejectReason: UniverseRejectReason;
+  failedConditions: UniverseRejectReason[];
+} {
+  const {
+    price,
+    lastEma200,
+    stackUp,
+    emaSlope20,
+    adx,
+    pullbackLong,
+    nearEma20,
+    notTooDead,
+    notTooWild,
+    extension
+  } = params;
+
+  const failed: UniverseRejectReason[] = [];
+
+  if (!notTooDead) failed.push('atr_too_low');
+  if (!notTooWild) failed.push('atr_too_high');
+  if (price <= lastEma200) failed.push('long_below_ema200');
+  if (!stackUp) failed.push('long_stack_not_up');
+  if (emaSlope20 <= 0) failed.push('long_ema_slope_nonpositive');
+  if (adx < 18) failed.push('long_adx_too_low');
+  if (!pullbackLong) failed.push('long_no_pullback');
+  if (!nearEma20) failed.push('long_too_far_from_ema20');
+  if (extension > 0.018) failed.push('extension_too_large');
+
+  return {
+    rejectReason: pickFirstReason(
+      failed,
+      [
+        'atr_too_low',
+        'atr_too_high',
+        'long_below_ema200',
+        'long_stack_not_up',
+        'long_ema_slope_nonpositive',
+        'long_adx_too_low',
+        'long_no_pullback',
+        'long_too_far_from_ema20',
+        'extension_too_large'
+      ],
+      'long_conditions_failed'
+    ),
+    failedConditions: failed.length ? failed : ['long_conditions_failed']
+  };
+}
+
+function resolveShortRejectReason(params: {
+  price: number;
+  lastEma200: number;
+  stackDown: boolean;
+  emaSlope20: number;
+  adx: number;
+  pullbackShort: boolean;
+  nearEma20: boolean;
+  notTooDead: boolean;
+  notTooWild: boolean;
+  extension: number;
+}): {
+  rejectReason: UniverseRejectReason;
+  failedConditions: UniverseRejectReason[];
+} {
+  const {
+    price,
+    lastEma200,
+    stackDown,
+    emaSlope20,
+    adx,
+    pullbackShort,
+    nearEma20,
+    notTooDead,
+    notTooWild,
+    extension
+  } = params;
+
+  const failed: UniverseRejectReason[] = [];
+
+  if (!notTooDead) failed.push('atr_too_low');
+  if (!notTooWild) failed.push('atr_too_high');
+  if (price >= lastEma200) failed.push('short_above_ema200');
+  if (!stackDown) failed.push('short_stack_not_down');
+  if (emaSlope20 >= 0) failed.push('short_ema_slope_nonnegative');
+  if (adx < 18) failed.push('short_adx_too_low');
+  if (!pullbackShort) failed.push('short_no_pullback');
+  if (!nearEma20) failed.push('short_too_far_from_ema20');
+  if (extension > 0.018) failed.push('extension_too_large');
+
+  return {
+    rejectReason: pickFirstReason(
+      failed,
+      [
+        'atr_too_low',
+        'atr_too_high',
+        'short_above_ema200',
+        'short_stack_not_down',
+        'short_ema_slope_nonnegative',
+        'short_adx_too_low',
+        'short_no_pullback',
+        'short_too_far_from_ema20',
+        'extension_too_large'
+      ],
+      'short_conditions_failed'
+    ),
+    failedConditions: failed.length ? failed : ['short_conditions_failed']
+  };
 }
 
 function calcScoreForSide(params: {
@@ -198,19 +402,41 @@ function calcScoreForSide(params: {
   }
 
   if (stateInfo.state === 'chaotic') {
-    return buildEmptySignal(symbol, price, 'state_chaotic', {
+    return buildRejectedSignal({
+      symbol,
+      price,
+      rejectReason: 'state_chaotic',
+      regime: stateInfo.state,
       state: stateInfo.state,
       sideBias: stateInfo.sideBias,
-      coherence: round(stateInfo.coherence ?? 0, 6)
+      coherence: stateInfo.coherence ?? 0,
+      extraIndicators: {
+        requestedSide: side,
+        state: stateInfo.state,
+        sideBias: stateInfo.sideBias,
+        coherence: round(stateInfo.coherence ?? 0, 6)
+      }
     });
   }
 
   if (stateInfo.sideBias !== 'neutral' && stateInfo.sideBias !== side) {
-    return buildEmptySignal(symbol, price, 'side_bias_mismatch', {
-      requestedSide: side,
-      sideBias: stateInfo.sideBias,
+    const rejectReason: UniverseRejectReason =
+      side === 'long' ? 'long_side_bias_short' : 'short_side_bias_long';
+
+    return buildRejectedSignal({
+      symbol,
+      price,
+      rejectReason,
+      regime: stateInfo.state,
       state: stateInfo.state,
-      coherence: round(stateInfo.coherence ?? 0, 6)
+      sideBias: stateInfo.sideBias,
+      coherence: stateInfo.coherence ?? 0,
+      extraIndicators: {
+        requestedSide: side,
+        sideBias: stateInfo.sideBias,
+        state: stateInfo.state,
+        coherence: round(stateInfo.coherence ?? 0, 6)
+      }
     });
   }
 
@@ -244,6 +470,41 @@ function calcScoreForSide(params: {
   let rawScore = 0;
   let sideOk = false;
 
+  const commonIndicators = {
+    requestedSide: side,
+    rs48: round(rs48, 6),
+    rs16: round(rs16, 6),
+    ema20: round(lastEma20),
+    ema50: round(lastEma50),
+    ema200: round(lastEma200),
+    priceVsEma200: lastEma200 > 0 ? round(price / lastEma200, 6) : 0,
+    emaSlope20: round(emaSlope20, 6),
+    adx: round(lastAdx.adx, 4),
+    adxRising,
+    atr: round(lastAtr),
+    atrPct: round(atrPct, 6),
+    volBoost: round(volBoost, 4),
+    extension: round(extension, 6),
+    nearEma20,
+    notTooDead,
+    notTooWild,
+    stackUp,
+    stackDown,
+    pullbackLong,
+    pullbackShort,
+    state: stateInfo.state,
+    sideBias: stateInfo.sideBias,
+    coherence: round(stateInfo.coherence, 6),
+    trendScore: stateInfo.trendScore,
+    adxScore: stateInfo.adxScore,
+    alignmentScore: stateInfo.alignmentScore,
+    noiseScore: stateInfo.noiseScore,
+    volatilityScore: stateInfo.volatilityScore,
+    volumeScore: stateInfo.volumeScore,
+    extensionScore: stateInfo.extensionScore,
+    stateDetails: stateInfo.details
+  };
+
   if (side === 'long') {
     if (price > lastEma200) rawScore += 1.2;
     if (stackUp) rawScore += 1.4;
@@ -270,25 +531,34 @@ function calcScoreForSide(params: {
       notTooWild;
 
     if (!sideOk) {
-      return buildEmptySignal(symbol, price, 'long_conditions_failed', {
-        requestedSide: side,
-        priceVsEma200: round(price / lastEma200, 6),
+      const { rejectReason, failedConditions } = resolveLongRejectReason({
+        price,
+        lastEma200,
         stackUp,
-        emaSlope20: round(emaSlope20, 6),
-        adx: round(lastAdx.adx, 4),
-        adxRising,
+        emaSlope20,
+        adx: lastAdx.adx,
         pullbackLong,
         nearEma20,
         notTooDead,
         notTooWild,
-        atrPct: round(atrPct, 6),
-        extension: round(extension, 6),
-        rs48: round(rs48, 6),
-        rs16: round(rs16, 6),
-        volBoost: round(volBoost, 4),
-        rawScore: round(rawScore, 4),
+        extension
+      });
+
+      return buildRejectedSignal({
+        symbol,
+        price,
+        rejectReason,
+        regime: stateInfo.state,
         state: stateInfo.state,
-        coherence: round(stateInfo.coherence, 6)
+        sideBias: stateInfo.sideBias,
+        coherence: stateInfo.coherence,
+        rawScore,
+        extraIndicators: {
+          ...commonIndicators,
+          rawScore: round(rawScore, 4),
+          failedConditions,
+          primaryFailedCondition: rejectReason
+        }
       });
     }
   } else {
@@ -317,25 +587,34 @@ function calcScoreForSide(params: {
       notTooWild;
 
     if (!sideOk) {
-      return buildEmptySignal(symbol, price, 'short_conditions_failed', {
-        requestedSide: side,
-        priceVsEma200: round(price / lastEma200, 6),
+      const { rejectReason, failedConditions } = resolveShortRejectReason({
+        price,
+        lastEma200,
         stackDown,
-        emaSlope20: round(emaSlope20, 6),
-        adx: round(lastAdx.adx, 4),
-        adxRising,
+        emaSlope20,
+        adx: lastAdx.adx,
         pullbackShort,
         nearEma20,
         notTooDead,
         notTooWild,
-        atrPct: round(atrPct, 6),
-        extension: round(extension, 6),
-        rs48: round(rs48, 6),
-        rs16: round(rs16, 6),
-        volBoost: round(volBoost, 4),
-        rawScore: round(rawScore, 4),
+        extension
+      });
+
+      return buildRejectedSignal({
+        symbol,
+        price,
+        rejectReason,
+        regime: stateInfo.state,
         state: stateInfo.state,
-        coherence: round(stateInfo.coherence, 6)
+        sideBias: stateInfo.sideBias,
+        coherence: stateInfo.coherence,
+        rawScore,
+        extraIndicators: {
+          ...commonIndicators,
+          rawScore: round(rawScore, 4),
+          failedConditions,
+          primaryFailedCondition: rejectReason
+        }
       });
     }
   }
@@ -350,11 +629,21 @@ function calcScoreForSide(params: {
   );
 
   if (riskMultiplier <= 0 || scoreMultiplier <= 0) {
-    return buildEmptySignal(symbol, price, 'risk_multiplier_zero', {
-      scoreMultiplier: round(scoreMultiplier, 6),
-      riskMultiplier: round(riskMultiplier, 6),
+    return buildRejectedSignal({
+      symbol,
+      price,
+      rejectReason: 'risk_multiplier_zero',
+      regime: stateInfo.state,
       state: stateInfo.state,
-      coherence: round(stateInfo.coherence, 6)
+      sideBias: stateInfo.sideBias,
+      coherence: stateInfo.coherence,
+      rawScore,
+      extraIndicators: {
+        ...commonIndicators,
+        rawScore: round(rawScore, 4),
+        scoreMultiplier: round(scoreMultiplier, 6),
+        riskMultiplier: round(riskMultiplier, 6)
+      }
     });
   }
 
@@ -367,10 +656,25 @@ function calcScoreForSide(params: {
   const initialR = Math.abs(price - stopLossPrice);
 
   if (!Number.isFinite(initialR) || initialR <= 0) {
-    return buildEmptySignal(symbol, price, 'initial_r_invalid', {
-      stopDistance: round(stopDistance, 8),
-      stopLossPrice: round(stopLossPrice, 8),
-      initialR
+    return buildRejectedSignal({
+      symbol,
+      price,
+      rejectReason: 'initial_r_invalid',
+      regime: stateInfo.state,
+      state: stateInfo.state,
+      sideBias: stateInfo.sideBias,
+      coherence: stateInfo.coherence,
+      score,
+      rawScore: adjustedRaw,
+      extraIndicators: {
+        ...commonIndicators,
+        scoreMultiplier: round(scoreMultiplier, 6),
+        riskMultiplier: round(riskMultiplier, 6),
+        adjustedRaw: round(adjustedRaw, 4),
+        stopDistance: round(stopDistance, 8),
+        stopLossPrice: round(stopLossPrice, 8),
+        initialR
+      }
     });
   }
 
@@ -382,7 +686,6 @@ function calcScoreForSide(params: {
   return {
     symbol,
     side,
-    // Пока detectMarketState не отдаёт отдельный regime, используем state как alias.
     regime: stateInfo.state,
     state: stateInfo.state,
     sideBias: stateInfo.sideBias,
@@ -402,29 +705,10 @@ function calcScoreForSide(params: {
     indicators: {
       ready: true,
       rejectReason: undefined,
-      rs48: round(rs48, 6),
-      rs16: round(rs16, 6),
-      ema20: round(lastEma20),
-      ema50: round(lastEma50),
-      ema200: round(lastEma200),
-      emaSlope20: round(emaSlope20, 6),
-      adx: round(lastAdx.adx, 4),
-      adxRising,
-      atr: round(lastAtr),
-      atrPct: round(atrPct, 6),
-      volBoost: round(volBoost, 4),
-      extension: round(extension, 6),
-      state: stateInfo.state,
-      sideBias: stateInfo.sideBias,
-      coherence: round(stateInfo.coherence, 6),
-      trendScore: stateInfo.trendScore,
-      adxScore: stateInfo.adxScore,
-      alignmentScore: stateInfo.alignmentScore,
-      noiseScore: stateInfo.noiseScore,
-      volatilityScore: stateInfo.volatilityScore,
-      volumeScore: stateInfo.volumeScore,
-      extensionScore: stateInfo.extensionScore,
-      stateDetails: stateInfo.details
+      ...commonIndicators,
+      scoreMultiplier: round(scoreMultiplier, 6),
+      riskMultiplier: round(riskMultiplier, 6),
+      rawScore: round(adjustedRaw, 4)
     }
   };
 }
@@ -446,11 +730,23 @@ function applyRiskToSignal(
 
   const effectiveRisk = riskPerTrade * signal.riskMultiplier;
   if (!Number.isFinite(effectiveRisk) || effectiveRisk <= 0) {
-    return buildEmptySignal(signal.symbol, signal.price, 'risk_invalid', {
-      side: signal.side,
-      riskPerTrade,
-      riskMultiplier: signal.riskMultiplier,
-      effectiveRisk
+    return buildRejectedSignal({
+      symbol: signal.symbol,
+      price: signal.price,
+      rejectReason: 'risk_invalid',
+      regime: signal.regime,
+      state: signal.state,
+      sideBias: signal.sideBias,
+      coherence: signal.coherence,
+      score: signal.score,
+      rawScore: signal.rawScore,
+      extraIndicators: {
+        ...signal.indicators,
+        side: signal.side,
+        riskPerTrade,
+        riskMultiplier: signal.riskMultiplier,
+        effectiveRisk
+      }
     });
   }
 
@@ -544,13 +840,24 @@ export function pickBestUniverseSignal(
 
   if (best.score < minScore) {
     return {
-      ...buildEmptySignal(best.symbol, best.signal.price, 'min_score', {
-        minScore,
-        bestScore: best.score,
-        bestRawScore: best.rawScore,
-        bestSide: best.side,
-        bestState: best.state,
-        bestCoherence: best.coherence
+      ...buildRejectedSignal({
+        symbol: best.symbol,
+        price: best.signal.price,
+        rejectReason: 'min_score',
+        regime: best.signal.regime,
+        state: best.signal.state,
+        sideBias: best.signal.sideBias,
+        coherence: best.signal.coherence,
+        score: best.signal.score,
+        rawScore: best.signal.rawScore,
+        extraIndicators: {
+          minScore,
+          bestScore: best.score,
+          bestRawScore: best.rawScore,
+          bestSide: best.side,
+          bestState: best.state,
+          bestCoherence: best.coherence
+        }
       }),
       symbol: best.symbol,
       regime: best.signal.regime,
