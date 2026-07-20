@@ -8,6 +8,19 @@ import {
 import { detectMarketState } from './marketState';
 
 export type UniverseSignalSide = 'long' | 'short' | 'none';
+export type UniverseRejectReason =
+  | 'not_ready'
+  | 'state_not_ready'
+  | 'state_chaotic'
+  | 'side_bias_mismatch'
+  | 'price_invalid'
+  | 'long_conditions_failed'
+  | 'short_conditions_failed'
+  | 'risk_multiplier_zero'
+  | 'initial_r_invalid'
+  | 'risk_invalid'
+  | 'min_score'
+  | 'no_ranked_candidates';
 
 export interface UniverseSignal {
   symbol: string;
@@ -28,7 +41,10 @@ export interface UniverseSignal {
   tp1Fraction: number;
   initialR: number | null;
   riskMultiplier: number;
-  indicators: Record<string, unknown>;
+  indicators: Record<string, unknown> & {
+    ready?: boolean;
+    rejectReason?: UniverseRejectReason;
+  };
 }
 
 export interface UniverseRankCandidate {
@@ -73,7 +89,12 @@ function round(value: number, digits = 8): number {
   return Math.round(value * factor) / factor;
 }
 
-function buildEmptySignal(symbol: string, price = 0): UniverseSignal {
+function buildEmptySignal(
+  symbol: string,
+  price = 0,
+  rejectReason: UniverseRejectReason = 'not_ready',
+  extraIndicators: Record<string, unknown> = {}
+): UniverseSignal {
   return {
     symbol,
     side: 'none',
@@ -93,7 +114,11 @@ function buildEmptySignal(symbol: string, price = 0): UniverseSignal {
     tp1Fraction: TP1_FRACTION,
     initialR: null,
     riskMultiplier: 0,
-    indicators: { ready: false }
+    indicators: {
+      ready: false,
+      rejectReason,
+      ...extraIndicators
+    }
   };
 }
 
@@ -140,7 +165,9 @@ function calcScoreForSide(params: {
   const volumes = candles.map(c => c.volume);
 
   const price = last(closes) ?? 0;
-  if (!Number.isFinite(price) || price <= 0) return buildEmptySignal(symbol, price);
+  if (!Number.isFinite(price) || price <= 0) {
+    return buildEmptySignal(symbol, price, 'price_invalid');
+  }
 
   const ema20 = EMA.calculate({ period: 20, values: closes });
   const ema50 = EMA.calculate({ period: 50, values: closes });
@@ -155,14 +182,36 @@ function calcScoreForSide(params: {
     adx.length < 3 ||
     atr.length < 3
   ) {
-    return buildEmptySignal(symbol, price);
+    return buildEmptySignal(symbol, price, 'not_ready', {
+      ema20Len: ema20.length,
+      ema50Len: ema50.length,
+      ema200Len: ema200.length,
+      adxLen: adx.length,
+      atrLen: atr.length
+    });
   }
 
   const stateInfo = detectMarketState(candles);
-  if (!stateInfo.ready) return buildEmptySignal(symbol, price);
-  if (stateInfo.state === 'chaotic') return buildEmptySignal(symbol, price);
+
+  if (!stateInfo.ready) {
+    return buildEmptySignal(symbol, price, 'state_not_ready');
+  }
+
+  if (stateInfo.state === 'chaotic') {
+    return buildEmptySignal(symbol, price, 'state_chaotic', {
+      state: stateInfo.state,
+      sideBias: stateInfo.sideBias,
+      coherence: round(stateInfo.coherence ?? 0, 6)
+    });
+  }
+
   if (stateInfo.sideBias !== 'neutral' && stateInfo.sideBias !== side) {
-    return buildEmptySignal(symbol, price);
+    return buildEmptySignal(symbol, price, 'side_bias_mismatch', {
+      requestedSide: side,
+      sideBias: stateInfo.sideBias,
+      state: stateInfo.state,
+      coherence: round(stateInfo.coherence ?? 0, 6)
+    });
   }
 
   const lastEma20 = last(ema20);
@@ -219,6 +268,29 @@ function calcScoreForSide(params: {
       nearEma20 &&
       notTooDead &&
       notTooWild;
+
+    if (!sideOk) {
+      return buildEmptySignal(symbol, price, 'long_conditions_failed', {
+        requestedSide: side,
+        priceVsEma200: round(price / lastEma200, 6),
+        stackUp,
+        emaSlope20: round(emaSlope20, 6),
+        adx: round(lastAdx.adx, 4),
+        adxRising,
+        pullbackLong,
+        nearEma20,
+        notTooDead,
+        notTooWild,
+        atrPct: round(atrPct, 6),
+        extension: round(extension, 6),
+        rs48: round(rs48, 6),
+        rs16: round(rs16, 6),
+        volBoost: round(volBoost, 4),
+        rawScore: round(rawScore, 4),
+        state: stateInfo.state,
+        coherence: round(stateInfo.coherence, 6)
+      });
+    }
   } else {
     if (price < lastEma200) rawScore += 1.2;
     if (stackDown) rawScore += 1.4;
@@ -243,9 +315,30 @@ function calcScoreForSide(params: {
       nearEma20 &&
       notTooDead &&
       notTooWild;
-  }
 
-  if (!sideOk) return buildEmptySignal(symbol, price);
+    if (!sideOk) {
+      return buildEmptySignal(symbol, price, 'short_conditions_failed', {
+        requestedSide: side,
+        priceVsEma200: round(price / lastEma200, 6),
+        stackDown,
+        emaSlope20: round(emaSlope20, 6),
+        adx: round(lastAdx.adx, 4),
+        adxRising,
+        pullbackShort,
+        nearEma20,
+        notTooDead,
+        notTooWild,
+        atrPct: round(atrPct, 6),
+        extension: round(extension, 6),
+        rs48: round(rs48, 6),
+        rs16: round(rs16, 6),
+        volBoost: round(volBoost, 4),
+        rawScore: round(rawScore, 4),
+        state: stateInfo.state,
+        coherence: round(stateInfo.coherence, 6)
+      });
+    }
+  }
 
   const scoreMultiplier = getStateScoreMultiplier(
     stateInfo.state,
@@ -257,7 +350,12 @@ function calcScoreForSide(params: {
   );
 
   if (riskMultiplier <= 0 || scoreMultiplier <= 0) {
-    return buildEmptySignal(symbol, price);
+    return buildEmptySignal(symbol, price, 'risk_multiplier_zero', {
+      scoreMultiplier: round(scoreMultiplier, 6),
+      riskMultiplier: round(riskMultiplier, 6),
+      state: stateInfo.state,
+      coherence: round(stateInfo.coherence, 6)
+    });
   }
 
   const adjustedRaw = rawScore + stateInfo.coherence * 1.25;
@@ -269,7 +367,11 @@ function calcScoreForSide(params: {
   const initialR = Math.abs(price - stopLossPrice);
 
   if (!Number.isFinite(initialR) || initialR <= 0) {
-    return buildEmptySignal(symbol, price);
+    return buildEmptySignal(symbol, price, 'initial_r_invalid', {
+      stopDistance: round(stopDistance, 8),
+      stopLossPrice: round(stopLossPrice, 8),
+      initialR
+    });
   }
 
   const takeProfit1Price =
@@ -298,6 +400,7 @@ function calcScoreForSide(params: {
     riskMultiplier: round(riskMultiplier, 6),
     indicators: {
       ready: true,
+      rejectReason: undefined,
       rs48: round(rs48, 6),
       rs16: round(rs16, 6),
       ema20: round(lastEma20),
@@ -342,7 +445,12 @@ function applyRiskToSignal(
 
   const effectiveRisk = riskPerTrade * signal.riskMultiplier;
   if (!Number.isFinite(effectiveRisk) || effectiveRisk <= 0) {
-    return buildEmptySignal(signal.symbol, signal.price);
+    return buildEmptySignal(signal.symbol, signal.price, 'risk_invalid', {
+      side: signal.side,
+      riskPerTrade,
+      riskMultiplier: signal.riskMultiplier,
+      effectiveRisk
+    });
   }
 
   const riskCapital = balance * effectiveRisk;
@@ -355,7 +463,15 @@ function applyRiskToSignal(
   return {
     ...signal,
     quantity,
-    positionSize: round(positionSize, 6)
+    positionSize: round(positionSize, 6),
+    indicators: {
+      ...signal.indicators,
+      riskPerTrade: round(riskPerTrade, 6),
+      effectiveRisk: round(effectiveRisk, 6),
+      riskCapital: round(riskCapital, 6),
+      quantity,
+      positionSize: round(positionSize, 6)
+    }
   };
 }
 
@@ -412,9 +528,31 @@ export function pickBestUniverseSignal(
   const ranked = rankUniverseCandidates(candlesBySymbol, balance, options);
   const best = ranked[0];
 
-  if (!best || best.score < minScore) {
+  if (!best) {
     const fallbackSymbol = Object.keys(candlesBySymbol)[0] ?? 'UNKNOWN';
-    return buildEmptySignal(fallbackSymbol, 0);
+    return buildEmptySignal(fallbackSymbol, 0, 'no_ranked_candidates', {
+      minScore
+    });
+  }
+
+  if (best.score < minScore) {
+    return {
+      ...buildEmptySignal(best.symbol, best.signal.price, 'min_score', {
+        minScore,
+        bestScore: best.score,
+        bestRawScore: best.rawScore,
+        bestSide: best.side,
+        bestState: best.state,
+        bestCoherence: best.coherence
+      }),
+      symbol: best.symbol,
+      regime: best.signal.regime,
+      state: best.signal.state,
+      sideBias: best.signal.sideBias,
+      coherence: best.signal.coherence,
+      rawScore: best.signal.rawScore,
+      price: best.signal.price
+    };
   }
 
   return best.signal;
