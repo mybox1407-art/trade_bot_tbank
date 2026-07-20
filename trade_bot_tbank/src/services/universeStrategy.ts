@@ -7,6 +7,8 @@ import {
 } from './strategy';
 import { detectMarketState } from './marketState';
 
+export type { Candle } from './strategy';
+
 export type UniverseSignalSide = 'long' | 'short' | 'none';
 export type UniverseRejectReason =
   | 'not_ready'
@@ -76,6 +78,13 @@ export interface UniverseRankCandidate {
   state: UniverseState;
   coherence: number;
   signal: UniverseSignal;
+}
+
+export interface UniverseEvaluationResult {
+  symbol: string;
+  longSignal: UniverseSignal;
+  shortSignal: UniverseSignal;
+  bestSignal: UniverseSignal;
 }
 
 export interface UniverseStrategyOptions {
@@ -772,32 +781,50 @@ function applyRiskToSignal(
   };
 }
 
+export function evaluateUniverseSymbol(
+  symbol: string,
+  candles: Candle[],
+  balance: number = STARTING_BALANCE,
+  options: UniverseStrategyOptions = {}
+): UniverseEvaluationResult {
+  const riskPerTrade = options.riskPerTrade ?? MAX_RISK_PER_TRADE;
+
+  const longSignal = applyRiskToSignal(
+    calcScoreForSide({ side: 'long', candles, symbol }),
+    balance,
+    riskPerTrade
+  );
+
+  const shortSignal = applyRiskToSignal(
+    calcScoreForSide({ side: 'short', candles, symbol }),
+    balance,
+    riskPerTrade
+  );
+
+  const bestSignal =
+    longSignal.score >= shortSignal.score ? longSignal : shortSignal;
+
+  return {
+    symbol,
+    longSignal,
+    shortSignal,
+    bestSignal
+  };
+}
+
 export function rankUniverseCandidates(
   candlesBySymbol: Record<string, Candle[]>,
   balance: number = STARTING_BALANCE,
   options: UniverseStrategyOptions = {}
 ): UniverseRankCandidate[] {
-  const riskPerTrade = options.riskPerTrade ?? MAX_RISK_PER_TRADE;
   const warmupCandles = options.warmupCandles ?? DEFAULT_WARMUP;
   const ranked: UniverseRankCandidate[] = [];
 
   for (const [symbol, candles] of Object.entries(candlesBySymbol)) {
     if (!Array.isArray(candles) || candles.length < warmupCandles) continue;
 
-    const longSignal = applyRiskToSignal(
-      calcScoreForSide({ side: 'long', candles, symbol }),
-      balance,
-      riskPerTrade
-    );
-
-    const shortSignal = applyRiskToSignal(
-      calcScoreForSide({ side: 'short', candles, symbol }),
-      balance,
-      riskPerTrade
-    );
-
-    const best =
-      longSignal.score >= shortSignal.score ? longSignal : shortSignal;
+    const evaluated = evaluateUniverseSymbol(symbol, candles, balance, options);
+    const best = evaluated.bestSignal;
 
     if (best.side !== 'none') {
       ranked.push({
