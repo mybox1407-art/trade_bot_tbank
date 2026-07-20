@@ -1,1 +1,60 @@
+20_07_2026 - Тест 1
+Текущая конфигурация
+
+Риск
+Баланс: 50 000
+
+Риск на сделку: 1%
+
+Комиссия: 0.05% на сторону
+
+Кап позиции: ≤ 30% баланса
+
+Мин. qty: 2 (чётное)
+
+Вход (15m, primary)
+Режим: trend_up / trend_down (EMA20>50>200 + ADX≥20, не high_vol)
+
+Сигнал: pullback или MACD-cross у EMA20/50
+
+Свеча: body ≥ 40% range
+
+RSI long 42–68 / short 32–58
+
+Не входить при сильном extension от EMA20
+
+Сессия: 10:00–18:00 МСК
+
+Стоп: structural swing ±0.25 ATR, clamp 0.5–1.2% цены (ATR mult 1.45/1.6)
+
+HTF (опционально, htf)
+1h bias: close vs EMA200 + EMA20/50 stack
+
+min ADX 1h: 18
+
+Warmup: 850 баров 15m
+
+Выход (Path Exit v1)
+TP1: 40% @ 1.5R
+
+После TP1: SL runner = entry (lock 0R)
+
+TP2: 2.0R (остаток)
+
+Trail runner: выкл
+
+Early abort: 16 бар, если MFE < 0.35R (до TP1)
+
+Time-stop: 64 бар
+
+Intrabar: conservative (SL приоритетнее TP)
+
+Исполнение бэктеста
+1 позиция за раз
+
+Cooldown: 12 свечей после любой сделки
+
+Лимит сделок/день: выкл
+
+Результаты теста:
 
