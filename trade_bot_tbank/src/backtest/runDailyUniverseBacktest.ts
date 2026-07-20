@@ -529,7 +529,7 @@ async function main(): Promise<void> {
     trailingAtrMult: 2.0,
     minAtrPct: 0.0035,
     maxAtrPct: 0.12,
-    maxBreakoutDistancePct: 0.04,
+    maxBreakoutDistancePct: 0.03,
     allowLongs: true,
     allowShorts: true
   });
