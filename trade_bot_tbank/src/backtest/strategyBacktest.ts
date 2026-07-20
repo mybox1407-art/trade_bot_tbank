@@ -3,6 +3,7 @@ import {
   aggregateTo1h,
   buildHtfBiasSeries,
   Candle,
+  detectMarketRegime,
   HtfBarState,
   HTF_WARMUP_15M,
   MarketRegime,
@@ -104,6 +105,31 @@ export interface HtfStats {
   warmupRejects: number;
 }
 
+export interface RegimeBarBucket {
+  bars: number;
+  pct: number;
+}
+
+export interface RegimeTradeBucket {
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  netProfit: number;
+  grossProfit: number;
+  grossLoss: number;
+  profitFactor: number;
+  avgBarsHeld: number;
+  closeReasons: Record<string, number>;
+}
+
+export interface RegimeStats {
+  totalBars: number;
+  barsByRegime: Record<string, RegimeBarBucket>;
+  tradesByRegime: Record<string, RegimeTradeBucket>;
+  closeReasonsAll: Record<string, number>;
+}
+
 export interface BacktestResult {
   symbol: string;
   options: Required<BacktestOptions>;
@@ -111,6 +137,7 @@ export interface BacktestResult {
   summary: BacktestSummary;
   equityCurve: Array<{ time: number; balance: number }>;
   htfStats: HtfStats;
+  regimeStats: RegimeStats;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -151,6 +178,109 @@ function getGrossPnl(params: {
 
 function utcDateKey(ts: number): string {
   return new Date(ts).toISOString().slice(0, 10);
+}
+
+function emptyRegimeStats(): RegimeStats {
+  return {
+    totalBars: 0,
+    barsByRegime: {},
+    tradesByRegime: {},
+    closeReasonsAll: {}
+  };
+}
+
+function incReason(map: Record<string, number>, reason: string, n = 1): void {
+  map[reason] = (map[reason] ?? 0) + n;
+}
+
+/** Группируем ноги одной сделки (как в buildSummary). */
+function buildRegimeStats(
+  trades: BacktestTrade[],
+  barCounts: Record<string, number>
+): RegimeStats {
+  const totalBars = Object.values(barCounts).reduce((a, b) => a + b, 0);
+  const barsByRegime: Record<string, RegimeBarBucket> = {};
+  for (const [reg, bars] of Object.entries(barCounts)) {
+    barsByRegime[reg] = {
+      bars,
+      pct: totalBars > 0 ? round(bars / totalBars, 6) : 0
+    };
+  }
+
+  type Agg = {
+    regime: string;
+    net: number;
+    barsMax: number;
+    reasons: Record<string, number>;
+  };
+  const groups = new Map<string, Agg>();
+
+  for (const t of trades) {
+    const key = `${t.openedAt}|${t.side}|${t.entryPrice}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        regime: String(t.regime ?? 'unknown'),
+        net: 0,
+        barsMax: 0,
+        reasons: {}
+      };
+      groups.set(key, g);
+    }
+    g.net += t.netPnl;
+    g.barsMax = Math.max(g.barsMax, t.barsHeld);
+    incReason(g.reasons, t.closeReason);
+  }
+
+  const tradesByRegime: Record<string, RegimeTradeBucket> = {};
+  const closeReasonsAll: Record<string, number> = {};
+
+  for (const g of groups.values()) {
+    const reg = g.regime || 'unknown';
+    let b = tradesByRegime[reg];
+    if (!b) {
+      b = {
+        trades: 0,
+        wins: 0,
+        losses: 0,
+        winRate: 0,
+        netProfit: 0,
+        grossProfit: 0,
+        grossLoss: 0,
+        profitFactor: 0,
+        avgBarsHeld: 0,
+        closeReasons: {}
+      };
+      tradesByRegime[reg] = b;
+    }
+    b.trades += 1;
+    b.netProfit += g.net;
+    if (g.net > 0) {
+      b.wins += 1;
+      b.grossProfit += g.net;
+    } else {
+      b.losses += 1;
+      b.grossLoss += g.net;
+    }
+    b.avgBarsHeld += g.barsMax;
+    for (const [reason, n] of Object.entries(g.reasons)) {
+      incReason(b.closeReasons, reason, n);
+      incReason(closeReasonsAll, reason, n);
+    }
+  }
+
+  for (const b of Object.values(tradesByRegime)) {
+    const gl = Math.abs(b.grossLoss);
+    b.winRate = b.trades > 0 ? round(b.wins / b.trades, 6) : 0;
+    b.netProfit = round(b.netProfit);
+    b.grossProfit = round(b.grossProfit);
+    b.grossLoss = round(b.grossLoss);
+    b.profitFactor =
+      gl > 0 ? round(b.grossProfit / gl, 6) : b.grossProfit > 0 ? Infinity : 0;
+    b.avgBarsHeld = b.trades > 0 ? round(b.avgBarsHeld / b.trades, 2) : 0;
+  }
+
+  return { totalBars, barsByRegime, tradesByRegime, closeReasonsAll };
 }
 
 function tryOpenPosition(params: {
@@ -513,7 +643,9 @@ function processExitsOnCandle(params: {
   };
 }
 
-function calculateDrawdown(equityCurve: Array<{ time: number; balance: number }>) {
+function calculateDrawdown(
+  equityCurve: Array<{ time: number; balance: number }>
+) {
   let peak = equityCurve.length ? equityCurve[0].balance : 0;
   let maxDrawdownAbs = 0;
   let maxDrawdownPct = 0;
@@ -524,6 +656,7 @@ function calculateDrawdown(equityCurve: Array<{ time: number; balance: number }>
     if (d > maxDrawdownAbs) maxDrawdownAbs = d;
     if (dp > maxDrawdownPct) maxDrawdownPct = dp;
   }
+
   return {
     maxDrawdownAbs: round(maxDrawdownAbs),
     maxDrawdownPct: round(maxDrawdownPct, 6)
@@ -552,7 +685,8 @@ function buildSummary(params: {
   const netProfit = groupPnls.reduce((a, b) => a + b, 0);
   const profitFactor =
     grossLossAbs > 0 ? grossProfit / grossLossAbs : grossProfit > 0 ? Infinity : 0;
-  const returnPct = startBalance > 0 ? (endBalance - startBalance) / startBalance : 0;
+  const returnPct =
+    startBalance > 0 ? (endBalance - startBalance) / startBalance : 0;
   const dd = calculateDrawdown(equityCurve);
 
   return {
@@ -569,7 +703,9 @@ function buildSummary(params: {
     avgLoss: round(
       losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0
     ),
-    profitFactor: Number.isFinite(profitFactor) ? round(profitFactor, 6) : Infinity,
+    profitFactor: Number.isFinite(profitFactor)
+      ? round(profitFactor, 6)
+      : Infinity,
     startBalance: round(startBalance),
     endBalance: round(endBalance),
     returnPct: round(returnPct, 6),
@@ -615,7 +751,8 @@ export function runStrategyBacktest(
         equityCurve: []
       }),
       equityCurve: [],
-      htfStats: emptyHtf
+      htfStats: emptyHtf,
+      regimeStats: emptyRegimeStats()
     };
   }
 
@@ -631,6 +768,7 @@ export function runStrategyBacktest(
     { time: sortedCandles[0].time, balance: round(balance) }
   ];
   const htfStats: HtfStats = { rejects: 0, passes: 0, warmupRejects: 0 };
+  const barCounts: Record<string, number> = {};
 
   let precomputedHtf: HtfBarState[] | undefined;
   if (resolvedOptions.htfFilter) {
@@ -651,6 +789,11 @@ export function runStrategyBacktest(
     const currentCandle = sortedCandles[i];
     const barsHeld = openPosition ? i - openPositionIndex : 0;
 
+    // regime bar histogram (causal, same window as strategy)
+    const regInfo = detectMarketRegime(visibleCandles);
+    const regName = regInfo.ready ? regInfo.regime : 'unknown';
+    barCounts[regName] = (barCounts[regName] ?? 0) + 1;
+
     if (resolvedOptions.progressLogEvery > 0) {
       const processedBars = i - resolvedOptions.warmupCandles;
       const shouldLog =
@@ -663,7 +806,9 @@ export function runStrategyBacktest(
         const remainingBars = Math.max(totalBarsToProcess - processedBars, 0);
         const etaSec = remainingBars / Math.max(speed, 1e-9);
         const progressPct =
-          totalBarsToProcess > 0 ? (processedBars / totalBarsToProcess) * 100 : 100;
+          totalBarsToProcess > 0
+            ? (processedBars / totalBarsToProcess) * 100
+            : 100;
         console.log(
           [
             `[${symbol}]`,
@@ -731,7 +876,10 @@ export function runStrategyBacktest(
           });
           balance = t.balanceAfter;
           trades.push(t);
-          equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+          equityCurve.push({
+            time: currentCandle.time,
+            balance: round(balance)
+          });
           cooldownRemaining = resolvedOptions.cooldownCandles;
           openPosition = null;
           openPositionIndex = -1;
@@ -757,6 +905,7 @@ export function runStrategyBacktest(
         trades.push(t);
         equityCurve.push({ time: currentCandle.time, balance: round(balance) });
       }
+
       if (!result.stillOpen) {
         cooldownRemaining = resolvedOptions.cooldownCandles;
         openPosition = null;
@@ -816,6 +965,8 @@ export function runStrategyBacktest(
     equityCurve.push({ time: lastCandle.time, balance: round(balance) });
   }
 
+  const regimeStats = buildRegimeStats(trades, barCounts);
+
   return {
     symbol,
     options: resolvedOptions,
@@ -828,6 +979,10 @@ export function runStrategyBacktest(
       equityCurve
     }),
     equityCurve,
-    htfStats
+    htfStats,
+    regimeStats
   };
 }
+
+// re-export for consumers that expect HTF_WARMUP on backtest module
+export { HTF_WARMUP_15M };
