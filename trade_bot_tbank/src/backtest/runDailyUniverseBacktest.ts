@@ -1,389 +1,295 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { Candle } from '../services/dailyBreakoutStrategy';
-import { runDailyUniverseBacktest } from './dailyUniverseBacktest';
+import { Candle } from './services/dailyBreakoutStrategy';
+import {
+  runDailyUniverseBacktest,
+  DailyUniverseBacktestResult
+} from './backtest/dailyUniverseBacktest';
 
-const DEFAULT_PROGRESS_LOG_EVERY = 250;
-const DEFAULT_MIN_ATR_PCT = 0.006;
-const DEFAULT_ALLOW_LONGS = true;
-const DEFAULT_ALLOW_SHORTS = false;
+// ЗАМЕНИ на свой реальный способ загрузки данных
+import { loadCandlesForSymbols } from './data/loadCandlesForSymbols';
 
-const ANSI = {
-  reset: '\x1b[0m',
-  green: '\x1b[32m',
-  red: '\x1b[31m',
-  yellow: '\x1b[33m'
-} as const;
-
-function colorize(text: string, color: keyof typeof ANSI): string {
-  if (!process.stdout.isTTY) return text;
-  return `${ANSI[color]}${text}${ANSI.reset}`;
+function round(value: number, digits = 2): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
 }
 
-function toNumber(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : NaN;
+function pct(value: number, digits = 2): string {
+  return `${round(value * 100, digits)}%`;
 }
 
-function isValidCandle(candidate: unknown): candidate is Candle {
-  if (!candidate || typeof candidate !== 'object') return false;
-  const item = candidate as Record<string, unknown>;
-  return (
-    Number.isFinite(toNumber(item.time)) &&
-    Number.isFinite(toNumber(item.open)) &&
-    Number.isFinite(toNumber(item.high)) &&
-    Number.isFinite(toNumber(item.low)) &&
-    Number.isFinite(toNumber(item.close)) &&
-    Number.isFinite(toNumber(item.volume))
-  );
-}
-
-function normalizeCandles(raw: unknown): Candle[] {
-  if (!Array.isArray(raw)) {
-    throw new Error('JSON должен содержать массив свечей.');
-  }
-
-  const candles: Candle[] = raw.map((item, index) => {
-    if (!isValidCandle(item)) {
-      throw new Error(`Некорректная свеча в массиве, индекс ${index}.`);
-    }
-
-    return {
-      time: toNumber(item.time),
-      open: toNumber(item.open),
-      high: toNumber(item.high),
-      low: toNumber(item.low),
-      close: toNumber(item.close),
-      volume: toNumber(item.volume)
-    };
+function money(value: number, digits = 2): string {
+  return round(value, digits).toLocaleString('en-US', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
   });
-
-  return candles.sort((a, b) => a.time - b.time);
 }
 
-function formatNumber(value: number, digits = 4): string {
-  if (!Number.isFinite(value)) return 'NaN';
-  return value.toFixed(digits);
+function printHeader(title: string): void {
+  console.log('');
+  console.log('='.repeat(80));
+  console.log(title);
+  console.log('='.repeat(80));
 }
 
-function formatDate(ts: number): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return String(ts);
-  return d.toISOString().slice(0, 10);
-}
-
-function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return 'неизвестно';
-  if (seconds < 60) return `${Math.round(seconds)} сек`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = Math.round(seconds % 60);
-  if (minutes < 60) return `${minutes} мин ${secs} сек`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours} ч ${minutes % 60} мин`;
-}
-
-function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: number } {
-  if (candlesCount <= 1000) return { minSec: 2, maxSec: 8 };
-  if (candlesCount <= 2500) return { minSec: 5, maxSec: 20 };
-  if (candlesCount <= 5000) return { minSec: 10, maxSec: 35 };
-  return { minSec: 20, maxSec: 60 };
-}
-
-function parseNumberArg(args: string[], name: string, fallback: number): number {
-  const arg = args.find(a => a.startsWith(`--${name}=`));
-  if (!arg) return fallback;
-
-  const n = Number(arg.split('=')[1]);
-  if (!Number.isFinite(n)) {
-    console.warn(`Некорректный --${name}, default ${fallback}`);
-    return fallback;
-  }
-  return n;
-}
-
-function parseBoolArg(args: string[], name: string, fallback: boolean): boolean {
-  const arg = args.find(a => a.startsWith(`--${name}=`));
-  if (!arg) return fallback;
-
-  const raw = arg.split('=')[1]?.trim().toLowerCase();
-  if (raw === 'true' || raw === '1' || raw === 'yes') return true;
-  if (raw === 'false' || raw === '0' || raw === 'no') return false;
-
-  console.warn(`Некорректный --${name}, default ${fallback}`);
-  return fallback;
-}
-
-function printSummary(result: ReturnType<typeof runDailyUniverseBacktest>): void {
+function printSummary(result: DailyUniverseBacktestResult): void {
   const s = result.summary;
-  const netColor = s.netProfit > 0 ? 'green' : s.netProfit < 0 ? 'red' : 'yellow';
-  const retColor = s.returnPct > 0 ? 'green' : s.returnPct < 0 ? 'red' : 'yellow';
-  const pfColor =
-    s.profitFactor >= 1.2 ? 'green' : s.profitFactor >= 1 ? 'yellow' : 'red';
-  const sharpeColor =
-    s.sharpe >= 1 ? 'green' : s.sharpe >= 0.5 ? 'yellow' : 'red';
 
-  console.log('\n========== ИТОГИ DAILY UNIVERSE БЭКТЕСТА ==========');
+  printHeader('DAILY UNIVERSE BACKTEST');
+
   console.log(`Universe: ${s.universe.join(', ')}`);
-  console.log(`Сделок: ${s.tradesCount}`);
-  console.log(`Побед: ${colorize(String(s.wins), 'green')}`);
-  console.log(`Поражений: ${colorize(String(s.losses), 'red')}`);
-  console.log(`Win rate: ${formatNumber(s.winRate * 100, 2)}%`);
-  console.log(`Gross profit: ${colorize(formatNumber(s.grossProfit, 2), 'green')}`);
-  console.log(`Gross loss: ${colorize(formatNumber(s.grossLoss, 2), 'red')}`);
-  console.log(`Net profit: ${colorize(formatNumber(s.netProfit, 2), netColor)}`);
-  console.log(`Avg net pnl: ${formatNumber(s.avgNetPnl, 2)}`);
-  console.log(`Avg win: ${colorize(formatNumber(s.avgWin, 2), 'green')}`);
-  console.log(`Avg loss: ${colorize(formatNumber(s.avgLoss, 2), 'red')}`);
-  console.log(
-    `Profit factor: ${colorize(
-      Number.isFinite(s.profitFactor) ? formatNumber(s.profitFactor, 3) : 'Infinity',
-      pfColor
-    )}`
-  );
-  console.log(`Sharpe: ${colorize(formatNumber(s.sharpe, 3), sharpeColor)}`);
-  console.log(`Стартовый баланс: ${formatNumber(s.startBalance, 2)}`);
-  console.log(`Финальный баланс: ${formatNumber(s.endBalance, 2)}`);
-  console.log(
-    `Доходность: ${colorize(formatNumber(s.returnPct * 100, 2) + '%', retColor)}`
-  );
-  console.log(`Макс. просадка: ${formatNumber(s.maxDrawdownAbs, 2)}`);
-  console.log(`Макс. просадка %: ${formatNumber(s.maxDrawdownPct * 100, 2)}%`);
-  console.log(`Лет в тесте: ${formatNumber(s.yearsCount, 2)}`);
+  console.log(`Trades: ${s.tradesCount}`);
+  console.log(`Wins / Losses: ${s.wins} / ${s.losses}`);
+  console.log(`Win rate: ${pct(s.winRate)}`);
+  console.log(`Start balance: ${money(s.startBalance)}`);
+  console.log(`End balance: ${money(s.endBalance)}`);
+  console.log(`Net profit: ${money(s.netProfit)}`);
+  console.log(`Return: ${pct(s.returnPct)}`);
+  console.log(`Profit factor: ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 2) : 'Infinity'}`);
+  console.log(`Sharpe: ${round(s.sharpe, 2)}`);
+  console.log(`Avg trade: ${money(s.avgNetPnl)}`);
+  console.log(`Avg win: ${money(s.avgWin)}`);
+  console.log(`Avg loss: ${money(s.avgLoss)}`);
+  console.log(`Max drawdown: ${money(s.maxDrawdownAbs)} (${pct(s.maxDrawdownPct)})`);
+  console.log(`Years in sample: ${round(s.yearsCount, 2)}`);
 }
 
-function printSelectionStats(result: ReturnType<typeof runDailyUniverseBacktest>): void {
-  const st = result.selectionStats;
-  console.log('\n========== SELECTION STATS ==========');
-  console.log(`Decision days: ${st.totalDecisionDays}`);
-  console.log(`No-signal days: ${st.noSignalDays}`);
-  console.log(`Signals accepted: ${st.signalsAccepted}`);
-  console.log(`Signals rejected: ${st.signalsRejected}`);
-  console.log(
-    `Picked by side: ${
-      Object.entries(st.pickedBySide)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(' | ') || '—'
-    }`
-  );
-  console.log(
-    `Picked by symbol: ${
-      (Object.entries(st.pickedBySymbol) as Array<[string, number]>)
-        .sort((a, b) => b[1] - a[1])
-        .map(([k, v]) => `${k}=${v}`)
-        .join(' | ') || '—'
-    }`
-  );
+function printSelectionStats(result: DailyUniverseBacktestResult): void {
+  const s = result.selectionStats;
+
+  printHeader('SELECTION STATS');
+
+  console.log(`Decision days: ${s.totalDecisionDays}`);
+  console.log(`No-signal days: ${s.noSignalDays}`);
+  console.log(`Accepted signals: ${s.signalsAccepted}`);
+  console.log(`Rejected signals: ${s.signalsRejected}`);
+
+  const pickedSymbolsRows = Object.entries(s.pickedBySymbol)
+    .sort((a, b) => b[1] - a[1])
+    .map(([symbol, count]) => ({ symbol, picked: count }));
+
+  const pickedSidesRows = Object.entries(s.pickedBySide)
+    .sort((a, b) => b[1] - a[1])
+    .map(([side, count]) => ({ side, picked: count }));
+
+  if (pickedSymbolsRows.length) {
+    console.log('');
+    console.log('Picked by symbol:');
+    console.table(pickedSymbolsRows);
+  }
+
+  if (pickedSidesRows.length) {
+    console.log('');
+    console.log('Picked by side:');
+    console.table(pickedSidesRows);
+  }
 }
 
-function printTrades(
-  result: ReturnType<typeof runDailyUniverseBacktest>,
-  limit = 20
-): void {
-  const all = result.trades;
-  const trades = limit > 0 ? all.slice(-limit) : all;
+function printFilterDiagnostics(result: DailyUniverseBacktestResult): void {
+  const f = result.diagnostics.filters;
 
-  console.log(`\n========== ПОСЛЕДНИЕ ${trades.length} СДЕЛОК ==========`);
+  printHeader('FILTER DIAGNOSTICS');
 
-  if (!trades.length) {
-    console.log('Сделок нет.');
+  const rows = [
+    { metric: 'Bars processed', value: f.barsProcessed },
+    { metric: 'Symbols seen', value: f.symbolsSeen },
+    { metric: 'Warm symbols', value: f.warmSymbols },
+    { metric: 'ATR filter passed', value: f.atrFilterPassed },
+    { metric: 'ATR filter rejected', value: f.atrFilterRejected },
+    { metric: 'Breakout candidates', value: f.breakoutCandidates },
+    { metric: 'Long candidates', value: f.longCandidates },
+    { metric: 'Short candidates', value: f.shortCandidates },
+    { metric: 'Accepted signals', value: f.acceptedSignals },
+    { metric: 'Rejected signals', value: f.rejectedSignals },
+    { metric: 'Selected signals', value: f.selectedSignals },
+    { metric: 'Opened positions', value: f.openedPositions }
+  ];
+
+  console.table(rows);
+
+  const warmRate = f.symbolsSeen > 0 ? f.warmSymbols / f.symbolsSeen : 0;
+  const atrPassRate = (f.atrFilterPassed + f.atrFilterRejected) > 0
+    ? f.atrFilterPassed / (f.atrFilterPassed + f.atrFilterRejected)
+    : 0;
+  const acceptRate = (f.acceptedSignals + f.rejectedSignals) > 0
+    ? f.acceptedSignals / (f.acceptedSignals + f.rejectedSignals)
+    : 0;
+  const selectRate = f.acceptedSignals > 0 ? f.selectedSignals / f.acceptedSignals : 0;
+  const openRate = f.selectedSignals > 0 ? f.openedPositions / f.selectedSignals : 0;
+
+  console.log(`Warm coverage: ${pct(warmRate)}`);
+  console.log(`ATR pass rate: ${pct(atrPassRate)}`);
+  console.log(`Signal accept rate: ${pct(acceptRate)}`);
+  console.log(`Selection rate: ${pct(selectRate)}`);
+  console.log(`Open rate after selection: ${pct(openRate)}`);
+}
+
+function printMonthlyStats(result: DailyUniverseBacktestResult): void {
+  const months = result.diagnostics.months;
+
+  printHeader('MONTHLY STATS');
+
+  if (!months.length) {
+    console.log('No monthly stats.');
     return;
   }
 
-  for (let i = 0; i < trades.length; i++) {
-    const trade = trades[i];
-    const line = [
-      `#${all.length - trades.length + i + 1}`,
-      `Тикер: ${trade.symbol}`,
-      `Открыта: ${formatDate(trade.openedAt)}`,
-      `Закрыта: ${formatDate(trade.closedAt)}`,
-      `Сторона: ${trade.side}`,
-      `Режим: ${trade.regime}`,
-      `Вход: ${formatNumber(trade.entryPrice, 4)}`,
-      `Выход: ${formatNumber(trade.exitPrice, 4)}`,
-      `SL: ${formatNumber(trade.stopLossPrice, 4)}`,
-      `Trail: ${formatNumber(trade.trailingStopPrice, 4)}`,
-      `Rev: ${formatNumber(trade.reverseLevel, 4)}`,
-      `Qty: ${formatNumber(trade.quantity, 0)}`,
-      `Причина: ${trade.closeReason}`,
-      `Net PnL: ${formatNumber(trade.netPnl, 2)}`,
-      `Комиссия: ${formatNumber(trade.totalCommission, 2)}`,
-      `Bars: ${trade.barsHeld}`
-    ].join(' | ');
+  const rows = months.map(m => ({
+    month: m.month,
+    decisionDays: m.decisionDays,
+    acceptedSignals: m.acceptedSignals,
+    rejectedSignals: m.rejectedSignals,
+    selectedSignals: m.selectedSignals,
+    openedPositions: m.openedPositions,
+    closedTrades: m.closedTrades,
+    netPnl: money(m.netPnl)
+  }));
 
-    if (trade.netPnl > 0) console.log(colorize(line, 'green'));
-    else if (trade.netPnl < 0) console.log(colorize(line, 'red'));
-    else console.log(colorize(line, 'yellow'));
-  }
+  console.table(rows);
 }
 
-function printUsage(): void {
-  console.log(`
-Использование:
-npx tsx src/backtest/runDailyUniverseBacktest.ts <json1:symbol1> <json2:symbol2> ... [опции]
+function printTradesPreview(result: DailyUniverseBacktestResult, limit = 20): void {
+  const trades = result.trades.slice(-limit);
 
-Формат инструмента:
-  ./src/backtest/data/SBER_15m.json:SBER
+  printHeader(`LAST ${trades.length} TRADES`);
 
-Пресет по умолчанию:
-  long-only + minAtrPct=0.006
+  if (!trades.length) {
+    console.log('No trades.');
+    return;
+  }
 
-Опции:
-  --balance=50000
-  --commission=0.0005
-  --warmup=30
-  --risk=0.01
-  --stopAtr=2.5
-  --trailAtr=2.0
-  --minAtrPct=0.006
-  --maxAtrPct=0.12
-  --maxBreakoutDistancePct=0.04
-  --allowLongs=true
-  --allowShorts=false
+  const rows = trades.map(t => ({
+    symbol: t.symbol,
+    side: t.side,
+    openedAt: new Date(t.openedAt).toISOString().slice(0, 10),
+    closedAt: new Date(t.closedAt).toISOString().slice(0, 10),
+    entry: round(t.entryPrice, 2),
+    exit: round(t.exitPrice, 2),
+    qty: round(t.quantity, 4),
+    netPnl: money(t.netPnl),
+    barsHeld: t.barsHeld,
+    reason: t.closeReason
+  }));
 
-Пример:
-npx tsx src/backtest/runDailyUniverseBacktest.ts \
-  ./src/backtest/data/SBER_15m.json:SBER \
-  ./src/backtest/data/GAZP_15m.json:GAZP \
-  ./src/backtest/data/LKOH_15m.json:LKOH \
-  ./src/backtest/data/ROSN_15m.json:ROSN
-`);
+  console.table(rows);
 }
 
-function main(): void {
-  const args = process.argv.slice(2);
-  if (!args.length) {
-    printUsage();
-    process.exit(1);
-  }
+function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
+  const f = result.diagnostics.filters;
+  const months = result.diagnostics.months;
 
-  const pairArgs = args.filter(a => !a.startsWith('--'));
-  if (pairArgs.length < 2) {
-    console.error('Нужно минимум 2 инструмента в формате path:symbol');
-    process.exit(1);
-  }
+  printHeader('INTERPRETATION');
 
-  const startingBalance = parseNumberArg(args, 'balance', 50000);
-  const commissionRate = parseNumberArg(args, 'commission', 0.0005);
-  const warmupCandles = parseNumberArg(args, 'warmup', 30);
-  const riskPerTrade = parseNumberArg(args, 'risk', 0.01);
-  const stopAtrMult = parseNumberArg(args, 'stopAtr', 2.5);
-  const trailingAtrMult = parseNumberArg(args, 'trailAtr', 2.0);
-  const minAtrPct = parseNumberArg(args, 'minAtrPct', DEFAULT_MIN_ATR_PCT);
-  const maxAtrPct = parseNumberArg(args, 'maxAtrPct', 0.12);
-  const maxBreakoutDistancePct = parseNumberArg(args, 'maxBreakoutDistancePct', 0.04);
-  const allowLongs = parseBoolArg(args, 'allowLongs', DEFAULT_ALLOW_LONGS);
-  const allowShorts = parseBoolArg(args, 'allowShorts', DEFAULT_ALLOW_SHORTS);
+  const activeMonths = months.filter(
+    m => m.openedPositions > 0 || m.closedTrades > 0 || m.acceptedSignals > 0
+  );
 
-  const candlesBySymbol: Record<string, Candle[]> = {};
-  const loadedInfo: Array<{
-    symbol: string;
-    path: string;
-    count: number;
-    from: number;
-    to: number;
-  }> = [];
+  const firstActiveMonth = activeMonths.length ? activeMonths[0].month : null;
+  const firstTradeMonth = months.find(m => m.closedTrades > 0)?.month ?? null;
 
-  for (const pairArg of pairArgs) {
-    const sep = pairArg.lastIndexOf(':');
-    if (sep <= 0) {
-      console.error(`Неверный аргумент "${pairArg}". Нужен формат path:symbol`);
-      process.exit(1);
-    }
-
-    const filePath = pairArg.slice(0, sep);
-    const symbol = pairArg.slice(sep + 1).trim().toUpperCase();
-    const absolutePath = path.resolve(process.cwd(), filePath);
-
-    if (!fs.existsSync(absolutePath)) {
-      console.error(`Файл не найден: ${absolutePath}`);
-      process.exit(1);
-    }
-
-    let rawJson: unknown;
-    try {
-      rawJson = JSON.parse(fs.readFileSync(absolutePath, 'utf-8'));
-    } catch (e) {
-      console.error(`Не удалось распарсить JSON: ${absolutePath}`, e);
-      process.exit(1);
-    }
-
-    let candles: Candle[];
-    try {
-      candles = normalizeCandles(rawJson);
-    } catch (e) {
-      console.error(`Ошибка структуры свечей: ${absolutePath}`, e);
-      process.exit(1);
-      return;
-    }
-
-    candlesBySymbol[symbol] = candles;
-    loadedInfo.push({
-      symbol,
-      path: absolutePath,
-      count: candles.length,
-      from: candles[0]?.time ?? 0,
-      to: candles[candles.length - 1]?.time ?? 0
-    });
-  }
-
-  const estimated = estimateBacktestTime(Math.min(...loadedInfo.map(x => x.count)));
-
-  console.log('\n========== ПАРАМЕТРЫ DAILY UNIVERSE ЗАПУСКА ==========');
-  console.log(`Инструментов: ${loadedInfo.length}`);
-  console.log(`Universe: ${loadedInfo.map(x => x.symbol).join(', ')}`);
-  for (const info of loadedInfo) {
+  if (!firstActiveMonth) {
     console.log(
-      `${info.symbol}: ${info.count} свечей | ${formatDate(info.from)} -> ${formatDate(info.to)}`
+      'Стратегия не активировалась ни в одном месяце: либо сигналы не генерируются, либо фильтры/ограничения полностью блокируют входы.'
+    );
+  } else {
+    console.log(`Первый месяц с активностью сигналов: ${firstActiveMonth}`);
+  }
+
+  if (firstTradeMonth) {
+    console.log(`Первый месяц с закрытыми сделками: ${firstTradeMonth}`);
+  } else {
+    console.log('Закрытых сделок не было.');
+  }
+
+  const atrDenom = f.atrFilterPassed + f.atrFilterRejected;
+  const atrPassRate = atrDenom > 0 ? f.atrFilterPassed / atrDenom : 0;
+  const acceptDenom = f.acceptedSignals + f.rejectedSignals;
+  const acceptRate = acceptDenom > 0 ? f.acceptedSignals / acceptDenom : 0;
+
+  if (f.breakoutCandidates === 0) {
+    console.log(
+      'Похоже, стратегия почти не видит breakout-кандидатов: сначала проверь саму логику пробоя, таймфрейм и корректность previous-day уровней.'
+    );
+    return;
+  }
+
+  if (atrDenom > 0 && atrPassRate < 0.2) {
+    console.log(
+      'Основной подозреваемый — ATR-фильтр: слишком мало баров проходит фильтр волатильности.'
     );
   }
-  console.log(`Стартовый баланс: ${startingBalance}`);
-  console.log(`Комиссия: ${commissionRate}`);
-  console.log(`Warmup: ${warmupCandles}`);
-  console.log(`Risk per trade: ${riskPerTrade * 100}%`);
-  console.log(`Stop ATR: ${stopAtrMult}`);
-  console.log(`Trail ATR: ${trailingAtrMult}`);
-  console.log(`Min ATR %: ${minAtrPct}`);
-  console.log(`Max ATR %: ${maxAtrPct}`);
-  console.log(`Max breakout distance %: ${maxBreakoutDistancePct}`);
-  console.log(`Longs: ${allowLongs ? 'ON' : 'OFF'}`);
-  console.log(`Shorts: ${allowShorts ? 'ON' : 'OFF'}`);
-  console.log(`Preset default: long-only + minAtrPct=0.006`);
-  console.log(
-    `Оценка времени: ~ ${formatDuration(estimated.minSec)} - ${formatDuration(
-      estimated.maxSec
-    )}`
-  );
-  console.log(`Лог прогресса: каждые ${DEFAULT_PROGRESS_LOG_EVERY} баров`);
 
-  const startedAt = Date.now();
+  if (acceptDenom > 0 && acceptRate < 0.1) {
+    console.log(
+      'Сигналы в основном отбрасываются после первичного анализа: проверь entry/stop/size и дополнительные условия допуска.'
+    );
+  }
 
-  const result = runDailyUniverseBacktest(candlesBySymbol, {
-    startingBalance,
-    commissionRate,
-    warmupCandles,
-    progressLogEvery: DEFAULT_PROGRESS_LOG_EVERY,
-    onePositionAtTime: true,
-    minSignalAtrPct: minAtrPct,
-    riskPerTrade,
-    stopAtrMult,
-    trailingAtrMult,
-    smaPeriod: 20,
-    atrPeriod: 14,
-    minAtrPct,
-    maxAtrPct,
-    maxBreakoutDistancePct,
-    allowLongs,
-    allowShorts
+  if (f.acceptedSignals > 0 && f.selectedSignals === 0) {
+    console.log(
+      'Есть принятые сигналы, но ни один не выбирается как лучший: проблема может быть в логике score/selection.'
+    );
+  }
+
+  if (f.selectedSignals > 0 && f.openedPositions === 0) {
+    console.log(
+      'Сигналы выбираются, но позиции не открываются: проверь buildDailyBreakoutPositionFromSignal и ограничения размера позиции.'
+    );
+  }
+
+  if (activeMonths.length > 0) {
+    const firstHalf = months.slice(0, Math.floor(months.length / 2));
+    const secondHalf = months.slice(Math.floor(months.length / 2));
+
+    const firstHalfOpened = firstHalf.reduce((sum, m) => sum + m.openedPositions, 0);
+    const secondHalfOpened = secondHalf.reduce((sum, m) => sum + m.openedPositions, 0);
+
+    console.log(`Opened positions, first half: ${firstHalfOpened}`);
+    console.log(`Opened positions, second half: ${secondHalfOpened}`);
+
+    if (firstHalfOpened === 0 && secondHalfOpened > 0) {
+      console.log(
+        'Это действительно красный флаг: стратегия была выключена в первой половине истории и “проснулась” только позже. Проверь regime dependency, фильтры и сдвиги в данных.'
+      );
+    }
+  }
+}
+
+async function main(): Promise<void> {
+  const symbols = ['AAPL', 'MSFT', 'NVDA', 'TSLA'];
+
+  const candlesBySymbol: Record<string, Candle[]> = await loadCandlesForSymbols(symbols, {
+    timeframe: '15m',
+    from: '2025-01-01',
+    to: '2026-07-01'
   });
 
-  console.log('\n========== ВРЕМЯ ВЫПОЛНЕНИЯ ==========');
-  console.log(
-    `Фактическое время: ${formatDuration((Date.now() - startedAt) / 1000)}`
-  );
+  const result = runDailyUniverseBacktest(candlesBySymbol, {
+    startingBalance: 50000,
+    commissionRate: 0.0005,
+    warmupCandles: 30,
+    progressLogEvery: 250,
+    onePositionAtTime: true,
+    minSignalAtrPct: 0.008,
+    riskPerTrade: 0.01,
+    stopAtrMult: 2.5,
+    trailingAtrMult: 2.0,
+    smaPeriod: 20,
+    atrPeriod: 14,
+    minAtrPct: 0.006,
+    maxAtrPct: 0.12,
+    maxBreakoutDistancePct: 0.04,
+    allowLongs: true,
+    allowShorts: true
+  });
 
   printSummary(result);
   printSelectionStats(result);
-  printTrades(result, 20);
+  printFilterDiagnostics(result);
+  printMonthlyStats(result);
+  printTradesPreview(result, 25);
+  printSilenceDiagnosis(result);
 }
 
-main();
+main().catch(error => {
+  console.error('Backtest runner failed:', error);
+  process.exit(1);
+});
