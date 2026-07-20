@@ -523,15 +523,15 @@ async function main(): Promise<void> {
     warmupCandles: 30,
     progressLogEvery: 250,
     onePositionAtTime: true,
-    minSignalAtrPct: 0.0055,
+    minSignalAtrPct: 0.004,
     riskPerTrade: 0.03,
-    stopAtrMult: 2.75,
+    stopAtrMult: 2.5,
     trailingAtrMult: 2.0,
     minAtrPct: 0.0035,
-    maxAtrPct: 0.5,
-    maxBreakoutDistancePct: 0.02,
+    maxAtrPct: 0.2,
+    maxBreakoutDistancePct: 0.01,
     allowLongs: true,
-    allowShorts: false
+    allowShorts: true
   });
 
   printHeader('ВРЕМЯ ВЫПОЛНЕНИЯ');
