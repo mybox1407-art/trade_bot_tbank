@@ -86,11 +86,7 @@ function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: n
   return { minSec: 20, maxSec: 60 };
 }
 
-function parseNumberArg(
-  args: string[],
-  name: string,
-  fallback: number
-): number {
+function parseNumberArg(args: string[], name: string, fallback: number): number {
   const arg = args.find(a => a.startsWith(`--${name}=`));
   if (!arg) return fallback;
 
@@ -102,11 +98,7 @@ function parseNumberArg(
   return n;
 }
 
-function parseBoolArg(
-  args: string[],
-  name: string,
-  fallback: boolean
-): boolean {
+function parseBoolArg(args: string[], name: string, fallback: boolean): boolean {
   const arg = args.find(a => a.startsWith(`--${name}=`));
   if (!arg) return fallback;
 
@@ -145,9 +137,7 @@ function printSummary(result: ReturnType<typeof runDailyUniverseBacktest>): void
       pfColor
     )}`
   );
-  console.log(
-    `Sharpe: ${colorize(formatNumber(s.sharpe, 3), sharpeColor)}`
-  );
+  console.log(`Sharpe: ${colorize(formatNumber(s.sharpe, 3), sharpeColor)}`);
   console.log(`Стартовый баланс: ${formatNumber(s.startBalance, 2)}`);
   console.log(`Финальный баланс: ${formatNumber(s.endBalance, 2)}`);
   console.log(
@@ -282,4 +272,114 @@ function main(): void {
   const allowShorts = parseBoolArg(args, 'allowShorts', true);
 
   const candlesBySymbol: Record<string, Candle[]> = {};
-  const loadedInfo: 
+  const loadedInfo: Array<{
+    symbol: string;
+    path: string;
+    count: number;
+    from: number;
+    to: number;
+  }> = [];
+
+  for (const pairArg of pairArgs) {
+    const sep = pairArg.lastIndexOf(':');
+    if (sep <= 0) {
+      console.error(`Неверный аргумент "${pairArg}". Нужен формат path:symbol`);
+      process.exit(1);
+    }
+
+    const filePath = pairArg.slice(0, sep);
+    const symbol = pairArg.slice(sep + 1).trim().toUpperCase();
+    const absolutePath = path.resolve(process.cwd(), filePath);
+
+    if (!fs.existsSync(absolutePath)) {
+      console.error(`Файл не найден: ${absolutePath}`);
+      process.exit(1);
+    }
+
+    let rawJson: unknown;
+    try {
+      rawJson = JSON.parse(fs.readFileSync(absolutePath, 'utf-8'));
+    } catch (e) {
+      console.error(`Не удалось распарсить JSON: ${absolutePath}`, e);
+      process.exit(1);
+    }
+
+    let candles: Candle[];
+    try {
+      candles = normalizeCandles(rawJson);
+    } catch (e) {
+      console.error(`Ошибка структуры свечей: ${absolutePath}`, e);
+      process.exit(1);
+      return;
+    }
+
+    candlesBySymbol[symbol] = candles;
+    loadedInfo.push({
+      symbol,
+      path: absolutePath,
+      count: candles.length,
+      from: candles[0]?.time ?? 0,
+      to: candles[candles.length - 1]?.time ?? 0
+    });
+  }
+
+  const estimated = estimateBacktestTime(Math.min(...loadedInfo.map(x => x.count)));
+
+  console.log('\n========== ПАРАМЕТРЫ DAILY UNIVERSE ЗАПУСКА ==========');
+  console.log(`Инструментов: ${loadedInfo.length}`);
+  console.log(`Universe: ${loadedInfo.map(x => x.symbol).join(', ')}`);
+  for (const info of loadedInfo) {
+    console.log(
+      `${info.symbol}: ${info.count} свечей | ${formatDate(info.from)} -> ${formatDate(info.to)}`
+    );
+  }
+  console.log(`Стартовый баланс: ${startingBalance}`);
+  console.log(`Комиссия: ${commissionRate}`);
+  console.log(`Warmup: ${warmupCandles}`);
+  console.log(`Risk per trade: ${riskPerTrade * 100}%`);
+  console.log(`Stop ATR: ${stopAtrMult}`);
+  console.log(`Trail ATR: ${trailingAtrMult}`);
+  console.log(`Min ATR %: ${minAtrPct}`);
+  console.log(`Max ATR %: ${maxAtrPct}`);
+  console.log(`Max breakout distance %: ${maxBreakoutDistancePct}`);
+  console.log(`Longs: ${allowLongs ? 'ON' : 'OFF'}`);
+  console.log(`Shorts: ${allowShorts ? 'ON' : 'OFF'}`);
+  console.log(
+    `Оценка времени: ~ ${formatDuration(estimated.minSec)} - ${formatDuration(
+      estimated.maxSec
+    )}`
+  );
+  console.log(`Лог прогресса: каждые ${DEFAULT_PROGRESS_LOG_EVERY} баров`);
+
+  const startedAt = Date.now();
+
+  const result = runDailyUniverseBacktest(candlesBySymbol, {
+    startingBalance,
+    commissionRate,
+    warmupCandles,
+    progressLogEvery: DEFAULT_PROGRESS_LOG_EVERY,
+    onePositionAtTime: true,
+    minSignalAtrPct: minAtrPct,
+    riskPerTrade,
+    stopAtrMult,
+    trailingAtrMult,
+    smaPeriod: 20,
+    atrPeriod: 14,
+    minAtrPct,
+    maxAtrPct,
+    maxBreakoutDistancePct,
+    allowLongs,
+    allowShorts
+  });
+
+  console.log('\n========== ВРЕМЯ ВЫПОЛНЕНИЯ ==========');
+  console.log(
+    `Фактическое время: ${formatDuration((Date.now() - startedAt) / 1000)}`
+  );
+
+  printSummary(result);
+  printSelectionStats(result);
+  printTrades(result, 20);
+}
+
+main();
