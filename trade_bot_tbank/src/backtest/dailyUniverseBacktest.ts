@@ -70,6 +70,12 @@ export interface DailyBreakoutOptions {
   allowShorts?: boolean;
 }
 
+export interface DailyBreakoutExitDecision {
+  exit: boolean;
+  exitPrice: number | null;
+  reason: 'stop_loss' | 'trailing_stop' | 'reverse_signal' | null;
+}
+
 const DEFAULT_OPTIONS: Required<DailyBreakoutOptions> = {
   riskPerTrade: 0.01,
   stopAtrMult: 2.5,
@@ -110,7 +116,10 @@ function resolveOptions(
   };
 }
 
-function buildEmptySignal(symbol: string): DailyBreakoutSignal {
+function buildEmptySignal(
+  symbol: string,
+  options: Required<DailyBreakoutOptions>
+): DailyBreakoutSignal {
   return {
     symbol,
     side: 'none',
@@ -135,8 +144,8 @@ function buildEmptySignal(symbol: string): DailyBreakoutSignal {
       aboveSma20: false,
       belowSma20: false,
       atrPct: null,
-      trailingAtrMult: DEFAULT_OPTIONS.trailingAtrMult,
-      stopAtrMult: DEFAULT_OPTIONS.stopAtrMult
+      trailingAtrMult: options.trailingAtrMult,
+      stopAtrMult: options.stopAtrMult
     }
   };
 }
@@ -155,10 +164,11 @@ export function analyzeDailyBreakout(
   options: DailyBreakoutOptions = {}
 ): DailyBreakoutSignal {
   const resolved = resolveOptions(options);
+  const empty = buildEmptySignal(symbol, resolved);
 
   const minBars = getDailyBreakoutWarmup(resolved);
   if (!Array.isArray(candles) || candles.length < minBars) {
-    return buildEmptySignal(symbol);
+    return empty;
   }
 
   const closes = candles.map(c => c.close);
@@ -178,7 +188,7 @@ export function analyzeDailyBreakout(
   });
 
   if (!smaSeries.length || !atrSeries.length) {
-    return buildEmptySignal(symbol);
+    return empty;
   }
 
   const current = last(candles);
@@ -187,12 +197,12 @@ export function analyzeDailyBreakout(
   const atr = last(atrSeries);
 
   if (!current || !prev || !Number.isFinite(sma20) || !Number.isFinite(atr)) {
-    return buildEmptySignal(symbol);
+    return empty;
   }
 
   const price = current.close;
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(atr) || atr <= 0) {
-    return buildEmptySignal(symbol);
+    return empty;
   }
 
   const prevDayHigh = prev.high;
@@ -203,7 +213,7 @@ export function analyzeDailyBreakout(
 
   if (atrPct < resolved.minAtrPct || atrPct > resolved.maxAtrPct) {
     return {
-      ...buildEmptySignal(symbol),
+      ...empty,
       sma20: round(sma20),
       atr: round(atr),
       prevDayHigh: round(prevDayHigh),
@@ -239,12 +249,11 @@ export function analyzeDailyBreakout(
 
   if (side === 'none' || entryPrice == null || reverseLevel == null) {
     return {
-      ...buildEmptySignal(symbol),
+      ...empty,
       sma20: round(sma20),
       atr: round(atr),
       prevDayHigh: round(prevDayHigh),
       prevDayLow: round(prevDayLow),
-      regime: 'none',
       indicators: {
         ready: true,
         close: round(price),
@@ -260,13 +269,12 @@ export function analyzeDailyBreakout(
   const breakoutDistancePct = Math.abs(entryPrice - price) / price;
   if (breakoutDistancePct > resolved.maxBreakoutDistancePct) {
     return {
-      ...buildEmptySignal(symbol),
+      ...empty,
       sma20: round(sma20),
       atr: round(atr),
       prevDayHigh: round(prevDayHigh),
       prevDayLow: round(prevDayLow),
       breakoutDistancePct: round(breakoutDistancePct, 6),
-      regime: 'none',
       indicators: {
         ready: true,
         close: round(price),
@@ -291,13 +299,15 @@ export function analyzeDailyBreakout(
 
   const riskPerShare = Math.abs(entryPrice - stopLossPrice);
   if (!Number.isFinite(riskPerShare) || riskPerShare <= 0) {
-    return buildEmptySignal(symbol);
+    return empty;
   }
 
   const riskCapital = balance * resolved.riskPerTrade;
   let quantity = Math.floor(riskCapital / riskPerShare);
 
-  if (!Number.isFinite(quantity) || quantity < 1) quantity = 1;
+  if (!Number.isFinite(quantity) || quantity < 1) {
+    quantity = 1;
+  }
 
   const positionSize = quantity * entryPrice;
 
@@ -402,32 +412,60 @@ export function updateDailyBreakoutTrailingStop(
 export function shouldExitDailyBreakoutPosition(
   position: DailyBreakoutPosition,
   candle: Candle
-): {
-  exit: boolean;
-  exitPrice: number | null;
-  reason: 'stop_loss' | 'trailing_stop' | 'reverse_signal' | null;
-} {
+): DailyBreakoutExitDecision {
   if (position.side === 'long') {
     if (candle.low <= position.stopLossPrice) {
-      return { exit: true, exitPrice: position.stopLossPrice, reason: 'stop_loss' };
+      return {
+        exit: true,
+        exitPrice: position.stopLossPrice,
+        reason: 'stop_loss'
+      };
     }
+
     if (candle.low <= position.trailingStopPrice) {
-      return { exit: true, exitPrice: position.trailingStopPrice, reason: 'trailing_stop' };
+      return {
+        exit: true,
+        exitPrice: position.trailingStopPrice,
+        reason: 'trailing_stop'
+      };
     }
+
     if (candle.low < position.reverseLevel) {
-      return { exit: true, exitPrice: position.reverseLevel, reason: 'reverse_signal' };
+      return {
+        exit: true,
+        exitPrice: position.reverseLevel,
+        reason: 'reverse_signal'
+      };
     }
   } else {
     if (candle.high >= position.stopLossPrice) {
-      return { exit: true, exitPrice: position.stopLossPrice, reason: 'stop_loss' };
+      return {
+        exit: true,
+        exitPrice: position.stopLossPrice,
+        reason: 'stop_loss'
+      };
     }
+
     if (candle.high >= position.trailingStopPrice) {
-      return { exit: true, exitPrice: position.trailingStopPrice, reason: 'trailing_stop' };
+      return {
+        exit: true,
+        exitPrice: position.trailingStopPrice,
+        reason: 'trailing_stop'
+      };
     }
+
     if (candle.high > position.reverseLevel) {
-      return { exit: true, exitPrice: position.reverseLevel, reason: 'reverse_signal' };
+      return {
+        exit: true,
+        exitPrice: position.reverseLevel,
+        reason: 'reverse_signal'
+      };
     }
   }
 
-  return { exit: false, exitPrice: null, reason: null };
+  return {
+    exit: false,
+    exitPrice: null,
+    reason: null
+  };
 }
