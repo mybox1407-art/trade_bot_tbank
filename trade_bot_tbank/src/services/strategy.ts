@@ -243,7 +243,6 @@ export function buildHtfBiasSeries(
   const ema200Arr = EMA.calculate({ period: 200, values: closes });
   const adxArr = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
 
-  // technicalindicators: выход короче входа — выравниваем с конца
   const n = hours.length;
   const offE20 = n - ema20Arr.length;
   const offE50 = n - ema50Arr.length;
@@ -296,6 +295,7 @@ export function getHtfBiasAt(
   let lo = 0;
   let hi = series.length - 1;
   let best: HtfBarState | null = null;
+
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
     const closeTs = series[mid].time + MS_PER_HOUR;
@@ -454,8 +454,8 @@ export function analyzeMarket(
     };
   }
 
-  const ema20 = ind.ema20;
-  const ema50 = ind.ema50;
+  const ema20 = ind.ema20 as number;
+  const ema50 = ind.ema50 as number;
   const extension = (price - ema20) / price;
 
   const macdCrossUp =
@@ -472,8 +472,17 @@ export function analyzeMarket(
 
   const range = Math.max(lastHigh - lastLow, 1e-9);
   const bodyPct = Math.abs(price - lastOpen) / range;
-  const bullCandle = price > lastOpen && bodyPct >= 0.4;
-  const bearCandle = price < lastOpen && bodyPct >= 0.4;
+  const closeNearHigh = (lastHigh - price) / range <= 0.25;
+  const closeNearLow = (price - lastLow) / range <= 0.25;
+
+  /**
+   * Фильтр силы 15m-свечи:
+   * - тело не меньше 55% диапазона
+   * - закрытие near high / near low
+   * Это отсекает вялые pullback/cross-сигналы с длинными хвостами.
+   */
+  const bullCandle = price > lastOpen && bodyPct >= 0.55 && closeNearHigh;
+  const bearCandle = price < lastOpen && bodyPct >= 0.55 && closeNearLow;
 
   const touchLong =
     lastLow <= ema20 * 1.006 ||
@@ -524,19 +533,19 @@ export function analyzeMarket(
     notExtShort;
 
   let longSignal =
-    regime === 'trend_up' && price > ind.ema200 && (pullbackLong || crossLong);
+    regime === 'trend_up' && price > (ind.ema200 as number) && (pullbackLong || crossLong);
   let shortSignal =
-    regime === 'trend_down' && price < ind.ema200 && (pullbackShort || crossShort);
+    regime === 'trend_down' && price < (ind.ema200 as number) && (pullbackShort || crossShort);
 
   // ---------- HTF 1h GATE ----------
   if (htf.enabled && (longSignal || shortSignal)) {
     const minAdx = htf.minAdx1h ?? 18;
     let series = htf.precomputedHtf;
     if (!series) {
-      // live fallback (медленнее)
       series = buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
     }
     const st = getHtfBiasAt(series, lastTs);
+
     if (!st) {
       return {
         ...emptySignal(price, regime),
@@ -578,14 +587,19 @@ export function analyzeMarket(
         shortSignal,
         lastRsi,
         extension,
+        bodyPct,
+        closeNearHigh,
+        closeNearLow,
         pullbackLong,
-        pullbackShort
+        pullbackShort,
+        crossLong,
+        crossShort
       }
     };
   }
 
   const side: 'long' | 'short' = longSignal ? 'long' : 'short';
-  const atrStopMult = ind.atrPct > 0.015 ? 1.6 : 1.45;
+  const atrStopMult = (ind.atrPct as number) > 0.015 ? 1.6 : 1.45;
 
   const stopLossPrice = getStructureStop({
     side,
@@ -650,6 +664,9 @@ export function analyzeMarket(
       extension,
       initialR,
       stopPct,
+      bodyPct,
+      closeNearHigh,
+      closeNearLow,
       tp1: takeProfit1Price,
       tp2: takeProfit2Price,
       pullbackLong,
