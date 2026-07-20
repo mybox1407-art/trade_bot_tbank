@@ -524,12 +524,12 @@ async function main(): Promise<void> {
     progressLogEvery: 250,
     onePositionAtTime: true,
     minSignalAtrPct: 0.0055,
-    riskPerTrade: 0.01,
+    riskPerTrade: 0.008,
     stopAtrMult: 2.75,
     trailingAtrMult: 2.0,
     minAtrPct: 0.0035,
     maxAtrPct: 0.12,
-    maxBreakoutDistancePct: 0.025,
+    maxBreakoutDistancePct: 0.035,
     allowLongs: true,
     allowShorts: true
   });
