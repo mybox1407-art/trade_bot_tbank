@@ -531,7 +531,7 @@ async function main(): Promise<void> {
     maxAtrPct: 0.12,
     maxBreakoutDistancePct: 0.035,
     allowLongs: true,
-    allowShorts: true
+    allowShorts: false
   });
 
   printHeader('ВРЕМЯ ВЫПОЛНЕНИЯ');
