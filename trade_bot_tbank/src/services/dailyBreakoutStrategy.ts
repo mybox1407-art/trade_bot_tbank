@@ -332,4 +332,134 @@ export function analyzeDailyBreakout(
 }
 
 export function buildDailyBreakoutPositionFromSignal(
-  signal: 
+  signal: DailyBreakoutSignal,
+  openedAt: number
+): DailyBreakoutPosition | null {
+  if (
+    signal.side === 'none' ||
+    signal.entryPrice == null ||
+    signal.stopLossPrice == null ||
+    signal.trailingStopPrice == null ||
+    signal.reverseLevel == null ||
+    signal.atr == null ||
+    signal.quantity == null ||
+    signal.positionSize == null ||
+    signal.riskPerShare == null ||
+    signal.regime === 'none'
+  ) {
+    return null;
+  }
+
+  return {
+    symbol: signal.symbol,
+    side: signal.side,
+    entryPrice: signal.entryPrice,
+    stopLossPrice: signal.stopLossPrice,
+    trailingStopPrice: signal.trailingStopPrice,
+    reverseLevel: signal.reverseLevel,
+    atrAtEntry: signal.atr,
+    highestHighSinceEntry: signal.entryPrice,
+    lowestLowSinceEntry: signal.entryPrice,
+    quantity: signal.quantity,
+    positionSize: signal.positionSize,
+    riskPerShare: signal.riskPerShare,
+    openedAt,
+    regime: signal.regime
+  };
+}
+
+export function updateDailyBreakoutTrailingStop(
+  position: DailyBreakoutPosition,
+  candle: Candle,
+  options: DailyBreakoutOptions = {}
+): DailyBreakoutPosition {
+  const resolved = resolveOptions(options);
+
+  let highestHighSinceEntry = position.highestHighSinceEntry;
+  let lowestLowSinceEntry = position.lowestLowSinceEntry;
+  let trailingStopPrice = position.trailingStopPrice;
+
+  if (position.side === 'long') {
+    highestHighSinceEntry = Math.max(highestHighSinceEntry, candle.high);
+    const nextTrail =
+      highestHighSinceEntry - position.atrAtEntry * resolved.trailingAtrMult;
+    trailingStopPrice = Math.max(trailingStopPrice, nextTrail);
+  } else {
+    lowestLowSinceEntry = Math.min(lowestLowSinceEntry, candle.low);
+    const nextTrail =
+      lowestLowSinceEntry + position.atrAtEntry * resolved.trailingAtrMult;
+    trailingStopPrice = Math.min(trailingStopPrice, nextTrail);
+  }
+
+  return {
+    ...position,
+    highestHighSinceEntry: round(highestHighSinceEntry),
+    lowestLowSinceEntry: round(lowestLowSinceEntry),
+    trailingStopPrice: round(trailingStopPrice)
+  };
+}
+
+export function shouldExitDailyBreakoutPosition(
+  position: DailyBreakoutPosition,
+  candle: Candle
+): {
+  exit: boolean;
+  exitPrice: number | null;
+  reason: 'stop_loss' | 'trailing_stop' | 'reverse_signal' | null;
+} {
+  if (position.side === 'long') {
+    if (candle.low <= position.stopLossPrice) {
+      return {
+        exit: true,
+        exitPrice: position.stopLossPrice,
+        reason: 'stop_loss'
+      };
+    }
+
+    if (candle.low <= position.trailingStopPrice) {
+      return {
+        exit: true,
+        exitPrice: position.trailingStopPrice,
+        reason: 'trailing_stop'
+      };
+    }
+
+    if (candle.low < position.reverseLevel) {
+      return {
+        exit: true,
+        exitPrice: position.reverseLevel,
+        reason: 'reverse_signal'
+      };
+    }
+  } else {
+    if (candle.high >= position.stopLossPrice) {
+      return {
+        exit: true,
+        exitPrice: position.stopLossPrice,
+        reason: 'stop_loss'
+      };
+    }
+
+    if (candle.high >= position.trailingStopPrice) {
+      return {
+        exit: true,
+        exitPrice: position.trailingStopPrice,
+        reason: 'trailing_stop'
+      };
+    }
+
+    if (candle.high > position.reverseLevel) {
+      return {
+        exit: true,
+        exitPrice: position.reverseLevel,
+        reason: 'reverse_signal'
+      };
+    }
+  }
+
+  return {
+    exit: false,
+    exitPrice: null,
+    reason: null
+  };
+}
