@@ -3,9 +3,8 @@ import {
   aggregateTo1h,
   buildHtfBiasSeries,
   Candle,
-  HTF_WARMUP_15M,
   HtfBarState,
-  HtfFilterOptions,
+  HTF_WARMUP_15M,
   MarketRegime,
   PARTIAL_LOCK_R,
   TP1_FRACTION
@@ -17,26 +16,15 @@ export interface BacktestOptions {
   warmupCandles?: number;
   onePositionAtTime?: boolean;
   conservativeIntrabarExecution?: boolean;
-  /** Пауза после ЛЮБОЙ закрытой сделки */
   cooldownCandles?: number;
   progressLogEvery?: number;
-  /** 0 = без лимита входов в день */
   maxTradesPerDay?: number;
   timeStopBars?: number;
-  /** 0 = early abort выкл. */
   earlyAbortBars?: number;
   earlyAbortMinR?: number;
-  /** 0 = без трейла runner (рекомендуется) */
   runnerTrailR?: number;
-  /** HTF 1h filter */
   htfFilter?: boolean;
   htfMinAdx1h?: number;
-}
-
-export interface HtfStats {
-  rejects: number;
-  passes: number;
-  warmupRejects: number;
 }
 
 interface OpenPosition {
@@ -110,6 +98,12 @@ export interface BacktestSummary {
   maxDrawdownPct: number;
 }
 
+export interface HtfStats {
+  rejects: number;
+  passes: number;
+  warmupRejects: number;
+}
+
 export interface BacktestResult {
   symbol: string;
   options: Required<BacktestOptions>;
@@ -162,15 +156,31 @@ function utcDateKey(ts: number): string {
 function tryOpenPosition(params: {
   visibleCandles: Candle[];
   currentBalance: number;
-  htfOpts: HtfFilterOptions;
+  htfEnabled: boolean;
+  htfMinAdx1h: number;
+  precomputedHtf?: HtfBarState[];
   htfStats: HtfStats;
 }): OpenPosition | null {
-  const { visibleCandles, currentBalance, htfOpts, htfStats } = params;
-  const signal = analyzeMarket(visibleCandles, currentBalance, htfOpts);
+  const {
+    visibleCandles,
+    currentBalance,
+    htfEnabled,
+    htfMinAdx1h,
+    precomputedHtf,
+    htfStats
+  } = params;
+
+  const signal = analyzeMarket(visibleCandles, currentBalance, {
+    enabled: htfEnabled,
+    minAdx1h: htfMinAdx1h,
+    precomputedHtf
+  });
 
   const reject = signal.indicators?.reject;
-  if (reject === 'htf_gate') htfStats.rejects += 1;
-  if (reject === 'htf_warmup') htfStats.warmupRejects += 1;
+  if (htfEnabled) {
+    if (reject === 'htf_warmup') htfStats.warmupRejects += 1;
+    else if (reject === 'htf_gate') htfStats.rejects += 1;
+  }
 
   if (
     signal.side === 'none' ||
@@ -184,7 +194,7 @@ function tryOpenPosition(params: {
     return null;
   }
 
-  if (htfOpts.enabled) htfStats.passes += 1;
+  if (htfEnabled) htfStats.passes += 1;
 
   const lastCandle = visibleCandles[visibleCandles.length - 1];
   const entryPrice = toNumber(signal.price);
@@ -211,7 +221,6 @@ function tryOpenPosition(params: {
   };
 }
 
-/** Трейл runner; при trailR=0 ничего не делает */
 function updateRunnerTrail(params: {
   position: OpenPosition;
   candle: Candle;
@@ -305,6 +314,8 @@ function buildTrade(params: {
 function stopReasonAfterTp1(position: OpenPosition): 'breakeven' | 'trail_stop' {
   const lockDist = position.initialR * PARTIAL_LOCK_R;
   const moved = Math.abs(position.stopLossPrice - position.entryPrice);
+  // lock=0 → SL на entry → всегда breakeven (не trail)
+  if (lockDist <= 1e-12) return 'breakeven';
   return moved > lockDist * 1.15 ? 'trail_stop' : 'breakeven';
 }
 
@@ -513,7 +524,6 @@ function calculateDrawdown(equityCurve: Array<{ time: number; balance: number }>
     if (d > maxDrawdownAbs) maxDrawdownAbs = d;
     if (dp > maxDrawdownPct) maxDrawdownPct = dp;
   }
-
   return {
     maxDrawdownAbs: round(maxDrawdownAbs),
     maxDrawdownPct: round(maxDrawdownPct, 6)
@@ -573,29 +583,21 @@ export function runStrategyBacktest(
   candles: Candle[],
   options: BacktestOptions = {}
 ): BacktestResult {
-  const htfFilter = options.htfFilter ?? false;
-  const htfMinAdx1h = options.htfMinAdx1h ?? 18;
-
-  const baseWarmup = options.warmupCandles ?? 250;
-  const warmupCandles = htfFilter
-    ? Math.max(baseWarmup, HTF_WARMUP_15M)
-    : baseWarmup;
-
   const resolvedOptions: Required<BacktestOptions> = {
     startingBalance: options.startingBalance ?? 50000,
     commissionRate: options.commissionRate ?? 0.0005,
-    warmupCandles,
+    warmupCandles: options.warmupCandles ?? 250,
     onePositionAtTime: options.onePositionAtTime ?? true,
     conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true,
     cooldownCandles: options.cooldownCandles ?? 12,
     progressLogEvery: options.progressLogEvery ?? 5000,
     maxTradesPerDay: options.maxTradesPerDay ?? 0,
-    timeStopBars: options.timeStopBars ?? 120,
-    earlyAbortBars: options.earlyAbortBars ?? 0,
-    earlyAbortMinR: options.earlyAbortMinR ?? 0.25,
+    timeStopBars: options.timeStopBars ?? 64,
+    earlyAbortBars: options.earlyAbortBars ?? 16,
+    earlyAbortMinR: options.earlyAbortMinR ?? 0.35,
     runnerTrailR: options.runnerTrailR ?? 0,
-    htfFilter,
-    htfMinAdx1h
+    htfFilter: options.htfFilter ?? false,
+    htfMinAdx1h: options.htfMinAdx1h ?? 18
   };
 
   const emptyHtf: HtfStats = { rejects: 0, passes: 0, warmupRejects: 0 };
@@ -618,23 +620,6 @@ export function runStrategyBacktest(
   }
 
   const sortedCandles = [...candles].sort((a, b) => a.time - b.time);
-
-  let htfSeries: HtfBarState[] | undefined;
-  if (htfFilter) {
-    htfSeries = buildHtfBiasSeries(
-      aggregateTo1h(sortedCandles),
-      htfMinAdx1h
-    );
-  }
-
-  const htfOpts: HtfFilterOptions = {
-    enabled: htfFilter,
-    minAdx1h: htfMinAdx1h,
-    precomputedHtf: htfSeries
-  };
-
-  const htfStats: HtfStats = { rejects: 0, passes: 0, warmupRejects: 0 };
-
   let balance = resolvedOptions.startingBalance;
   let openPosition: OpenPosition | null = null;
   let openPositionIndex = -1;
@@ -645,6 +630,15 @@ export function runStrategyBacktest(
   const equityCurve: Array<{ time: number; balance: number }> = [
     { time: sortedCandles[0].time, balance: round(balance) }
   ];
+  const htfStats: HtfStats = { rejects: 0, passes: 0, warmupRejects: 0 };
+
+  let precomputedHtf: HtfBarState[] | undefined;
+  if (resolvedOptions.htfFilter) {
+    precomputedHtf = buildHtfBiasSeries(
+      aggregateTo1h(sortedCandles),
+      resolvedOptions.htfMinAdx1h
+    );
+  }
 
   const startedAt = Date.now();
   const totalBarsToProcess = Math.max(
@@ -763,7 +757,6 @@ export function runStrategyBacktest(
         trades.push(t);
         equityCurve.push({ time: currentCandle.time, balance: round(balance) });
       }
-
       if (!result.stillOpen) {
         cooldownRemaining = resolvedOptions.cooldownCandles;
         openPosition = null;
@@ -787,7 +780,9 @@ export function runStrategyBacktest(
     const maybeOpen = tryOpenPosition({
       visibleCandles,
       currentBalance: balance,
-      htfOpts,
+      htfEnabled: resolvedOptions.htfFilter,
+      htfMinAdx1h: resolvedOptions.htfMinAdx1h,
+      precomputedHtf,
       htfStats
     });
     if (maybeOpen) {
