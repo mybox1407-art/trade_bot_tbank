@@ -26,6 +26,6 @@ npx ts-node src/backtest/downloadCandles.ts BBG004730N88 SBER 7 1m
 
 Запуск теста
 
-npm run backtest -- src/backtest/data/SBER_15m.json SBER
+npx ts-node src/backtest/runMomentumScalpBacktest.ts src/backtest/data/SBER_1m.json SBER
 
 
