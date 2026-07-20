@@ -1,13 +1,13 @@
 import {
   Candle,
-  DEFAULT_SCALP_V2_PARAMS,
+  DEFAULT_SCALP_PARAMS,
   EntryRejectReason,
-  MomentumScalpSignalV2,
-  MomentumScalpV2Params,
+  ScalpParams,
+  ScalpSignal,
   aggregateCandlesTo5m,
   build1mIndicators,
   build5mIndicators,
-  evaluateMomentumScalpEntryV2,
+  evaluateMomentumScalpEntry,
   floorToStep
 } from '../services/momentumScalpStrategy';
 
@@ -18,7 +18,7 @@ export interface RejectStat {
   count: number;
 }
 
-export interface ScalpTradeV2 {
+export interface ScalpTrade {
   side: 'long' | 'short';
   signalTime: number;
   entryTime: number;
@@ -42,13 +42,13 @@ export interface ScalpTradeV2 {
 }
 
 interface OpenPosition {
-  signal: MomentumScalpSignalV2;
+  signal: ScalpSignal;
   size: number;
   entryCommission: number;
   openedAtIndex: number;
 }
 
-export interface ScalpBacktestResultV2 {
+export interface ScalpBacktestResult {
   finalBalance: number;
   totalReturn: number;
   totalTrades: number;
@@ -61,11 +61,11 @@ export interface ScalpBacktestResultV2 {
   grossLoss: number;
   commissionTotal: number;
   equity: number[];
-  trades: ScalpTradeV2[];
+  trades: ScalpTrade[];
   rejectStats: RejectStat[];
 }
 
-export interface BacktestOptionsV2 {
+export interface BacktestOptions {
   startingBalance?: number;
   lotStep?: number;
   minQty?: number;
@@ -73,11 +73,11 @@ export interface BacktestOptionsV2 {
   allowShorts?: boolean;
 }
 
-export function runMomentumScalpBacktestV2(
+export function runMomentumScalpBacktest(
   candles1m: Candle[],
-  params: MomentumScalpV2Params = DEFAULT_SCALP_V2_PARAMS,
-  options: BacktestOptionsV2 = {}
-): ScalpBacktestResultV2 {
+  params: ScalpParams = DEFAULT_SCALP_PARAMS,
+  options: BacktestOptions = {}
+): ScalpBacktestResult {
   const startingBalance = options.startingBalance ?? 50000;
   const lotStep = options.lotStep ?? 0.0001;
   const minQty = options.minQty ?? 1;
@@ -90,7 +90,7 @@ export function runMomentumScalpBacktestV2(
 
   let balance = startingBalance;
   const equity: number[] = [startingBalance];
-  const trades: ScalpTradeV2[] = [];
+  const trades: ScalpTrade[] = [];
   const rejectMap = new Map<EntryRejectReason, number>();
 
   let openPosition: OpenPosition | null = null;
@@ -105,16 +105,18 @@ export function runMomentumScalpBacktestV2(
   function updateEquity(markToMarketValue?: number) {
     const currentEquity = markToMarketValue ?? balance;
     equity.push(currentEquity);
+
     if (currentEquity > peakEquity) {
       peakEquity = currentEquity;
     }
+
     const dd = peakEquity - currentEquity;
     if (dd > maxDrawdown) {
       maxDrawdown = dd;
     }
   }
 
-  function buildPosition(signal: MomentumScalpSignalV2): OpenPosition | null {
+  function buildPosition(signal: ScalpSignal): OpenPosition | null {
     const riskCapital = balance * Math.min(params.riskPerTrade, params.maxRiskPerTrade);
     if (riskCapital <= 0 || signal.riskDistance <= 0 || signal.entryPrice <= 0) {
       return null;
@@ -231,18 +233,18 @@ export function runMomentumScalpBacktestV2(
 
       const barsHeld = i - pos.openedAtIndex + 1;
       if (barsHeld >= params.timeStopBars) {
-        let exitPrice = candle.close;
-        if (sig.side === 'long') {
-          exitPrice = candle.close * (1 - params.slippageRate);
-        } else {
-          exitPrice = candle.close * (1 + params.slippageRate);
-        }
+        const exitPrice =
+          sig.side === 'long'
+            ? candle.close * (1 - params.slippageRate)
+            : candle.close * (1 + params.slippageRate);
+
         closePosition(pos, i, exitPrice, 'time_stop');
         continue;
       }
 
       let markPrice = candle.close;
       let openGross = 0;
+
       if (sig.side === 'long') {
         markPrice = candle.close * (1 - params.slippageRate);
         openGross = (markPrice - sig.entryPrice) * pos.size;
@@ -250,6 +252,7 @@ export function runMomentumScalpBacktestV2(
         markPrice = candle.close * (1 + params.slippageRate);
         openGross = (sig.entryPrice - markPrice) * pos.size;
       }
+
       updateEquity(balance + openGross - pos.entryCommission);
       continue;
     }
@@ -259,7 +262,7 @@ export function runMomentumScalpBacktestV2(
       continue;
     }
 
-    const decision = evaluateMomentumScalpEntryV2(
+    const decision = evaluateMomentumScalpEntry(
       candles1m,
       indicators1m,
       candles5m,
@@ -269,7 +272,9 @@ export function runMomentumScalpBacktestV2(
     );
 
     if (!decision.accepted || !decision.signal) {
-      if (decision.reason) addReject(decision.reason);
+      if (decision.reason) {
+        addReject(decision.reason);
+      }
       updateEquity();
       continue;
     }
@@ -301,6 +306,7 @@ export function runMomentumScalpBacktestV2(
       openPosition.signal.side === 'long'
         ? lastCandle.close * (1 - params.slippageRate)
         : lastCandle.close * (1 + params.slippageRate);
+
     closePosition(openPosition, lastIndex, exitPrice, 'end_of_data');
   }
 
