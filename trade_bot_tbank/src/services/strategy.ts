@@ -4,27 +4,24 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-/** Тест: 2% риска на сделку (раньше 1%) */
-export const MAX_RISK_PER_TRADE = 0.02;
+/** Baseline 1% — 2% раздувал убытки без роста PF */
+export const MAX_RISK_PER_TRADE = 0.01;
 
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 
 /**
- * Рабочая модель выхода:
- * TP1 50% @ 1.2R → lock 0.2R на остатке → TP2 @ 2.5R
- * Без агрессивного трейла runner.
+ * Path Exit v1 (вход primary без ужесточения):
+ * TP1 40% @ 1.5R → SL runner = entry (lock 0) → TP2 @ 2.0R
+ * Early abort / time-stop задаются в runBacktest options.
  */
-export const TP1_FRACTION = 0.5;
-export const TP1_R = 1.2;
-export const TP2_R = 2.5;
-export const PARTIAL_LOCK_R = 0.2;
+export const TP1_FRACTION = 0.4;
+export const TP1_R = 1.5;
+export const TP2_R = 2.0;
+export const PARTIAL_LOCK_R = 0;
 
 const MIN_STOP_DISTANCE_RATE = 0.005;
-/** Было 1.2% — расширили окно стопа до 1.8% цены */
-const MAX_STOP_DISTANCE_RATE = 0.018;
-/** Потолок стопа в ATR (было 2.2) */
-const MAX_STOP_ATR_MULT = 2.8;
+const MAX_STOP_DISTANCE_RATE = 0.012;
 
 const MAX_POSITION_FRAC = 0.3;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
@@ -40,7 +37,7 @@ const TRADING_HOUR_UTC_TO = 15;
 
 const MIN_QUANTITY = 2;
 
-/** Мин. 15m-баров при HTF (≈200 часов EMA200 + запас) */
+/** Мин. 15m-баров при HTF */
 export const HTF_WARMUP_15M = 850;
 const MS_PER_HOUR = 3_600_000;
 
@@ -64,7 +61,6 @@ export type MarketRegime =
 export type HtfBias = 'up' | 'down' | 'neutral';
 
 export interface HtfBarState {
-  /** open time часа (UTC bucket) */
   time: number;
   bias: HtfBias;
   adx: number;
@@ -76,9 +72,7 @@ export interface HtfBarState {
 
 export interface HtfFilterOptions {
   enabled: boolean;
-  /** 0 = только EMA-stack + цена vs EMA200 */
   minAdx1h?: number;
-  /** prefetch из бэктеста — не пересчитывать 1h на каждом баре */
   precomputedHtf?: HtfBarState[];
 }
 
@@ -136,7 +130,7 @@ function getStructureStop(params: {
   const pad = lastAtr * STOP_SWING_PAD_ATR;
 
   const minDist = Math.max(lastAtr * atrStopMult, price * MIN_STOP_DISTANCE_RATE);
-  const maxDist = Math.min(lastAtr * MAX_STOP_ATR_MULT, price * MAX_STOP_DISTANCE_RATE);
+  const maxDist = Math.min(lastAtr * 2.2, price * MAX_STOP_DISTANCE_RATE);
 
   if (side === 'long') {
     let stop = recentLow - pad;
@@ -185,7 +179,7 @@ function calcPositionSize(params: {
 }
 
 // ============================================================================
-// HTF 1h — агрегация и bias (без look-ahead)
+// HTF 1h
 // ============================================================================
 
 export function hourBucketStart(ts: number): number {
@@ -201,7 +195,6 @@ export function hourBucketStart(ts: number): number {
   );
 }
 
-/** 4×15m → 1h OHLCV. time = open часа (UTC). */
 export function aggregateTo1h(candles15: Candle[]): Candle[] {
   const map = new Map<number, Candle>();
   for (const c of candles15) {
@@ -226,11 +219,6 @@ export function aggregateTo1h(candles15: Candle[]): Candle[] {
   return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
-/**
- * Bias на каждом закрытом 1h-баре.
- * up:   close > ema200 && ema20 > ema50 && adx >= minAdx1h
- * down: close < ema200 && ema20 < ema50 && adx >= minAdx1h
- */
 export function buildHtfBiasSeries(
   hours: Candle[],
   minAdx1h = 18
@@ -286,10 +274,6 @@ export function buildHtfBiasSeries(
   return out;
 }
 
-/**
- * Последний ПОЛНОСТЬЮ закрытый 1h к моменту ts15:
- * hour.open + 1h <= ts15
- */
 export function getHtfBiasAt(
   series: HtfBarState[],
   ts15: number
@@ -402,7 +386,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 
 /**
  * @param balance — текущий баланс для сайзинга
- * @param htf — фильтр старшего ТФ (1h). По умолчанию выкл.
+ * @param htf — фильтр 1h (по умолчанию выкл.)
  */
 export function analyzeMarket(
   candles: Candle[],
@@ -473,7 +457,6 @@ export function analyzeMarket(
     lastMacd.MACD! < lastMacd.signal! &&
     (lastMacd.histogram ?? 0) <= (prevMacd.histogram ?? 0);
 
-  // Откат фильтра силы свечи: снова мягкий body >= 40%
   const range = Math.max(lastHigh - lastLow, 1e-9);
   const bodyPct = Math.abs(price - lastOpen) / range;
   const bullCandle = price > lastOpen && bodyPct >= 0.4;
@@ -528,9 +511,13 @@ export function analyzeMarket(
     notExtShort;
 
   let longSignal =
-    regime === 'trend_up' && price > (ind.ema200 as number) && (pullbackLong || crossLong);
+    regime === 'trend_up' &&
+    price > (ind.ema200 as number) &&
+    (pullbackLong || crossLong);
   let shortSignal =
-    regime === 'trend_down' && price < (ind.ema200 as number) && (pullbackShort || crossShort);
+    regime === 'trend_down' &&
+    price < (ind.ema200 as number) &&
+    (pullbackShort || crossShort);
 
   // ---------- HTF 1h GATE ----------
   if (htf.enabled && (longSignal || shortSignal)) {
