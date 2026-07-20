@@ -24,6 +24,14 @@ type ApiResponse = {
   candles?: HistoricCandle[];
 };
 
+const INTERVAL_MAP: Record<string, CandleInterval> = {
+  '1m': 'CANDLE_INTERVAL_1_MIN',
+  '5m': 'CANDLE_INTERVAL_5_MIN',
+  '15m': 'CANDLE_INTERVAL_15_MIN',
+  '1h': 'CANDLE_INTERVAL_HOUR',
+  'day': 'CANDLE_INTERVAL_DAY',
+};
+
 function moneyToNumber(value: HistoricCandle['open']): number {
   if (!value) return NaN;
   const units = Number(value.units ?? 0);
@@ -55,6 +63,25 @@ function chunkPeriods(from: Date, to: Date, chunkDays: number) {
   }
 
   return chunks;
+}
+
+function chunkDaysForInterval(interval: CandleInterval): number {
+  switch (interval) {
+    case 'CANDLE_INTERVAL_1_MIN':
+      return 1;
+    case 'CANDLE_INTERVAL_5_MIN':
+      return 5;
+    case 'CANDLE_INTERVAL_15_MIN':
+      return 10;
+    case 'CANDLE_INTERVAL_HOUR':
+      return 30;
+    case 'CANDLE_INTERVAL_DAY':
+      return 365;
+  }
+}
+
+async function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function fetchCandles(params: {
@@ -96,7 +123,7 @@ async function fetchCandles(params: {
 
 async function main() {
   const token = process.env.TINVEST_TOKEN;
-  const [, , figi, symbol = 'INSTRUMENT', daysArg = '21'] = process.argv;
+  const [, , figi, symbol = 'INSTRUMENT', daysArg = '21', intervalArg = '15m'] = process.argv;
 
   if (!token) {
     console.error('Не задан TINVEST_TOKEN');
@@ -106,7 +133,14 @@ async function main() {
 
   if (!figi) {
     console.error('Не указан FIGI.');
-    console.error('Пример запуска: npm run download:candles -- BBG004730N88 SBER 21');
+    console.error('Пример запуска: npm run download:candles -- BBG004730N88 SBER 7 1m');
+    process.exit(1);
+  }
+
+  const interval = INTERVAL_MAP[intervalArg];
+  if (!interval) {
+    console.error(`Некорректный интервал: ${intervalArg}`);
+    console.error('Допустимые: 1m, 5m, 15m, 1h, day');
     process.exit(1);
   }
 
@@ -116,12 +150,11 @@ async function main() {
     process.exit(1);
   }
 
-  const interval: CandleInterval = 'CANDLE_INTERVAL_15_MIN';
-
   const to = new Date();
   const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
 
-  const periods = chunkPeriods(from, to, 20);
+  const chunkDays = chunkDaysForInterval(interval);
+  const periods = chunkPeriods(from, to, chunkDays);
   const allCandles: Array<{
     time: number;
     open: number;
@@ -134,7 +167,7 @@ async function main() {
   for (let i = 0; i < periods.length; i++) {
     const period = periods[i];
     console.log(
-      `Загружаю chunk ${i + 1}/${periods.length}: ${period.from.toISOString()} -> ${period.to.toISOString()}`
+      `Загружаю chunk ${i + 1}/${periods.length}: ${period.from.toISOString()} -> ${period.to.toISOString()} [${intervalArg}]`
     );
 
     const candles = await fetchCandles({
@@ -165,6 +198,10 @@ async function main() {
       );
 
     allCandles.push(...normalized);
+
+    if (i < periods.length - 1) {
+      await sleep(500);
+    }
   }
 
   const deduped = Array.from(
@@ -174,7 +211,7 @@ async function main() {
   const outputDir = path.resolve(process.cwd(), 'src/backtest/data');
   ensureDir(outputDir);
 
-  const outputFile = path.join(outputDir, `${symbol}_15m.json`);
+  const outputFile = path.join(outputDir, `${symbol}_${intervalArg}.json`);
   fs.writeFileSync(outputFile, JSON.stringify(deduped, null, 2), 'utf-8');
 
   console.log(`Готово. Сохранено свечей: ${deduped.length}`);
