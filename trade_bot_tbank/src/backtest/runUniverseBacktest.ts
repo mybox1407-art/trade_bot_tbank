@@ -11,7 +11,8 @@ const ANSI = {
   reset: '\x1b[0m',
   green: '\x1b[32m',
   red: '\x1b[31m',
-  yellow: '\x1b[33m'
+  yellow: '\x1b[33m',
+  cyan: '\x1b[36m'
 } as const;
 
 function colorize(text: string, color: keyof typeof ANSI): string {
@@ -119,13 +120,9 @@ function printSummary(result: ReturnType<typeof runUniverseBacktest>): void {
   console.log(`Побед: ${colorize(String(s.wins), 'green')}`);
   console.log(`Поражений: ${colorize(String(s.losses), 'red')}`);
   console.log(`Win rate: ${formatNumber(s.winRate * 100, 2)}%`);
-  console.log(
-    `Gross profit: ${colorize(formatNumber(s.grossProfit, 2), 'green')}`
-  );
+  console.log(`Gross profit: ${colorize(formatNumber(s.grossProfit, 2), 'green')}`);
   console.log(`Gross loss: ${colorize(formatNumber(s.grossLoss, 2), 'red')}`);
-  console.log(
-    `Net profit: ${colorize(formatNumber(s.netProfit, 2), netColor)}`
-  );
+  console.log(`Net profit: ${colorize(formatNumber(s.netProfit, 2), netColor)}`);
   console.log(`Avg net pnl: ${formatNumber(s.avgNetPnl, 2)}`);
   console.log(`Avg win: ${colorize(formatNumber(s.avgWin, 2), 'green')}`);
   console.log(`Avg loss: ${colorize(formatNumber(s.avgLoss, 2), 'red')}`);
@@ -140,7 +137,9 @@ function printSummary(result: ReturnType<typeof runUniverseBacktest>): void {
   console.log(
     `Доходность: ${colorize(formatNumber(s.returnPct * 100, 2) + '%', retColor)}`
   );
-  console.log(`Средняя месячная доходность: ${formatNumber(s.avgMonthlyReturnPct * 100, 2)}%`);
+  console.log(
+    `Средняя месячная доходность: ${formatNumber(s.avgMonthlyReturnPct * 100, 2)}%`
+  );
   console.log(`Месяцев в тесте: ${s.monthsCount}`);
   console.log(`Макс. просадка: ${formatNumber(s.maxDrawdownAbs, 2)}`);
   console.log(`Макс. просадка %: ${formatNumber(s.maxDrawdownPct * 100, 2)}%`);
@@ -151,69 +150,156 @@ function printSelectionStats(result: ReturnType<typeof runUniverseBacktest>): vo
   console.log('\n========== SELECTION STATS ==========');
   console.log(`Decision bars: ${st.totalDecisionBars}`);
   console.log(`No-signal bars: ${st.noSignalBars}`);
-  console.log(`Picked by side: ${Object.entries(st.pickedBySide).map(([k, v]) => `${k}=${v}`).join(' | ') || '—'}`);
-  console.log(`Picked by symbol: ${Object.entries(st.pickedBySymbol).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(' | ') || '—'}`);
+  console.log(
+    `Picked by side: ${
+      Object.entries(st.pickedBySide)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(' | ') || '—'
+    }`
+  );
+  console.log(
+    `Picked by state: ${
+      Object.entries(st.pickedByState)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(' | ') || '—'
+    }`
+  );
+  console.log(
+    `Picked by symbol: ${
+      Object.entries(st.pickedBySymbol)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k}=${v}`)
+        .join(' | ') || '—'
+    }`
+  );
+
+  const top = st.topScores.slice(0, 10);
+  if (top.length) {
+    console.log('\nTop scored selections (first 10):');
+    for (const item of top) {
+      console.log(
+        [
+          formatDate(item.time),
+          `symbol=${item.symbol}`,
+          `side=${item.side}`,
+          `state=${item.state}`,
+          `coh=${formatNumber(item.coherence, 3)}`,
+          `score=${formatNumber(item.score, 3)}`,
+          `raw=${formatNumber(item.rawScore, 3)}`
+        ].join(' | ')
+      );
+    }
+  }
+}
+
+function printGroupedStatsBlock(params: {
+  title: string;
+  totalBars: number;
+  barsByKey: Record<string, { bars: number; pct: number }>;
+  tradesByKey: Record<
+    string,
+    {
+      trades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      netProfit: number;
+      grossProfit: number;
+      grossLoss: number;
+      profitFactor: number;
+      avgBarsHeld: number;
+      avgCoherence: number;
+      closeReasons: Record<string, number>;
+    }
+  >;
+  closeReasonsAll: Record<string, number>;
+  preferredOrder?: string[];
+}): void {
+  const {
+    title,
+    totalBars,
+    barsByKey,
+    tradesByKey,
+    closeReasonsAll,
+    preferredOrder = []
+  } = params;
+
+  console.log(`\n========== ${title} ==========`);
+
+  if (totalBars === 0) {
+    console.log('Нет данных.');
+    return;
+  }
+
+  const keys = [
+    ...preferredOrder.filter(k => barsByKey[k] || tradesByKey[k]),
+    ...Object.keys({ ...barsByKey, ...tradesByKey }).filter(k => !preferredOrder.includes(k))
+  ];
+
+  console.log(`Баров решений: ${totalBars}`);
+  console.log(
+    `Bars: ${keys
+      .map(key => {
+        const b = barsByKey[key];
+        const pct = b ? (b.pct * 100).toFixed(1) : '0.0';
+        const bars = b ? b.bars : 0;
+        return `${key} ${pct}% (${bars})`;
+      })
+      .join(' | ')}`
+  );
+
+  console.log('\nTrades:');
+  if (!keys.some(key => tradesByKey[key])) {
+    console.log('  (сделок нет)');
+  } else {
+    for (const key of keys) {
+      const t = tradesByKey[key];
+      if (!t) continue;
+      const pf = Number.isFinite(t.profitFactor) ? t.profitFactor.toFixed(3) : 'Infinity';
+      const wr = (t.winRate * 100).toFixed(1);
+      const reasons = Object.entries(t.closeReasons)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k}=${v}`)
+        .join(', ');
+
+      console.log(
+        `  ${key}: n=${t.trades} WR=${wr}% PF=${pf} net=${t.netProfit.toFixed(
+          2
+        )} avgBars=${t.avgBarsHeld} avgCoh=${t.avgCoherence.toFixed(3)} | ${reasons || '—'}`
+      );
+    }
+  }
+
+  const allReasons = Object.entries(closeReasonsAll)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' | ');
+
+  console.log(`\nClose reasons: ${allReasons || '—'}`);
 }
 
 function printRegimeStats(result: ReturnType<typeof runUniverseBacktest>): void {
   const rs = result.regimeStats;
-  console.log('\n========== REGIME STATS ==========');
-  if (!rs || rs.totalBars === 0) {
-    console.log('Нет данных по режимам.');
-    return;
-  }
+  printGroupedStatsBlock({
+    title: 'REGIME STATS',
+    totalBars: rs.totalBars,
+    barsByKey: rs.barsByRegime,
+    tradesByKey: rs.tradesByRegime,
+    closeReasonsAll: rs.closeReasonsAll,
+    preferredOrder: ['resonant', 'transition', 'chaotic', 'unknown']
+  });
+}
 
-  const order = [
-    'trend_up',
-    'trend_down',
-    'range',
-    'high_volatility',
-    'breakout_watch',
-    'unknown'
-  ];
-
-  console.log(`Баров решений: ${rs.totalBars}`);
-  const barParts: string[] = [];
-  const seen = new Set([
-    ...order,
-    ...Object.keys(rs.barsByRegime),
-    ...Object.keys(rs.tradesByRegime)
-  ]);
-  for (const reg of [...order, ...[...seen].filter(r => !order.includes(r))]) {
-    const b = rs.barsByRegime[reg];
-    if (!b && !rs.tradesByRegime[reg]) continue;
-    const pct = b ? (b.pct * 100).toFixed(1) : '0.0';
-    const bars = b ? b.bars : 0;
-    barParts.push(`${reg} ${pct}% (${bars})`);
-  }
-  console.log(`Bars: ${barParts.join(' | ')}`);
-
-  console.log('\nTrades by regime:');
-  const tradeRegs = [
-    ...order.filter(r => rs.tradesByRegime[r]),
-    ...Object.keys(rs.tradesByRegime).filter(r => !order.includes(r))
-  ];
-  if (!tradeRegs.length) {
-    console.log('  (сделок нет)');
-  }
-  for (const reg of tradeRegs) {
-    const t = rs.tradesByRegime[reg];
-    const pf = Number.isFinite(t.profitFactor) ? t.profitFactor.toFixed(3) : 'Infinity';
-    const wr = (t.winRate * 100).toFixed(1);
-    const reasons = Object.entries(t.closeReasons)
-      .sort((a, b) => b[1] - a[1])
-      .map(([k, v]) => `${k}=${v}`)
-      .join(', ');
-    console.log(
-      `  ${reg}: n=${t.trades} WR=${wr}% PF=${pf} net=${t.netProfit.toFixed(2)} avgBars=${t.avgBarsHeld} | ${reasons || '—'}`
-    );
-  }
-
-  const allReasons = Object.entries(rs.closeReasonsAll)
-    .sort((a, b) => b[1] - a[1])
-    .map(([k, v]) => `${k}=${v}`)
-    .join(' | ');
-  console.log(`\nClose reasons: ${allReasons || '—'}`);
+function printStateStats(result: ReturnType<typeof runUniverseBacktest>): void {
+  const ss = result.stateStats;
+  printGroupedStatsBlock({
+    title: 'STATE STATS',
+    totalBars: ss.totalBars,
+    barsByKey: ss.barsByState,
+    tradesByKey: ss.tradesByState,
+    closeReasonsAll: ss.closeReasonsAll,
+    preferredOrder: ['resonant', 'transition', 'chaotic', 'unknown']
+  });
 }
 
 function printTrades(
@@ -238,6 +324,8 @@ function printTrades(
       `Открыта: ${formatDate(trade.openedAt)}`,
       `Закрыта: ${formatDate(trade.closedAt)}`,
       `Сторона: ${trade.side}`,
+      `State: ${trade.state}`,
+      `Coh: ${formatNumber(trade.coherence, 3)}`,
       `Режим: ${trade.regime}`,
       `Вход: ${formatNumber(trade.entryPrice, 4)}`,
       `Выход: ${formatNumber(trade.exitPrice, 4)}`,
@@ -251,9 +339,15 @@ function printTrades(
       `Bars: ${trade.barsHeld}`
     ].join(' | ');
 
-    if (trade.netPnl > 0) console.log(colorize(line, 'green'));
-    else if (trade.netPnl < 0) console.log(colorize(line, 'red'));
-    else console.log(colorize(line, 'yellow'));
+    if (trade.state === 'resonant') {
+      if (trade.netPnl > 0) console.log(colorize(line, 'green'));
+      else if (trade.netPnl < 0) console.log(colorize(line, 'red'));
+      else console.log(colorize(line, 'cyan'));
+    } else {
+      if (trade.netPnl > 0) console.log(colorize(line, 'green'));
+      else if (trade.netPnl < 0) console.log(colorize(line, 'red'));
+      else console.log(colorize(line, 'yellow'));
+    }
   }
 }
 
@@ -288,7 +382,13 @@ function main(): void {
   const minScore = parseMinScore(minScoreArg?.split('=')[1]);
 
   const candlesBySymbol: Record<string, Candle[]> = {};
-  const loadedInfo: Array<{ symbol: string; path: string; count: number; from: number; to: number }> = [];
+  const loadedInfo: Array<{
+    symbol: string;
+    path: string;
+    count: number;
+    from: number;
+    to: number;
+  }> = [];
 
   for (const pairArg of pairArgs) {
     const sep = pairArg.lastIndexOf(':');
@@ -349,6 +449,8 @@ function main(): void {
   console.log(`Min score: ${minScore}`);
   console.log(`Warmup: ${DEFAULT_WARMUP} бар`);
   console.log(`Риск на сделку: ${MAX_RISK_PER_TRADE * 100}%`);
+  console.log(`State engine: ON (resonant / transition / chaotic)`);
+  console.log(`Выбор: top-1 signal из universe`);
   console.log(`Модель выхода: TP1 40%@1.5R → lock 0R → TP2@2.2R | abort 16b/0.35R | TS 64`);
   console.log(
     `Оценка времени: ~ ${formatDuration(estimated.minSec)} - ${formatDuration(
@@ -381,6 +483,7 @@ function main(): void {
   printSummary(result);
   printSelectionStats(result);
   printRegimeStats(result);
+  printStateStats(result);
   printTrades(result, 20);
 }
 
