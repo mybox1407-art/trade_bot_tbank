@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { Candle } from '../services/dailyBreakoutStrategy';
+import { Candle } from '../services/universeStrategy';
 import {
   runDailyUniverseBacktest,
   DailyUniverseBacktestResult,
@@ -440,22 +440,19 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
   }
 
   const symbolsSeen = f.symbolsSeen;
-  const noSignalCount = rejects.side_none ?? 0;
-  const atrRejectCount = rejects.min_signal_atr_pct ?? 0;
   const acceptedCount = f.acceptedSignals;
+  const rejectedCount = f.rejectedSignals;
   const selectedCount = f.selectedSignals;
   const openedCount = f.openedPositions;
 
-  const noSignalRate = symbolsSeen > 0 ? noSignalCount / symbolsSeen : 0;
-  const atrRejectRate = symbolsSeen > 0 ? atrRejectCount / symbolsSeen : 0;
   const acceptedRate = symbolsSeen > 0 ? acceptedCount / symbolsSeen : 0;
+  const rejectedRate = symbolsSeen > 0 ? rejectedCount / symbolsSeen : 0;
   const selectedFromAcceptedRate = acceptedCount > 0 ? selectedCount / acceptedCount : 0;
   const openedFromSelectedRate = selectedCount > 0 ? openedCount / selectedCount : 0;
 
   console.log('');
   console.log(`Symbols seen: ${symbolsSeen}`);
-  console.log(`No signal (side_none): ${noSignalCount} (${pct(noSignalRate)})`);
-  console.log(`ATR reject (min_signal_atr_pct): ${atrRejectCount} (${pct(atrRejectRate)})`);
+  console.log(`Rejected signals: ${rejectedCount} (${pct(rejectedRate)})`);
   console.log(`Accepted signals: ${acceptedCount} (${pct(acceptedRate)})`);
   console.log(
     `Selected from accepted: ${selectedCount}/${acceptedCount} (${pct(selectedFromAcceptedRate)})`
@@ -464,35 +461,6 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
     `Opened from selected: ${openedCount}/${selectedCount} (${pct(openedFromSelectedRate)})`
   );
 
-  console.log('');
-
-  if (symbolsSeen === 0) {
-    console.log('Нет обработанных баров: сначала проверь загрузку данных и пересечение временных меток.');
-    return;
-  }
-
-  if (noSignalRate >= 0.8) {
-    console.log(
-      'Главный узкий этап — генерация сигнала: в большинстве наблюдений стратегия не видит breakout и остаётся в side_none.'
-    );
-  } else if (atrRejectRate >= 0.1) {
-    console.log(
-      'Главный узкий этап — дополнительный ATR-порог: значимая часть сигналов отбрасывается фильтром min_signal_atr_pct.'
-    );
-  } else if (acceptedCount > 0 && selectedCount === 0) {
-    console.log(
-      'Сигналы доходят до accepted, но не проходят selection: проверь score и логику выбора лучшего кандидата.'
-    );
-  } else if (selectedCount > 0 && openedCount === 0) {
-    console.log(
-      'Сигналы выбираются, но позиции не открываются: проверь buildDailyBreakoutPositionFromSignal и ограничения размера позиции.'
-    );
-  } else if (openedCount > 0) {
-    console.log(
-      'Конвейер сигналов работает штатно: проблема не в открытии позиции, а в том, насколько редко рынок даёт валидный setup.'
-    );
-  }
-
   const topRejects = Object.entries(rejects)
     .sort((a: [string, number], b: [string, number]) => b[1] - a[1])
     .slice(0, 5);
@@ -500,7 +468,9 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
   if (topRejects.length) {
     console.log('');
     console.log(
-      `Топ причин отказа: ${topRejects.map(([k, v]: [string, number]) => `${k}=${v}`).join(', ')}`
+      `Топ причин отказа: ${topRejects
+        .map(([k, v]: [string, number]) => `${k}=${v}`)
+        .join(', ')}`
     );
   }
 
@@ -545,10 +515,9 @@ async function main(): Promise<void> {
     onePositionAtTime: true,
     minSignalAtrPct: 0.006,
     riskPerTrade: 0.01,
+    minScore: 4.0,
     stopAtrMult: 2.5,
     trailingAtrMult: 2.0,
-    smaPeriod: 20,
-    atrPeriod: 14,
     minAtrPct: 0.006,
     maxAtrPct: 0.12,
     maxBreakoutDistancePct: 0.04,
