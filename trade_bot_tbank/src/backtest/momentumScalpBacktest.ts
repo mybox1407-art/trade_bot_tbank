@@ -1,288 +1,334 @@
 import {
   Candle,
-  ScalpPosition,
-  ScalpParams,
-  analyzeMomentumScalp,
-  buildScalpPositionFromSignal,
-  evaluateScalpExit
-} from '../services/momentumScalpStrategy';
+  DEFAULT_SCALP_V2_PARAMS,
+  EntryRejectReason,
+  MomentumScalpSignalV2,
+  MomentumScalpV2Params,
+  aggregateCandlesTo5m,
+  build1mIndicators,
+  build5mIndicators,
+  evaluateMomentumScalpEntryV2,
+  floorToStep
+} from '../services/momentumScalpStrategyV2';
 
-export interface ScalpTrade {
+export type ExitReason = 'stop_loss' | 'take_profit' | 'time_stop' | 'end_of_data';
+
+export interface RejectStat {
+  reason: EntryRejectReason;
+  count: number;
+}
+
+export interface ScalpTradeV2 {
+  side: 'long' | 'short';
   signalTime: number;
   entryTime: number;
   exitTime: number;
-  side: 'long' | 'short';
   entryPrice: number;
   exitPrice: number;
+  stopLossPrice: number;
+  takeProfitPrice: number;
   size: number;
   grossPnl: number;
   commission: number;
   netPnl: number;
   pnlPct: number;
   barsHeld: number;
-  exitReason: string;
+  exitReason: ExitReason;
+  atr1m: number;
+  atr5m: number;
+  volumeRatio: number;
+  pullbackPct: number;
+  impulseBodyPct: number;
 }
 
-export interface RejectStat {
-  reason: string;
-  count: number;
+interface OpenPosition {
+  signal: MomentumScalpSignalV2;
+  size: number;
+  entryCommission: number;
+  openedAtIndex: number;
 }
 
-export interface ScalpBacktestResult {
-  trades: ScalpTrade[];
-  equity: number[];
-  timestamps: number[];
+export interface ScalpBacktestResultV2 {
   finalBalance: number;
   totalReturn: number;
+  totalTrades: number;
   winRate: number;
   profitFactor: number;
   maxDrawdown: number;
   avgTrade: number;
   avgBars: number;
-  totalTrades: number;
   grossProfit: number;
   grossLoss: number;
   commissionTotal: number;
-  rejectsByReason: Record<string, number>;
+  equity: number[];
+  trades: ScalpTradeV2[];
   rejectStats: RejectStat[];
 }
 
-function calcTradeGrossPnl(
-  side: 'long' | 'short',
-  entryPrice: number,
-  exitPrice: number,
-  size: number
-): number {
-  if (side === 'long') {
-    return (exitPrice - entryPrice) * size;
-  }
-
-  return (entryPrice - exitPrice) * size;
+export interface BacktestOptionsV2 {
+  startingBalance?: number;
+  lotStep?: number;
+  minQty?: number;
+  allowLongs?: boolean;
+  allowShorts?: boolean;
 }
 
-function calcTradeCommission(
-  entryPrice: number,
-  exitPrice: number,
-  size: number,
-  commissionRate: number
-): number {
-  const turnover = entryPrice * size + exitPrice * size;
-  return turnover * commissionRate;
-}
+export function runMomentumScalpBacktestV2(
+  candles1m: Candle[],
+  params: MomentumScalpV2Params = DEFAULT_SCALP_V2_PARAMS,
+  options: BacktestOptionsV2 = {}
+): ScalpBacktestResultV2 {
+  const startingBalance = options.startingBalance ?? 50000;
+  const lotStep = options.lotStep ?? 0.0001;
+  const minQty = options.minQty ?? 1;
+  const allowLongs = options.allowLongs ?? true;
+  const allowShorts = options.allowShorts ?? true;
 
-export function runMomentumScalpBacktest(
-  candles: Candle[],
-  params: ScalpParams,
-  startingBalance: number = 50000
-): ScalpBacktestResult {
-  const trades: ScalpTrade[] = [];
-  const rejectsByReason: Record<string, number> = {};
+  const candles5m = aggregateCandlesTo5m(candles1m);
+  const indicators1m = build1mIndicators(candles1m, params);
+  const indicators5m = build5mIndicators(candles5m, params);
 
   let balance = startingBalance;
-  const equity: number[] = [balance];
-  const timestamps: number[] = [candles[0]?.time || 0];
+  const equity: number[] = [startingBalance];
+  const trades: ScalpTradeV2[] = [];
+  const rejectMap = new Map<EntryRejectReason, number>();
 
-  let position: ScalpPosition | null = null;
-  let lastTradeExitIndex = -params.cooldownBars - 1;
-
-  let maxEquity = balance;
+  let openPosition: OpenPosition | null = null;
+  let cooldownUntilIndex = -1;
+  let peakEquity = startingBalance;
   let maxDrawdown = 0;
-  let grossProfit = 0;
-  let grossLoss = 0;
-  let commissionTotal = 0;
 
-  for (let i = 1; i < candles.length; i++) {
-    const candle = candles[i];
-    timestamps.push(candle.time);
+  function addReject(reason: EntryRejectReason) {
+    rejectMap.set(reason, (rejectMap.get(reason) ?? 0) + 1);
+  }
 
-    if (position && i >= position.entryIndex) {
-      const exit = evaluateScalpExit(position, candle, i, params);
-
-      if (exit.exit && exit.exitPrice !== null) {
-        const grossPnl = calcTradeGrossPnl(
-          position.side,
-          position.entryPrice,
-          exit.exitPrice,
-          position.size
-        );
-
-        const commission = calcTradeCommission(
-          position.entryPrice,
-          exit.exitPrice,
-          position.size,
-          params.commissionRate
-        );
-
-        const netPnl = grossPnl - commission;
-        const pnlPct = balance > 0 ? (netPnl / balance) * 100 : 0;
-
-        if (netPnl >= 0) {
-          grossProfit += netPnl;
-        } else {
-          grossLoss += Math.abs(netPnl);
-        }
-
-        commissionTotal += commission;
-        balance += netPnl;
-
-        trades.push({
-          signalTime: position.signalTime,
-          entryTime: position.entryTime,
-          exitTime: candle.time,
-          side: position.side,
-          entryPrice: position.entryPrice,
-          exitPrice: exit.exitPrice,
-          size: position.size,
-          grossPnl,
-          commission,
-          netPnl,
-          pnlPct,
-          barsHeld: i - position.entryIndex + 1,
-          exitReason: exit.reason || 'unknown'
-        });
-
-        lastTradeExitIndex = i;
-        position = null;
-      }
+  function updateEquity(markToMarketValue?: number) {
+    const currentEquity = markToMarketValue ?? balance;
+    equity.push(currentEquity);
+    if (currentEquity > peakEquity) {
+      peakEquity = currentEquity;
     }
-
-    const canSearchEntry =
-      !position &&
-      i < candles.length - 1 &&
-      i - lastTradeExitIndex > params.cooldownBars &&
-      balance > 0;
-
-    if (canSearchEntry) {
-      const signal = analyzeMomentumScalp(candles, i, params);
-
-      if (signal.side === 'long' || signal.side === 'short') {
-        const nextCandle = candles[i + 1];
-
-        const newPosition = buildScalpPositionFromSignal(
-          signal,
-          nextCandle,
-          params,
-          balance,
-          i + 1
-        );
-
-        if (newPosition) {
-          position = newPosition;
-        } else {
-          rejectsByReason.position_build_failed =
-            (rejectsByReason.position_build_failed || 0) + 1;
-        }
-      } else {
-        const reason = signal.reason || 'unknown_reject';
-        rejectsByReason[reason] = (rejectsByReason[reason] || 0) + 1;
-      }
-    }
-
-    equity.push(balance);
-
-    if (balance > maxEquity) {
-      maxEquity = balance;
-    }
-
-    const drawdown = maxEquity - balance;
-    if (drawdown > maxDrawdown) {
-      maxDrawdown = drawdown;
+    const dd = peakEquity - currentEquity;
+    if (dd > maxDrawdown) {
+      maxDrawdown = dd;
     }
   }
 
-  if (position) {
-    const lastCandle = candles[candles.length - 1];
-    const forcedExitPrice =
-      position.side === 'long'
-        ? lastCandle.close * (1 - params.slippageRate)
-        : lastCandle.close * (1 + params.slippageRate);
-
-    const grossPnl = calcTradeGrossPnl(
-      position.side,
-      position.entryPrice,
-      forcedExitPrice,
-      position.size
-    );
-
-    const commission = calcTradeCommission(
-      position.entryPrice,
-      forcedExitPrice,
-      position.size,
-      params.commissionRate
-    );
-
-    const netPnl = grossPnl - commission;
-    const pnlPct = balance > 0 ? (netPnl / balance) * 100 : 0;
-
-    if (netPnl >= 0) {
-      grossProfit += netPnl;
-    } else {
-      grossLoss += Math.abs(netPnl);
+  function buildPosition(signal: MomentumScalpSignalV2): OpenPosition | null {
+    const riskCapital = balance * Math.min(params.riskPerTrade, params.maxRiskPerTrade);
+    if (riskCapital <= 0 || signal.riskDistance <= 0 || signal.entryPrice <= 0) {
+      return null;
     }
 
-    commissionTotal += commission;
+    const rawQty = riskCapital / signal.riskDistance;
+    let qty = floorToStep(rawQty, lotStep);
+
+    const maxNotional = balance * params.maxPositionNotionalPct;
+    const maxQtyByNotional = floorToStep(maxNotional / signal.entryPrice, lotStep);
+
+    qty = Math.min(qty, maxQtyByNotional);
+
+    if (qty < minQty) {
+      return null;
+    }
+
+    const entryCommission = qty * signal.entryPrice * params.commissionRate;
+
+    return {
+      signal,
+      size: qty,
+      entryCommission,
+      openedAtIndex: signal.entryIndex
+    };
+  }
+
+  function closePosition(pos: OpenPosition, exitIndex: number, exitPrice: number, exitReason: ExitReason) {
+    const exitCandle = candles1m[exitIndex];
+    const size = pos.size;
+    const entryPrice = pos.signal.entryPrice;
+
+    let grossPnl = 0;
+    if (pos.signal.side === 'long') {
+      grossPnl = (exitPrice - entryPrice) * size;
+    } else {
+      grossPnl = (entryPrice - exitPrice) * size;
+    }
+
+    const exitCommission = size * exitPrice * params.commissionRate;
+    const totalCommission = pos.entryCommission + exitCommission;
+    const netPnl = grossPnl - totalCommission;
+
     balance += netPnl;
 
     trades.push({
-      signalTime: position.signalTime,
-      entryTime: position.entryTime,
-      exitTime: lastCandle.time,
-      side: position.side,
-      entryPrice: position.entryPrice,
-      exitPrice: forcedExitPrice,
-      size: position.size,
+      side: pos.signal.side,
+      signalTime: pos.signal.signalTime,
+      entryTime: pos.signal.entryTime,
+      exitTime: exitCandle.time,
+      entryPrice,
+      exitPrice,
+      stopLossPrice: pos.signal.stopLossPrice,
+      takeProfitPrice: pos.signal.takeProfitPrice,
+      size,
       grossPnl,
-      commission,
+      commission: totalCommission,
       netPnl,
-      pnlPct,
-      barsHeld: candles.length - position.entryIndex,
-      exitReason: 'end_of_data'
+      pnlPct: (netPnl / startingBalance) * 100,
+      barsHeld: exitIndex - pos.openedAtIndex + 1,
+      exitReason,
+      atr1m: pos.signal.atr1m,
+      atr5m: pos.signal.atr5m,
+      volumeRatio: pos.signal.volumeRatio,
+      pullbackPct: pos.signal.pullbackPct,
+      impulseBodyPct: pos.signal.impulseBodyPct
     });
 
-    equity[equity.length - 1] = balance;
+    cooldownUntilIndex = exitIndex + params.cooldownBars;
+    openPosition = null;
+    updateEquity();
   }
 
-  const totalTrades = trades.length;
-  const winningTrades = trades.filter((t: ScalpTrade) => t.netPnl > 0);
-  const winRate = totalTrades > 0 ? winningTrades.length / totalTrades : 0;
+  for (let i = 0; i < candles1m.length; i++) {
+    const candle = candles1m[i];
 
-  const profitFactor =
-    grossLoss > 0
-      ? grossProfit / grossLoss
-      : grossProfit > 0
-        ? Infinity
-        : 0;
+    if (openPosition) {
+      const pos = openPosition;
+      const sig = pos.signal;
 
-  const avgTrade =
-    totalTrades > 0
-      ? trades.reduce((sum: number, t: ScalpTrade) => sum + t.netPnl, 0) / totalTrades
-      : 0;
+      if (sig.side === 'long') {
+        const stopHit = candle.low <= sig.stopLossPrice;
+        const tpHit = candle.high >= sig.takeProfitPrice;
 
-  const avgBars =
-    totalTrades > 0
-      ? trades.reduce((sum: number, t: ScalpTrade) => sum + t.barsHeld, 0) / totalTrades
-      : 0;
+        if (stopHit && tpHit) {
+          closePosition(pos, i, sig.stopLossPrice, 'stop_loss');
+          continue;
+        }
+        if (stopHit) {
+          closePosition(pos, i, sig.stopLossPrice, 'stop_loss');
+          continue;
+        }
+        if (tpHit) {
+          closePosition(pos, i, sig.takeProfitPrice, 'take_profit');
+          continue;
+        }
+      } else {
+        const stopHit = candle.high >= sig.stopLossPrice;
+        const tpHit = candle.low <= sig.takeProfitPrice;
 
-  const rejectStats: RejectStat[] = Object.entries(rejectsByReason)
-    .map(([reason, count]: [string, number]) => ({ reason, count }))
-    .sort((a: RejectStat, b: RejectStat) => b.count - a.count);
+        if (stopHit && tpHit) {
+          closePosition(pos, i, sig.stopLossPrice, 'stop_loss');
+          continue;
+        }
+        if (stopHit) {
+          closePosition(pos, i, sig.stopLossPrice, 'stop_loss');
+          continue;
+        }
+        if (tpHit) {
+          closePosition(pos, i, sig.takeProfitPrice, 'take_profit');
+          continue;
+        }
+      }
+
+      const barsHeld = i - pos.openedAtIndex + 1;
+      if (barsHeld >= params.timeStopBars) {
+        let exitPrice = candle.close;
+        if (sig.side === 'long') {
+          exitPrice = candle.close * (1 - params.slippageRate);
+        } else {
+          exitPrice = candle.close * (1 + params.slippageRate);
+        }
+        closePosition(pos, i, exitPrice, 'time_stop');
+        continue;
+      }
+
+      let markPrice = candle.close;
+      let openGross = 0;
+      if (sig.side === 'long') {
+        markPrice = candle.close * (1 - params.slippageRate);
+        openGross = (markPrice - sig.entryPrice) * pos.size;
+      } else {
+        markPrice = candle.close * (1 + params.slippageRate);
+        openGross = (sig.entryPrice - markPrice) * pos.size;
+      }
+      updateEquity(balance + openGross - pos.entryCommission);
+      continue;
+    }
+
+    if (i <= cooldownUntilIndex) {
+      updateEquity();
+      continue;
+    }
+
+    const decision = evaluateMomentumScalpEntryV2(
+      candles1m,
+      indicators1m,
+      candles5m,
+      indicators5m,
+      i,
+      params
+    );
+
+    if (!decision.accepted || !decision.signal) {
+      if (decision.reason) addReject(decision.reason);
+      updateEquity();
+      continue;
+    }
+
+    if (decision.signal.side === 'long' && !allowLongs) {
+      updateEquity();
+      continue;
+    }
+
+    if (decision.signal.side === 'short' && !allowShorts) {
+      updateEquity();
+      continue;
+    }
+
+    const pos = buildPosition(decision.signal);
+    if (!pos) {
+      updateEquity();
+      continue;
+    }
+
+    openPosition = pos;
+    updateEquity();
+  }
+
+  if (openPosition) {
+    const lastIndex = candles1m.length - 1;
+    const lastCandle = candles1m[lastIndex];
+    const exitPrice =
+      openPosition.signal.side === 'long'
+        ? lastCandle.close * (1 - params.slippageRate)
+        : lastCandle.close * (1 + params.slippageRate);
+    closePosition(openPosition, lastIndex, exitPrice, 'end_of_data');
+  }
+
+  const grossProfit = trades.filter(t => t.grossPnl > 0).reduce((s, t) => s + t.grossPnl, 0);
+  const grossLossAbs = Math.abs(trades.filter(t => t.grossPnl < 0).reduce((s, t) => s + t.grossPnl, 0));
+  const netSum = trades.reduce((s, t) => s + t.netPnl, 0);
+  const wins = trades.filter(t => t.netPnl > 0).length;
+  const commissionTotal = trades.reduce((s, t) => s + t.commission, 0);
+  const avgBars = trades.length > 0 ? trades.reduce((s, t) => s + t.barsHeld, 0) / trades.length : 0;
+
+  const rejectStats: RejectStat[] = Array.from(rejectMap.entries())
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count);
 
   return {
-    trades,
-    equity,
-    timestamps,
     finalBalance: balance,
     totalReturn: ((balance - startingBalance) / startingBalance) * 100,
-    winRate,
-    profitFactor,
+    totalTrades: trades.length,
+    winRate: trades.length > 0 ? wins / trades.length : 0,
+    profitFactor: grossLossAbs > 0 ? grossProfit / grossLossAbs : 0,
     maxDrawdown,
-    avgTrade,
+    avgTrade: trades.length > 0 ? netSum / trades.length : 0,
     avgBars,
-    totalTrades,
     grossProfit,
-    grossLoss,
+    grossLoss: grossLossAbs,
     commissionTotal,
-    rejectsByReason,
+    equity,
+    trades,
     rejectStats
   };
 }
