@@ -317,9 +317,10 @@ export function analyzeDailyBreakout(
       if (!(current.low < prevDayLow)) failedConditions.push('short_no_prev_day_breakout');
     }
 
-    const normalizedFailedConditions = failedConditions.length
-      ? failedConditions
-      : ['no_breakout_setup'];
+    const normalizedFailedConditions: DailyBreakoutRejectReason[] =
+      failedConditions.length > 0
+        ? failedConditions
+        : ['no_breakout_setup'];
 
     return {
       ...buildEmptySignal(symbol, {
