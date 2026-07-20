@@ -23,6 +23,11 @@ export interface ScalpTrade {
   exitReason: string;
 }
 
+export interface RejectStat {
+  reason: string;
+  count: number;
+}
+
 export interface ScalpBacktestResult {
   trades: ScalpTrade[];
   equity: number[];
@@ -38,6 +43,8 @@ export interface ScalpBacktestResult {
   grossProfit: number;
   grossLoss: number;
   commissionTotal: number;
+  rejectsByReason: Record<string, number>;
+  rejectStats: RejectStat[];
 }
 
 function calcTradeGrossPnl(
@@ -69,6 +76,8 @@ export function runMomentumScalpBacktest(
   startingBalance: number = 50000
 ): ScalpBacktestResult {
   const trades: ScalpTrade[] = [];
+  const rejectsByReason: Record<string, number> = {};
+
   let balance = startingBalance;
   const equity: number[] = [balance];
   const timestamps: number[] = [candles[0]?.time || 0];
@@ -159,7 +168,13 @@ export function runMomentumScalpBacktest(
 
         if (newPosition) {
           position = newPosition;
+        } else {
+          rejectsByReason.position_build_failed =
+            (rejectsByReason.position_build_failed || 0) + 1;
         }
+      } else {
+        const reason = signal.reason || 'unknown_reject';
+        rejectsByReason[reason] = (rejectsByReason[reason] || 0) + 1;
       }
     }
 
@@ -230,6 +245,7 @@ export function runMomentumScalpBacktest(
   const totalTrades = trades.length;
   const winningTrades = trades.filter((t: ScalpTrade) => t.netPnl > 0);
   const winRate = totalTrades > 0 ? winningTrades.length / totalTrades : 0;
+
   const profitFactor =
     grossLoss > 0
       ? grossProfit / grossLoss
@@ -247,6 +263,10 @@ export function runMomentumScalpBacktest(
       ? trades.reduce((sum: number, t: ScalpTrade) => sum + t.barsHeld, 0) / totalTrades
       : 0;
 
+  const rejectStats: RejectStat[] = Object.entries(rejectsByReason)
+    .map(([reason, count]: [string, number]) => ({ reason, count }))
+    .sort((a: RejectStat, b: RejectStat) => b.count - a.count);
+
   return {
     trades,
     equity,
@@ -261,6 +281,8 @@ export function runMomentumScalpBacktest(
     totalTrades,
     grossProfit,
     grossLoss,
-    commissionTotal
+    commissionTotal,
+    rejectsByReason,
+    rejectStats
   };
 }
