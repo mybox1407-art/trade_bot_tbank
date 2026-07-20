@@ -1,11 +1,24 @@
-import { Candle } from './services/dailyBreakoutStrategy';
+// ✅ ИСПРАВЛЕНО: пути импортов (файл находится в src/backtest/)
+import { Candle } from '../services/dailyBreakoutStrategy';
 import {
   runDailyUniverseBacktest,
-  DailyUniverseBacktestResult
-} from './backtest/dailyUniverseBacktest';
+  DailyUniverseBacktestResult,
+  DailyMonthStats,
+  DailyUniverseTrade,
+} from './dailyUniverseBacktest';
 
 // ЗАМЕНИ на свой реальный способ загрузки данных
-import { loadCandlesForSymbols } from './data/loadCandlesForSymbols';
+// import { loadCandlesForSymbols } from '../data/loadCandlesForSymbols';
+
+// ✅ Заглушка — замени на реальную реализацию
+async function loadCandlesForSymbols(
+  symbols: string[],
+  opts: { timeframe: string; from: string; to: string }
+): Promise<Record<string, Candle[]>> {
+  // TODO: загрузи свечи из Binance/T-Bank API или из PostgreSQL
+  console.log(`Loading candles for ${symbols.join(', ')} opts:`, opts);
+  return {};
+}
 
 function round(value: number, digits = 2): number {
   const factor = 10 ** digits;
@@ -19,7 +32,7 @@ function pct(value: number, digits = 2): string {
 function money(value: number, digits = 2): string {
   return round(value, digits).toLocaleString('en-US', {
     minimumFractionDigits: digits,
-    maximumFractionDigits: digits
+    maximumFractionDigits: digits,
   });
 }
 
@@ -102,7 +115,7 @@ function printFilterDiagnostics(result: DailyUniverseBacktestResult): void {
     { metric: 'Accepted signals', value: f.acceptedSignals },
     { metric: 'Rejected signals', value: f.rejectedSignals },
     { metric: 'Selected signals', value: f.selectedSignals },
-    { metric: 'Opened positions', value: f.openedPositions }
+    { metric: 'Opened positions', value: f.openedPositions },
   ];
 
   console.table(rows);
@@ -136,7 +149,8 @@ function printMonthlyStats(result: DailyUniverseBacktestResult): void {
     return;
   }
 
-  const rows = months.map(m => ({
+  // ✅ ИСПРАВЛЕНО: явный тип параметра m
+  const rows = months.map((m: DailyMonthStats) => ({
     month: m.month,
     decisionDays: m.decisionDays,
     acceptedSignals: m.acceptedSignals,
@@ -144,7 +158,7 @@ function printMonthlyStats(result: DailyUniverseBacktestResult): void {
     selectedSignals: m.selectedSignals,
     openedPositions: m.openedPositions,
     closedTrades: m.closedTrades,
-    netPnl: money(m.netPnl)
+    netPnl: money(m.netPnl),
   }));
 
   console.table(rows);
@@ -167,12 +181,13 @@ function printRejectDiagnostics(result: DailyUniverseBacktestResult): void {
   console.log('Reject reasons:');
   console.table(byReasonRows);
 
+  // ✅ ИСПРАВЛЕНО: явные типы в map и reduce для rejectsByMonth
   const byMonthRows = Object.entries(r.rejectsByMonth)
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([month, reasons]) => ({
+    .map(([month, reasons]: [string, Record<string, number>]) => ({
       month,
-      total: Object.values(reasons).reduce((sum, n) => sum + n, 0),
-      ...reasons
+      total: Object.values(reasons).reduce((sum: number, n: number) => sum + n, 0),
+      ...reasons,
     }));
 
   if (byMonthRows.length) {
@@ -181,12 +196,13 @@ function printRejectDiagnostics(result: DailyUniverseBacktestResult): void {
     console.table(byMonthRows);
   }
 
+  // ✅ ИСПРАВЛЕНО: явные типы в map и reduce для rejectsBySymbol
   const bySymbolRows = Object.entries(r.rejectsBySymbol)
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([symbol, reasons]) => ({
+    .map(([symbol, reasons]: [string, Record<string, number>]) => ({
       symbol,
-      total: Object.values(reasons).reduce((sum, n) => sum + n, 0),
-      ...reasons
+      total: Object.values(reasons).reduce((sum: number, n: number) => sum + n, 0),
+      ...reasons,
     }));
 
   if (bySymbolRows.length) {
@@ -206,7 +222,8 @@ function printTradesPreview(result: DailyUniverseBacktestResult, limit = 20): vo
     return;
   }
 
-  const rows = trades.map(t => ({
+  // ✅ ИСПРАВЛЕНО: явный тип параметра t
+  const rows = trades.map((t: DailyUniverseTrade) => ({
     symbol: t.symbol,
     side: t.side,
     openedAt: new Date(t.openedAt).toISOString().slice(0, 10),
@@ -216,7 +233,7 @@ function printTradesPreview(result: DailyUniverseBacktestResult, limit = 20): vo
     qty: round(t.quantity, 4),
     netPnl: money(t.netPnl),
     barsHeld: t.barsHeld,
-    reason: t.closeReason
+    reason: t.closeReason,
   }));
 
   console.table(rows);
@@ -230,11 +247,11 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
   printHeader('INTERPRETATION');
 
   const activeMonths = months.filter(
-    m => m.openedPositions > 0 || m.closedTrades > 0 || m.acceptedSignals > 0
+    (m: DailyMonthStats) => m.openedPositions > 0 || m.closedTrades > 0 || m.acceptedSignals > 0
   );
 
   const firstActiveMonth = activeMonths.length ? activeMonths[0].month : null;
-  const firstTradeMonth = months.find(m => m.closedTrades > 0)?.month ?? null;
+  const firstTradeMonth = months.find((m: DailyMonthStats) => m.closedTrades > 0)?.month ?? null;
 
   if (!firstActiveMonth) {
     console.log(
@@ -242,12 +259,12 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
     );
   } else {
     console.log(`Первый месяц с активностью сигналов: ${firstActiveMonth}`);
-  }
 
-  if (firstTradeMonth) {
-    console.log(`Первый месяц с закрытыми сделками: ${firstTradeMonth}`);
-  } else {
-    console.log('Закрытых сделок не было.');
+    if (firstTradeMonth) {
+      console.log(`Первый месяц с закрытыми сделками: ${firstTradeMonth}`);
+    } else {
+      console.log('Закрытых сделок не было.');
+    }
   }
 
   const atrDenom = f.atrFilterPassed + f.atrFilterRejected;
@@ -301,15 +318,19 @@ function printSilenceDiagnosis(result: DailyUniverseBacktestResult): void {
     const firstHalf = months.slice(0, Math.floor(months.length / 2));
     const secondHalf = months.slice(Math.floor(months.length / 2));
 
-    const firstHalfOpened = firstHalf.reduce((sum, m) => sum + m.openedPositions, 0);
-    const secondHalfOpened = secondHalf.reduce((sum, m) => sum + m.openedPositions, 0);
+    const firstHalfOpened = firstHalf.reduce(
+      (sum: number, m: DailyMonthStats) => sum + m.openedPositions, 0
+    );
+    const secondHalfOpened = secondHalf.reduce(
+      (sum: number, m: DailyMonthStats) => sum + m.openedPositions, 0
+    );
 
     console.log(`Opened positions, first half: ${firstHalfOpened}`);
     console.log(`Opened positions, second half: ${secondHalfOpened}`);
 
     if (firstHalfOpened === 0 && secondHalfOpened > 0) {
       console.log(
-        'Это действительно красный флаг: стратегия была выключена в первой половине истории и “проснулась” только позже. Проверь regime dependency, фильтры и сдвиги в данных.'
+        'Это действительно красный флаг: стратегия была выключена в первой половине истории и "проснулась" только позже. Проверь regime dependency, фильтры и сдвиги в данных.'
       );
     }
   }
@@ -321,7 +342,7 @@ async function main(): Promise<void> {
   const candlesBySymbol: Record<string, Candle[]> = await loadCandlesForSymbols(symbols, {
     timeframe: '15m',
     from: '2025-01-01',
-    to: '2026-07-01'
+    to: '2026-07-01',
   });
 
   const result = runDailyUniverseBacktest(candlesBySymbol, {
@@ -340,7 +361,7 @@ async function main(): Promise<void> {
     maxAtrPct: 0.12,
     maxBreakoutDistancePct: 0.04,
     allowLongs: true,
-    allowShorts: true
+    allowShorts: true,
   });
 
   printSummary(result);
@@ -352,7 +373,8 @@ async function main(): Promise<void> {
   printSilenceDiagnosis(result);
 }
 
-main().catch(error => {
-  console.error('Backtest runner failed:', error);
+main().catch((error: unknown) => {
+  const err = error instanceof Error ? error : new Error(String(error));
+  console.error('Backtest runner failed:', err.message);
   process.exit(1);
 });
