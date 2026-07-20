@@ -8,7 +8,7 @@ import {
   RejectStat
 } from './momentumScalpBacktest';
 
-type PresetName = 'base' | 'presetA' | 'presetB';
+type PresetName = 'base' | 'presetA' | 'presetB' | 'presetC' | 'presetD';
 
 function loadCandles(filePath: string): Candle[] {
   const raw = fs.readFileSync(filePath, 'utf-8');
@@ -65,13 +65,38 @@ function buildParams(preset: PresetName): ScalpParams {
     };
   }
 
+  if (preset === 'presetB') {
+    return {
+      ...base,
+      sessionStartHour: 10,
+      sessionEndHour: 18.75,
+      afternoonStartHour: 10,
+      afternoonEndHour: 18.75,
+      minAtrPct: 0.0005
+    };
+  }
+
+  if (preset === 'presetC') {
+    return {
+      ...base,
+      sessionStartHour: 10,
+      sessionEndHour: 18.75,
+      afternoonStartHour: 10,
+      afternoonEndHour: 18.75,
+      minAtrPct: 0.0005,
+      volumeMinRatio: 1.05
+    };
+  }
+
   return {
     ...base,
     sessionStartHour: 10,
     sessionEndHour: 18.75,
     afternoonStartHour: 10,
     afternoonEndHour: 18.75,
-    minAtrPct: 0.0005
+    minAtrPct: 0.0005,
+    volumeMinRatio: 1.05,
+    minImpulsePct: 0.00035
   };
 }
 
@@ -260,6 +285,8 @@ function printExitDistribution(result: ScalpBacktestResult) {
 function parsePreset(value: string | undefined): PresetName {
   if (value === 'presetA') return 'presetA';
   if (value === 'presetB') return 'presetB';
+  if (value === 'presetC') return 'presetC';
+  if (value === 'presetD') return 'presetD';
   return 'base';
 }
 
