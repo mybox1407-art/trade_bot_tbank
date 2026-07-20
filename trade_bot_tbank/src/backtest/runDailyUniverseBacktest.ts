@@ -86,7 +86,11 @@ function estimateBacktestTime(candlesCount: number): { minSec: number; maxSec: n
   return { minSec: 20, maxSec: 60 };
 }
 
-function parseNumberArg(args: string[], name: string, fallback: number): number {
+function parseNumberArg(
+  args: string[],
+  name: string,
+  fallback: number
+): number {
   const arg = args.find(a => a.startsWith(`--${name}=`));
   if (!arg) return fallback;
 
@@ -98,7 +102,11 @@ function parseNumberArg(args: string[], name: string, fallback: number): number 
   return n;
 }
 
-function parseBoolArg(args: string[], name: string, fallback: boolean): boolean {
+function parseBoolArg(
+  args: string[],
+  name: string,
+  fallback: boolean
+): boolean {
   const arg = args.find(a => a.startsWith(`--${name}=`));
   if (!arg) return fallback;
 
@@ -137,7 +145,9 @@ function printSummary(result: ReturnType<typeof runDailyUniverseBacktest>): void
       pfColor
     )}`
   );
-  console.log(`Sharpe: ${colorize(formatNumber(s.sharpe, 3), sharpeColor)}`);
+  console.log(
+    `Sharpe: ${colorize(formatNumber(s.sharpe, 3), sharpeColor)}`
+  );
   console.log(`Стартовый баланс: ${formatNumber(s.startBalance, 2)}`);
   console.log(`Финальный баланс: ${formatNumber(s.endBalance, 2)}`);
   console.log(
@@ -323,7 +333,9 @@ function main(): void {
     });
   }
 
-  const estimated = estimateBacktestTime(Math.min(...loadedInfo.map(x => x.count)));
+  const estimated = estimateBacktestTime(
+    Math.min(...loadedInfo.map(x => x.count))
+  );
 
   console.log('\n========== ПАРАМЕТРЫ DAILY UNIVERSE ЗАПУСКА ==========');
   console.log(`Инструментов: ${loadedInfo.length}`);
