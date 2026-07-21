@@ -226,10 +226,7 @@ export function aggregateTo1h(candles15: Candle[]): Candle[] {
   return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
-export function buildHtfBiasSeries(
-  hours: Candle[],
-  minAdx1h = 18
-): HtfBarState[] {
+export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18): HtfBarState[] {
   if (hours.length < 210) return [];
 
   const closes = hours.map(h => h.close);
@@ -281,10 +278,7 @@ export function buildHtfBiasSeries(
   return out;
 }
 
-export function getHtfBiasAt(
-  series: HtfBarState[],
-  ts15: number
-): HtfBarState | null {
+export function getHtfBiasAt(series: HtfBarState[], ts15: number): HtfBarState | null {
   if (!series.length) return null;
   let lo = 0;
   let hi = series.length - 1;
@@ -392,10 +386,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
   };
 }
 
-function getAtrPercentile(
-  candles: Candle[],
-  window = ATR_PERCENTILE_WINDOW
-): number {
+function getAtrPercentile(candles: Candle[], window = ATR_PERCENTILE_WINDOW): number {
   if (candles.length < Math.max(30, window + 20)) return 0;
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
@@ -408,10 +399,6 @@ function getAtrPercentile(
   return atrValues.length > 0 ? rank / atrValues.length : 0;
 }
 
-/**
- * @param balance — текущий баланс для сайзинга
- * @param htf — фильтр 1h (по умолчанию выкл.)
- */
 export function analyzeMarket(
   candles: Candle[],
   balance: number = STARTING_BALANCE,
@@ -474,17 +461,11 @@ export function analyzeMarket(
   const ema200 = ind.ema200 as number;
   const extension = (price - ema20) / price;
 
-  const macdCrossUp =
-    prevMacd.MACD! < prevMacd.signal! && lastMacd.MACD! > lastMacd.signal!;
-  const macdCrossDown =
-    prevMacd.MACD! > prevMacd.signal! && lastMacd.MACD! < lastMacd.signal!;
+  const macdCrossUp = prevMacd.MACD! < prevMacd.signal! && lastMacd.MACD! > lastMacd.signal!;
+  const macdCrossDown = prevMacd.MACD! > prevMacd.signal! && lastMacd.MACD! < lastMacd.signal!;
 
-  const macdBull =
-    lastMacd.MACD! > lastMacd.signal! &&
-    (lastMacd.histogram ?? 0) >= (prevMacd.histogram ?? 0);
-  const macdBear =
-    lastMacd.MACD! < lastMacd.signal! &&
-    (lastMacd.histogram ?? 0) <= (prevMacd.histogram ?? 0);
+  const macdBull = lastMacd.MACD! > lastMacd.signal! && (lastMacd.histogram ?? 0) >= (prevMacd.histogram ?? 0);
+  const macdBear = lastMacd.MACD! < lastMacd.signal! && (lastMacd.histogram ?? 0) <= (prevMacd.histogram ?? 0);
 
   const range = Math.max(lastHigh - lastLow, 1e-9);
   const bodyPct = Math.abs(price - lastOpen) / range;
@@ -498,11 +479,7 @@ export function analyzeMarket(
   const closeOutsideRangeLong = price > priorHigh;
   const closeOutsideRangeShort = price < priorLow;
 
-  const compressionOk =
-    atrPercentile > 0 &&
-    atrPercentile <= DEFAULT_ATR_PERCENTILE_MAX &&
-    atrPct <= 0.03;
-
+  const compressionOk = atrPercentile > 0 && atrPercentile <= DEFAULT_ATR_PERCENTILE_MAX && atrPct <= 0.03;
   const volumeOk = avgVol20 > 0 && last(candles).volume >= avgVol20 * DEFAULT_VOLUME_MULTIPLIER;
 
   const touchLong =
@@ -575,15 +552,8 @@ export function analyzeMarket(
     lastRsi > 22 &&
     (bearCandle || lastMacd.histogram! < prevMacd.histogram!);
 
-  let longSignal =
-    regime === 'trend_up' &&
-    price > ema200 &&
-    (pullbackLong || crossLong || breakoutLong);
-
-  let shortSignal =
-    regime === 'trend_down' &&
-    price < ema200 &&
-    (pullbackShort || crossShort || breakoutShort);
+  let longSignal = regime === 'trend_up' && price > ema200 && (pullbackLong || crossLong || breakoutLong);
+  let shortSignal = regime === 'trend_down' && price < ema200 && (pullbackShort || crossShort || breakoutShort);
 
   if (!longSignal && !shortSignal) {
     if (regime === 'range' && breakoutLong) longSignal = true;
@@ -670,21 +640,15 @@ export function analyzeMarket(
   const initialR = Math.abs(price - stopLossPrice);
   const stopPct = initialR / price;
 
-  if (
-    initialR <= 0 ||
-    stopPct < MIN_STOP_DISTANCE_RATE ||
-    stopPct > MAX_STOP_DISTANCE_RATE
-  ) {
+  if (initialR <= 0 || stopPct < MIN_STOP_DISTANCE_RATE || stopPct > MAX_STOP_DISTANCE_RATE) {
     return {
       ...emptySignal(price, regime),
       indicators: { ready: true, reject: 'stop_distance', stopPct }
     };
   }
 
-  const takeProfit1Price =
-    side === 'long' ? price + TP1_R * initialR : price - TP1_R * initialR;
-  const takeProfit2Price =
-    side === 'long' ? price + TP2_R * initialR : price - TP2_R * initialR;
+  const takeProfit1Price = side === 'long' ? price + TP1_R * initialR : price - TP1_R * initialR;
+  const takeProfit2Price = side === 'long' ? price + TP2_R * initialR : price - TP2_R * initialR;
 
   const riskCapital = balance * MAX_RISK_PER_TRADE;
   const sized = calcPositionSize({
