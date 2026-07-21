@@ -1,753 +1,201 @@
-import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
+import fs from 'node:fs';
+import path from 'node:path';
+import { runStrategyBacktest } from './strategyBacktest';
+import { Candle } from '../services/strategy';
 
-// ============================================================================
-// КАПИТАЛ / РИСК
-// ============================================================================
-export const STARTING_BALANCE = 50000;
-/** Baseline 1% — 2% раздувал убытки без роста PF */
-export const MAX_RISK_PER_TRADE = 0.01;
+const DEFAULT_COOLDOWN_CANDLES = 12;
+const PROGRESS_LOG_EVERY = 5000;
 
-export const COMMISSION_RATE = 0.0005;
-export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
-
-/**
- * Path Exit v1 (вход primary без ужесточения):
- * TP1 40% @ 1.5R → SL runner = entry (lock 0) → TP2 @ 2.0R
- * Early abort / time-stop задаются в runBacktest options.
- */
-export const TP1_FRACTION = 0.4;
-export const TP1_R = 1.5;
-export const TP2_R = 2.0;
-export const PARTIAL_LOCK_R = 0;
-
-const MIN_STOP_DISTANCE_RATE = 0.005;
-const MAX_STOP_DISTANCE_RATE = 0.012;
-
-const MAX_POSITION_FRAC = 0.3;
-const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
-
-const MIN_ADX_TREND = 20;
-const STOP_STRUCTURE_LOOKBACK = 10;
-const STOP_SWING_PAD_ATR = 0.25;
-const MAX_EXTENSION_FROM_EMA20 = 0.01;
-
-/** 10:00–18:00 МСК = 07:00–15:00 UTC */
-const TRADING_HOUR_UTC_FROM = 7;
-const TRADING_HOUR_UTC_TO = 15;
-
-const MIN_QUANTITY = 2;
-
-/** Мин. 15m-баров при HTF */
-export const HTF_WARMUP_15M = 850;
-const MS_PER_HOUR = 3_600_000;
-
-const COMPRESSION_LOOKBACK = 48;
-const ATR_PERCENTILE_WINDOW = 120;
-const DEFAULT_ATR_PERCENTILE_MAX = 0.45;
-const DEFAULT_VOLUME_MULTIPLIER = 1.25;
-const DEFAULT_BREAKOUT_LOOKBACK = 12;
-const DEFAULT_TIME_FAIL_BARS = 4;
-
-export interface Candle {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
-
-export type MarketRegime =
-  | 'trend_up'
-  | 'trend_down'
-  | 'range'
-  | 'breakout_watch'
-  | 'high_volatility'
-  | 'unknown';
-
-export type HtfBias = 'up' | 'down' | 'neutral';
-
-export interface HtfBarState {
-  time: number;
-  bias: HtfBias;
-  adx: number;
-  ema20: number;
-  ema50: number;
-  ema200: number;
-  close: number;
-}
-
-export interface HtfFilterOptions {
-  enabled: boolean;
-  minAdx1h?: number;
-  precomputedHtf?: HtfBarState[];
-}
-
-export const DEFAULT_HTF_FILTER: HtfFilterOptions = {
-  enabled: false,
-  minAdx1h: 18
+/** ANSI-цвета для TTY */
+const ANSI = {
+  reset: '\u001b[0m',
+  green: '\u001b[32m',
+  red: '\u001b[31m',
+  yellow: '\u001b[33m',
+  cyan: '\u001b[36m',
+  gray: '\u001b[90m',
+  bold: '\u001b[1m'
 };
 
-export interface StrategySignal {
-  price: number;
-  buy: boolean;
-  sell: boolean;
-  side: 'long' | 'short' | 'none';
-  stopLossPrice: number | null;
-  takeProfit1Price: number | null;
-  takeProfit2Price: number | null;
-  takeProfitPrice: number | null;
-  tp1Fraction: number;
-  positionSize: number | null;
-  quantity: number | null;
-  regime: MarketRegime;
-  initialR: number | null;
-  timeFailBars: number;
-  indicators: Record<string, unknown>;
+function isTty(): boolean {
+  return Boolean(process.stdout.isTTY);
 }
 
-function last<T>(arr: T[]): T {
-  return arr[arr.length - 1];
+function color(text: string, code: keyof typeof ANSI): string {
+  if (!isTty()) return text;
+  return `${ANSI[code]}${text}${ANSI.reset}`;
 }
 
-function prev<T>(arr: T[]): T {
-  return arr[arr.length - 2];
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'неизвестно';
+  if (seconds < 60) return `${Math.round(seconds)} сек`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  if (minutes < 60) return `${minutes} мин ${secs} сек`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return `${hours} ч ${mins} мин`;
 }
 
-function mean(values: number[]): number {
-  if (values.length === 0) return 0;
-  return values.reduce((a, b) => a + b, 0) / values.length;
+function round(value: number, digits = 8): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
 }
 
-function percentile(values: number[], p: number): number {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
-  return sorted[idx];
+function readCandlesFromJson(filePath: string): Candle[] {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const data = JSON.parse(raw);
+  if (!Array.isArray(data)) {
+    throw new Error('Файл должен содержать массив свечей');
+  }
+  return data.map((c: any) => ({
+    time: Number(c.time),
+    open: Number(c.open),
+    high: Number(c.high),
+    low: Number(c.low),
+    close: Number(c.close),
+    volume: Number(c.volume ?? 0)
+  }));
 }
 
-function isTradingHour(timestamp: number): boolean {
-  const hourUtc = new Date(timestamp).getUTCHours();
-  return hourUtc >= TRADING_HOUR_UTC_FROM && hourUtc < TRADING_HOUR_UTC_TO;
-}
+function printSummary(result: any): void {
+  const s = result.summary;
+  const h = result.htfStats;
+  const r = result.regimeStats;
 
-function getStructureStop(params: {
-  side: 'long' | 'short';
-  highs: number[];
-  lows: number[];
-  price: number;
-  lastAtr: number;
-  atrStopMult: number;
-}): number {
-  const { side, highs, lows, price, lastAtr, atrStopMult } = params;
-  const recentHigh = Math.max(...highs.slice(-STOP_STRUCTURE_LOOKBACK));
-  const recentLow = Math.min(...lows.slice(-STOP_STRUCTURE_LOOKBACK));
-  const pad = lastAtr * STOP_SWING_PAD_ATR;
+  const winRatePct = round((s.winRate ?? 0) * 100, 2);
+  const returnPct = round((s.returnPct ?? 0) * 100, 2);
+  const maxDdPct = round((s.maxDrawdownPct ?? 0) * 100, 2);
 
-  const minDist = Math.max(lastAtr * atrStopMult, price * MIN_STOP_DISTANCE_RATE);
-  const maxDist = Math.min(lastAtr * 2.2, price * MAX_STOP_DISTANCE_RATE);
+  console.log('\n' + color('========== SUMMARY ==========', 'bold'));
+  console.log(`Symbol:              ${result.symbol}`);
+  console.log(`Trades:              ${s.tradesCount}`);
+  console.log(`Win rate:            ${winRatePct}%`);
+  console.log(`Profit factor:       ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 4) : 'Infinity'}`);
+  console.log(`Net profit:          ${round(s.netProfit, 2)}`);
+  console.log(`Return:              ${returnPct}%`);
+  console.log(`Max DD:              ${round(s.maxDrawdownAbs, 2)} (${maxDdPct}%)`);
+  console.log(`Avg win / loss:      ${round(s.avgWin, 2)} / ${round(s.avgLoss, 2)}`);
+  console.log(`Gross profit / loss: ${round(s.grossProfit, 2)} / ${round(s.grossLoss, 2)}`);
+  console.log(`Start / end balance: ${round(s.startBalance, 2)} / ${round(s.endBalance, 2)}`);
 
-  if (side === 'long') {
-    let stop = recentLow - pad;
-    if (price - stop < minDist) stop = price - minDist;
-    if (price - stop > maxDist) stop = price - maxDist;
-    if (stop >= price) stop = price - minDist;
-    return stop;
+  console.log('\n' + color('========== HTF ==========', 'bold'));
+  console.log(`Passes:              ${h.passes ?? 0}`);
+  console.log(`Rejects:             ${h.rejects ?? 0}`);
+  console.log(`Warmup rejects:      ${h.warmupRejects ?? 0}`);
+
+  console.log('\n' + color('========== REGIME ==========', 'bold'));
+  console.log(`Total bars:          ${r.totalBars ?? 0}`);
+  for (const [regime, bucket] of Object.entries(r.barsByRegime ?? {}) as Array<
+    [string, { bars: number; pct: number }]
+  >) {
+    console.log(`${regime}: ${bucket.bars} bars (${round((bucket.pct ?? 0) * 100, 2)}%)`);
   }
 
-  let stop = recentHigh + pad;
-  if (stop - price < minDist) stop = price + minDist;
-  if (stop - price > maxDist) stop = price + maxDist;
-  if (stop <= price) stop = price + minDist;
-  return stop;
+  console.log('\n' + color('Close reasons:', 'bold'));
+  for (const [reason, count] of Object.entries(r.closeReasonsAll ?? {})) {
+    console.log(`${reason}: ${count}`);
+  }
 }
 
-function calcPositionSize(params: {
-  price: number;
-  stopLossPrice: number;
-  riskCapital: number;
-  balance: number;
-}) {
-  const { price, stopLossPrice, riskCapital, balance } = params;
-  const stopDist = Math.abs(price - stopLossPrice);
-  if (stopDist <= 0 || price <= 0) {
-    return { quantity: null as number | null, positionSize: null as number | null };
+function printTrades(result: any): void {
+  console.log('\n' + color('========== TRADES ==========', 'bold'));
+  if (!result.trades?.length) {
+    console.log('No trades');
+    return;
   }
 
-  const commPerShare = price * ROUND_TRIP_COMMISSION_RATE;
-  const riskPerShare = stopDist + commPerShare;
-  if (commPerShare / riskPerShare > MAX_COMMISSION_SHARE_OF_RISK) {
-    return { quantity: null, positionSize: null };
+  for (const t of result.trades) {
+    const pnl = round(t.netPnl, 2);
+    const coloredPnl =
+      pnl > 0 ? color(String(pnl), 'green') : pnl < 0 ? color(String(pnl), 'red') : color(String(pnl), 'yellow');
+    const reasonColor =
+      t.closeReason === 'take_profit_2' || t.closeReason === 'take_profit_1'
+        ? 'green'
+        : t.closeReason === 'stop_loss'
+          ? 'red'
+          : 'yellow';
+
+    console.log(
+      [
+        `[${new Date(t.openedAt).toISOString()} -> ${new Date(t.closedAt).toISOString()}]`,
+        t.side.toUpperCase(),
+        `entry=${round(t.entryPrice, 4)}`,
+        `exit=${round(t.exitPrice, 4)}`,
+        `qty=${round(t.quantity, 4)}`,
+        `bars=${t.barsHeld}`,
+        `reason=${color(t.closeReason, reasonColor as any)}`,
+        `pnl=${coloredPnl}`,
+        `comm=${round(t.totalCommission, 2)}`
+      ].join(' | ')
+    );
   }
-
-  let quantity = Math.floor(riskCapital / riskPerShare);
-  if (quantity >= 3 && quantity % 2 === 1) quantity -= 1;
-
-  const maxQty = Math.floor((balance * MAX_POSITION_FRAC) / price);
-  quantity = Math.min(quantity, maxQty);
-
-  if (quantity < MIN_QUANTITY) {
-    return { quantity: null, positionSize: null };
-  }
-
-  return { quantity, positionSize: quantity * price };
 }
 
-// ============================================================================
-// HTF 1h
-// ============================================================================
-
-export function hourBucketStart(ts: number): number {
-  const d = new Date(ts);
-  return Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate(),
-    d.getUTCHours(),
-    0,
-    0,
-    0
-  );
+function parseArg(args: string[], idx: number, fallback: string): string {
+  return args[idx] ?? fallback;
 }
 
-export function aggregateTo1h(candles15: Candle[]): Candle[] {
-  const map = new Map<number, Candle>();
-  for (const c of candles15) {
-    const key = hourBucketStart(c.time);
-    const prevBar = map.get(key);
-    if (!prevBar) {
-      map.set(key, {
-        time: key,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume
-      });
-    } else {
-      prevBar.high = Math.max(prevBar.high, c.high);
-      prevBar.low = Math.min(prevBar.low, c.low);
-      prevBar.close = c.close;
-      prevBar.volume += c.volume;
-    }
-  }
-  return [...map.values()].sort((a, b) => a.time - b.time);
-}
+async function main() {
+  const args = process.argv.slice(2);
 
-export function buildHtfBiasSeries(
-  hours: Candle[],
-  minAdx1h = 18
-): HtfBarState[] {
-  if (hours.length < 210) return [];
-
-  const closes = hours.map(h => h.close);
-  const highs = hours.map(h => h.high);
-  const lows = hours.map(h => h.low);
-
-  const ema20Arr = EMA.calculate({ period: 20, values: closes });
-  const ema50Arr = EMA.calculate({ period: 50, values: closes });
-  const ema200Arr = EMA.calculate({ period: 200, values: closes });
-  const adxArr = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
-
-  const n = hours.length;
-  const offE20 = n - ema20Arr.length;
-  const offE50 = n - ema50Arr.length;
-  const offE200 = n - ema200Arr.length;
-  const offAdx = n - adxArr.length;
-
-  const out: HtfBarState[] = [];
-
-  for (let i = 0; i < n; i++) {
-    const i20 = i - offE20;
-    const i50 = i - offE50;
-    const i200 = i - offE200;
-    const iAdx = i - offAdx;
-    if (i20 < 0 || i50 < 0 || i200 < 0 || iAdx < 0) continue;
-
-    const ema20 = ema20Arr[i20];
-    const ema50 = ema50Arr[i50];
-    const ema200 = ema200Arr[i200];
-    const adxVal = adxArr[iAdx].adx;
-    const close = closes[i];
-
-    const adxOk = minAdx1h <= 0 || adxVal >= minAdx1h;
-    let bias: HtfBias = 'neutral';
-    if (adxOk && close > ema200 && ema20 > ema50) bias = 'up';
-    else if (adxOk && close < ema200 && ema20 < ema50) bias = 'down';
-
-    out.push({
-      time: hours[i].time,
-      bias,
-      adx: adxVal,
-      ema20,
-      ema50,
-      ema200,
-      close
-    });
+  if (args.length < 2) {
+    console.log(
+      'Usage: tsx src/backtest/runBacktest.ts <candles.json> <SYMBOL> [cooldownCandles] [runnerTrailR] [htfFilter 0|1] [htfMinAdx1h] [timeStopBars] [earlyAbortBars] [earlyAbortMinR] [maxTradesPerDay]'
+    );
+    process.exit(1);
   }
 
-  return out;
-}
+  const filePath = args[0];
+  const symbol = args[1];
+  const cooldownCandles = Number.parseInt(parseArg(args, 2, String(DEFAULT_COOLDOWN_CANDLES)), 10);
+  const runnerTrailR = Number.parseFloat(parseArg(args, 3, '0'));
+  const htfFilter = parseArg(args, 4, '0') === '1';
+  const htfMinAdx1h = Number.parseFloat(parseArg(args, 5, '18'));
+  const timeStopBars = Number.parseInt(parseArg(args, 6, '64'), 10);
+  const earlyAbortBars = Number.parseInt(parseArg(args, 7, '16'), 10);
+  const earlyAbortMinR = Number.parseFloat(parseArg(args, 8, '0.35'));
+  const maxTradesPerDay = Number.parseInt(parseArg(args, 9, '0'), 10);
 
-export function getHtfBiasAt(
-  series: HtfBarState[],
-  ts15: number
-): HtfBarState | null {
-  if (!series.length) return null;
-  let lo = 0;
-  let hi = series.length - 1;
-  let best: HtfBarState | null = null;
+  const candles = readCandlesFromJson(path.resolve(filePath));
 
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const closeTs = series[mid].time + MS_PER_HOUR;
-    if (closeTs <= ts15) {
-      best = series[mid];
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return best;
-}
+  console.log(color('========== PARAMETERS ==========', 'bold'));
+  console.log(`File:                ${filePath}`);
+  console.log(`Symbol:              ${symbol}`);
+  console.log(`Cooldown candles:    ${cooldownCandles}`);
+  console.log(`Runner trail R:      ${runnerTrailR}`);
+  console.log(`HTF filter:          ${htfFilter ? 'on' : 'off'}`);
+  console.log(`HTF min ADX 1h:      ${htfMinAdx1h}`);
+  console.log(`Time stop bars:      ${timeStopBars}`);
+  console.log(`Early abort bars:    ${earlyAbortBars}`);
+  console.log(`Early abort min R:   ${earlyAbortMinR}`);
+  console.log(`Max trades per day:  ${maxTradesPerDay}`);
+  console.log(`Candles loaded:      ${candles.length}`);
 
-export function detectMarketRegime(candles: Candle[]) {
-  const closes = candles.map(c => c.close);
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const volumes = candles.map(c => c.volume);
+  const startedAt = Date.now();
 
-  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
-  const adx = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
-  const ema20 = EMA.calculate({ period: 20, values: closes });
-  const ema50 = EMA.calculate({ period: 50, values: closes });
-  const ema200 = EMA.calculate({ period: 200, values: closes });
-  const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
-
-  if (
-    atr.length < 2 ||
-    adx.length < 2 ||
-    ema20.length < 1 ||
-    ema50.length < 1 ||
-    ema200.length < 1 ||
-    bb.length < 1
-  ) {
-    return { regime: 'unknown' as MarketRegime, ready: false, indicators: null };
-  }
-
-  const lastClose = last(closes);
-  const lastAtr = last(atr);
-  const lastAdx = last(adx);
-  const prevAdx = prev(adx);
-  const lastEma20 = last(ema20);
-  const lastEma50 = last(ema50);
-  const lastEma200 = last(ema200);
-  const lastBb = last(bb);
-
-  const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
-  const atrPct = lastAtr / lastClose;
-  const adxRising = lastAdx.adx > prevAdx.adx;
-  const adxOk = lastAdx.adx >= MIN_ADX_TREND && (adxRising || lastAdx.adx >= 26);
-
-  const stackUp = lastEma20 > lastEma50 && lastEma50 > lastEma200;
-  const stackDown = lastEma20 < lastEma50 && lastEma50 < lastEma200;
-
-  const highVolatility = atrPct > 0.028 || bbWidth > 0.13;
-  const trendUp = !highVolatility && lastClose > lastEma200 && stackUp && adxOk;
-  const trendDown = !highVolatility && lastClose < lastEma200 && stackDown && adxOk;
-
-  let regime: MarketRegime = 'unknown';
-  if (highVolatility) regime = 'high_volatility';
-  else if (trendUp) regime = 'trend_up';
-  else if (trendDown) regime = 'trend_down';
-  else if (lastAdx.adx < 18) regime = 'range';
-
-  return {
-    regime,
-    ready: true,
-    indicators: {
-      lastClose,
-      lastAtr,
-      atrPct,
-      adx: lastAdx.adx,
-      adxRising,
-      ema20: lastEma20,
-      ema50: lastEma50,
-      ema200: lastEma200,
-      bbWidth,
-      avgVol20: mean(volumes.slice(-20))
-    }
-  };
-}
-
-function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategySignal {
-  return {
-    price,
-    buy: false,
-    sell: false,
-    side: 'none',
-    stopLossPrice: null,
-    takeProfit1Price: null,
-    takeProfit2Price: null,
-    takeProfitPrice: null,
-    tp1Fraction: TP1_FRACTION,
-    positionSize: null,
-    quantity: null,
-    regime,
-    initialR: null,
-    timeFailBars: DEFAULT_TIME_FAIL_BARS,
-    indicators: { ready: false }
-  };
-}
-
-function getAtrPercentile(
-  candles: Candle[],
-  window = ATR_PERCENTILE_WINDOW
-): number {
-  if (candles.length < Math.max(30, window + 20)) return 0;
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const closes = candles.map(c => c.close);
-  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
-  if (atr.length < 20) return 0;
-  const atrValues = atr.slice(-window).map(v => v);
-  const lastAtr = atrValues[atrValues.length - 1];
-  const rank = atrValues.filter(v => v <= lastAtr).length;
-  return atrValues.length > 0 ? rank / atrValues.length : 0;
-}
-
-/**
- * @param balance — текущий баланс для сайзинга
- * @param htf — фильтр 1h (по умолчанию выкл.)
- */
-export function analyzeMarket(
-  candles: Candle[],
-  balance: number = STARTING_BALANCE,
-  htf: HtfFilterOptions = DEFAULT_HTF_FILTER
-): StrategySignal {
-  const closes = candles.map(c => c.close);
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const opens = candles.map(c => c.open);
-  const volumes = candles.map(c => c.volume);
-
-  const regimeInfo = detectMarketRegime(candles);
-  const macd = MACD.calculate({
-    values: closes,
-    fastPeriod: 12,
-    slowPeriod: 26,
-    signalPeriod: 9,
-    SimpleMAOscillator: false,
-    SimpleMASignal: false
-  });
-  const rsi = RSI.calculate({ period: 14, values: closes });
-  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
-
-  if (
-    !regimeInfo.ready ||
-    !regimeInfo.indicators ||
-    macd.length < 3 ||
-    rsi.length < 2 ||
-    atr.length < 2 ||
-    candles.length < 40
-  ) {
-    return emptySignal(closes[closes.length - 1] ?? 0);
-  }
-
-  const price = last(closes);
-  const prevPrice = prev(closes);
-  const regime = regimeInfo.regime;
-  const ind = regimeInfo.indicators;
-  const lastAtr = last(atr);
-  const lastMacd = last(macd);
-  const prevMacd = prev(macd);
-  const lastRsi = last(rsi);
-  const lastOpen = last(opens);
-  const lastHigh = last(highs);
-  const lastLow = last(lows);
-  const lastTs = last(candles).time;
-  const avgVol20 = mean(volumes.slice(-20));
-  const atrPct = (ind.atrPct as number) ?? 0;
-  const atrPercentile = getAtrPercentile(candles, ATR_PERCENTILE_WINDOW);
-
-  if (!isTradingHour(lastTs) || regime === 'high_volatility') {
-    return {
-      ...emptySignal(price, regime),
-      indicators: { ready: true, skipped: true, regime }
-    };
-  }
-
-  const ema20 = ind.ema20 as number;
-  const ema50 = ind.ema50 as number;
-  const ema200 = ind.ema200 as number;
-  const extension = (price - ema20) / price;
-
-  const macdCrossUp =
-    prevMacd.MACD! < prevMacd.signal! && lastMacd.MACD! > lastMacd.signal!;
-  const macdCrossDown =
-    prevMacd.MACD! > prevMacd.signal! && lastMacd.MACD! < lastMacd.signal!;
-
-  const macdBull =
-    lastMacd.MACD! > lastMacd.signal! &&
-    (lastMacd.histogram ?? 0) >= (prevMacd.histogram ?? 0);
-  const macdBear =
-    lastMacd.MACD! < lastMacd.signal! &&
-    (lastMacd.histogram ?? 0) <= (prevMacd.histogram ?? 0);
-
-  const range = Math.max(lastHigh - lastLow, 1e-9);
-  const bodyPct = Math.abs(price - lastOpen) / range;
-  const bullCandle = price > lastOpen && bodyPct >= 0.4;
-  const bearCandle = price < lastOpen && bodyPct >= 0.4;
-
-  const breakoutLookback = DEFAULT_BREAKOUT_LOOKBACK;
-  const priorHigh = Math.max(...highs.slice(-(breakoutLookback + 1), -1));
-  const priorLow = Math.min(...lows.slice(-(breakoutLookback + 1), -1));
-
-  const closeOutsideRangeLong = price > priorHigh;
-  const closeOutsideRangeShort = price < priorLow;
-
-  const compressionOk =
-    atrPercentile > 0 &&
-    atrPercentile <= DEFAULT_ATR_PERCENTILE_MAX &&
-    atrPct <= 0.03;
-
-  const volumeOk = avgVol20 > 0 && last(candles).volume >= avgVol20 * DEFAULT_VOLUME_MULTIPLIER;
-
-  const touchLong =
-    lastLow <= ema20 * 1.006 ||
-    lastLow <= ema50 * 1.01 ||
-    (prevPrice <= ema20 * 1.006 && lastLow <= ema20 * 1.01);
-  const touchShort =
-    lastHigh >= ema20 * 0.994 ||
-    lastHigh >= ema50 * 0.99 ||
-    (prevPrice >= ema20 * 0.994 && lastHigh >= ema20 * 0.99);
-
-  const notExtLong = extension > -0.003 && extension < MAX_EXTENSION_FROM_EMA20;
-  const notExtShort = extension < 0.003 && extension > -MAX_EXTENSION_FROM_EMA20;
-
-  const pullbackLong =
-    touchLong &&
-    bullCandle &&
-    price >= ema20 * 0.997 &&
-    macdBull &&
-    lastRsi > 42 &&
-    lastRsi < 68 &&
-    notExtLong;
-
-  const pullbackShort =
-    touchShort &&
-    bearCandle &&
-    price <= ema20 * 1.003 &&
-    macdBear &&
-    lastRsi < 58 &&
-    lastRsi > 32 &&
-    notExtShort;
-
-  const crossLong =
-    macdCrossUp &&
-    touchLong &&
-    bullCandle &&
-    price > ema20 &&
-    lastRsi > 42 &&
-    lastRsi < 68 &&
-    notExtLong;
-
-  const crossShort =
-    macdCrossDown &&
-    touchShort &&
-    bearCandle &&
-    price < ema20 &&
-    lastRsi < 58 &&
-    lastRsi > 32 &&
-    notExtShort;
-
-  const breakoutLong =
-    regime !== 'high_volatility' &&
-    compressionOk &&
-    volumeOk &&
-    closeOutsideRangeLong &&
-    price > ema20 &&
-    price > ema50 &&
-    price > ema200 &&
-    lastRsi > 50 &&
-    lastRsi < 78 &&
-    (bullCandle || lastMacd.histogram! > prevMacd.histogram!);
-
-  const breakoutShort =
-    regime !== 'high_volatility' &&
-    compressionOk &&
-    volumeOk &&
-    closeOutsideRangeShort &&
-    price < ema20 &&
-    price < ema50 &&
-    price < ema200 &&
-    lastRsi < 50 &&
-    lastRsi > 22 &&
-    (bearCandle || lastMacd.histogram! < prevMacd.histogram!);
-
-  let longSignal =
-    regime === 'trend_up' &&
-    price > ema200 &&
-    (pullbackLong || crossLong || breakoutLong);
-
-  let shortSignal =
-    regime === 'trend_down' &&
-    price < ema200 &&
-    (pullbackShort || crossShort || breakoutShort);
-
-  if (!longSignal && !shortSignal) {
-    if (regime === 'range' && breakoutLong) longSignal = true;
-    if (regime === 'range' && breakoutShort) shortSignal = true;
-  }
-
-  // ---------- HTF 1h GATE ----------
-  if (htf.enabled && (longSignal || shortSignal)) {
-    const minAdx = htf.minAdx1h ?? 18;
-    let series = htf.precomputedHtf;
-    if (!series) {
-      series = buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
-    }
-    const st = getHtfBiasAt(series, lastTs);
-
-    if (!st) {
-      return {
-        ...emptySignal(price, regime),
-        indicators: {
-          ready: true,
-          reject: 'htf_warmup',
-          longWould: longSignal,
-          shortWould: shortSignal
-        }
-      };
-    }
-
-    const sideWouldBe: 'long' | 'short' = longSignal ? 'long' : 'short';
-    if (longSignal && st.bias !== 'up') longSignal = false;
-    if (shortSignal && st.bias !== 'down') shortSignal = false;
-
-    if (!longSignal && !shortSignal) {
-      return {
-        ...emptySignal(price, regime),
-        indicators: {
-          ready: true,
-          reject: 'htf_gate',
-          htfBias: st.bias,
-          htfAdx: st.adx,
-          sideWouldBe,
-          htfEma20: st.ema20,
-          htfEma200: st.ema200
-        }
-      };
-    }
-  }
-
-  if (!longSignal && !shortSignal) {
-    return {
-      ...emptySignal(price, regime),
-      indicators: {
-        ready: true,
-        longSignal,
-        shortSignal,
-        lastRsi,
-        extension,
-        bodyPct,
-        pullbackLong,
-        pullbackShort,
-        crossLong,
-        crossShort,
-        breakoutLong,
-        breakoutShort,
-        compressionOk,
-        volumeOk,
-        closeOutsideRangeLong,
-        closeOutsideRangeShort,
-        atrPercentile
-      }
-    };
-  }
-
-  const side: 'long' | 'short' = longSignal ? 'long' : 'short';
-  const atrStopMult = atrPct > 0.015 ? 1.6 : 1.45;
-
-  const stopLossPrice = getStructureStop({
-    side,
-    highs,
-    lows,
-    price,
-    lastAtr,
-    atrStopMult
+  const result = runStrategyBacktest(symbol, candles, {
+    cooldownCandles,
+    runnerTrailR,
+    htfFilter,
+    htfMinAdx1h,
+    timeStopBars,
+    earlyAbortBars,
+    earlyAbortMinR,
+    maxTradesPerDay,
+    progressLogEvery: PROGRESS_LOG_EVERY
   });
 
-  const initialR = Math.abs(price - stopLossPrice);
-  const stopPct = initialR / price;
+  const totalElapsedSec = (Date.now() - startedAt) / 1000;
 
-  if (
-    initialR <= 0 ||
-    stopPct < MIN_STOP_DISTANCE_RATE ||
-    stopPct > MAX_STOP_DISTANCE_RATE
-  ) {
-    return {
-      ...emptySignal(price, regime),
-      indicators: { ready: true, reject: 'stop_distance', stopPct }
-    };
-  }
+  console.log('\n' + color('========== EXECUTION TIME ==========', 'bold'));
+  console.log(`Actual time:         ${formatDuration(totalElapsedSec)}`);
 
-  const takeProfit1Price =
-    side === 'long' ? price + TP1_R * initialR : price - TP1_R * initialR;
-  const takeProfit2Price =
-    side === 'long' ? price + TP2_R * initialR : price - TP2_R * initialR;
-
-  const riskCapital = balance * MAX_RISK_PER_TRADE;
-  const sized = calcPositionSize({
-    price,
-    stopLossPrice,
-    riskCapital,
-    balance
-  });
-
-  if (sized.quantity == null) {
-    return {
-      ...emptySignal(price, regime),
-      indicators: { ready: true, reject: 'size' }
-    };
-  }
-
-  return {
-    price,
-    buy: side === 'long',
-    sell: side === 'short',
-    side,
-    stopLossPrice,
-    takeProfit1Price,
-    takeProfit2Price,
-    takeProfitPrice: takeProfit2Price,
-    tp1Fraction: TP1_FRACTION,
-    positionSize: sized.positionSize,
-    quantity: sized.quantity,
-    regime,
-    initialR,
-    timeFailBars: DEFAULT_TIME_FAIL_BARS,
-    indicators: {
-      ready: true,
-      lastRsi,
-      extension,
-      initialR,
-      stopPct,
-      bodyPct,
-      tp1: takeProfit1Price,
-      tp2: takeProfit2Price,
-      pullbackLong,
-      pullbackShort,
-      crossLong,
-      crossShort,
-      breakoutLong,
-      breakoutShort,
-      compressionOk,
-      volumeOk,
-      closeOutsideRangeLong,
-      closeOutsideRangeShort,
-      atrPercentile,
-      htfEnabled: htf.enabled
-    }
-  };
+  printSummary(result);
+  printTrades(result);
 }
+
+main().catch(err => {
+  console.error(color(`Error: ${err?.message ?? err}`, 'red'));
+  process.exit(1);
+});
