@@ -41,7 +41,6 @@ const MIN_QUANTITY = 2;
 export const HTF_WARMUP_15M = 850;
 const MS_PER_HOUR = 3_600_000;
 
-const COMPRESSION_LOOKBACK = 48;
 const ATR_PERCENTILE_WINDOW = 120;
 const DEFAULT_ATR_PERCENTILE_MAX = 0.45;
 const DEFAULT_VOLUME_MULTIPLIER = 1.25;
@@ -117,13 +116,6 @@ function prev<T>(arr: T[]): T {
 function mean(values: number[]): number {
   if (values.length === 0) return 0;
   return values.reduce((a, b) => a + b, 0) / values.length;
-}
-
-function percentile(values: number[], p: number): number {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
-  return sorted[idx];
 }
 
 function isTradingHour(timestamp: number): boolean {
@@ -470,7 +462,7 @@ export function analyzeMarket(
   const atrPct = (ind.atrPct as number) ?? 0;
   const atrPercentile = getAtrPercentile(candles, ATR_PERCENTILE_WINDOW);
 
-  if (!isTradingHour(lastTs) || regime === 'high_volatility') {
+  if (!isTradingHour(lastTs)) {
     return {
       ...emptySignal(price, regime),
       indicators: { ready: true, skipped: true, regime }
@@ -562,7 +554,6 @@ export function analyzeMarket(
     notExtShort;
 
   const breakoutLong =
-    regime !== 'high_volatility' &&
     compressionOk &&
     volumeOk &&
     closeOutsideRangeLong &&
@@ -574,7 +565,6 @@ export function analyzeMarket(
     (bullCandle || lastMacd.histogram! > prevMacd.histogram!);
 
   const breakoutShort =
-    regime !== 'high_volatility' &&
     compressionOk &&
     volumeOk &&
     closeOutsideRangeShort &&
@@ -600,7 +590,6 @@ export function analyzeMarket(
     if (regime === 'range' && breakoutShort) shortSignal = true;
   }
 
-  // ---------- HTF 1h GATE ----------
   if (htf.enabled && (longSignal || shortSignal)) {
     const minAdx = htf.minAdx1h ?? 18;
     let series = htf.precomputedHtf;
