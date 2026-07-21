@@ -48,6 +48,7 @@ interface OpenPosition {
   initialR: number;
   tp1Done: boolean;
   tp1Fraction: number;
+  timeFailBars: number;
 }
 
 export interface BacktestTrade {
@@ -216,6 +217,7 @@ function buildRegimeStats(
     barsMax: number;
     reasons: Record<string, number>;
   };
+
   const groups = new Map<string, Agg>();
 
   for (const t of trades) {
@@ -256,6 +258,7 @@ function buildRegimeStats(
       };
       tradesByRegime[reg] = b;
     }
+
     b.trades += 1;
     b.netProfit += g.net;
     if (g.net > 0) {
@@ -266,6 +269,7 @@ function buildRegimeStats(
       b.grossLoss += g.net;
     }
     b.avgBarsHeld += g.barsMax;
+
     for (const [reason, n] of Object.entries(g.reasons)) {
       incReason(b.closeReasons, reason, n);
       incReason(closeReasonsAll, reason, n);
@@ -311,7 +315,6 @@ function tryOpenPosition(params: {
     precomputedHtf
   });
 
-  // side slice — до подсчёта HTF passes
   if (sideFilter === 'long' && signal.side !== 'long') return null;
   if (sideFilter === 'short' && signal.side !== 'short') return null;
 
@@ -356,7 +359,8 @@ function tryOpenPosition(params: {
     balanceBefore: currentBalance,
     initialR,
     tp1Done: false,
-    tp1Fraction: signal.tp1Fraction ?? TP1_FRACTION
+    tp1Fraction: signal.tp1Fraction ?? TP1_FRACTION,
+    timeFailBars: signal.timeFailBars ?? 4
   };
 }
 
@@ -472,8 +476,7 @@ function processExitsOnCandle(params: {
   stillOpen: boolean;
   openCommissionRemaining: boolean;
 } {
-  const { symbol, position, candle, commissionRate, barsHeld, conservative } =
-    params;
+  const { symbol, position, candle, commissionRate, barsHeld, conservative } = params;
   let { balance, openCommissionRemaining } = params;
   const trades: BacktestTrade[] = [];
 
@@ -664,7 +667,6 @@ function calculateDrawdown(
     if (d > maxDrawdownAbs) maxDrawdownAbs = d;
     if (dp > maxDrawdownPct) maxDrawdownPct = dp;
   }
-
   return {
     maxDrawdownAbs: round(maxDrawdownAbs),
     maxDrawdownPct: round(maxDrawdownPct, 6)
@@ -838,37 +840,12 @@ export function runStrategyBacktest(
         trailR: resolvedOptions.runnerTrailR
       });
 
-      if (barsHeld >= resolvedOptions.timeStopBars) {
-        const t = buildTrade({
-          symbol,
-          position: openPosition,
-          qty: openPosition.quantity,
-          exitPrice: currentCandle.close,
-          closedAt: currentCandle.time,
-          closeReason: 'time_stop',
-          balanceBeforeClose: balance,
-          commissionRate: resolvedOptions.commissionRate,
-          barsHeld,
-          leg: 'full',
-          chargeOpenCommission: openCommissionRemaining
-        });
-        balance = t.balanceAfter;
-        trades.push(t);
-        equityCurve.push({ time: currentCandle.time, balance: round(balance) });
-        cooldownRemaining = resolvedOptions.cooldownCandles;
-        openPosition = null;
-        openPositionIndex = -1;
-        openCommissionRemaining = false;
-      } else if (
-        resolvedOptions.earlyAbortBars > 0 &&
-        barsHeld >= resolvedOptions.earlyAbortBars &&
-        !openPosition.tp1Done
-      ) {
+      if (barsHeld >= openPosition.timeFailBars && !openPosition.tp1Done) {
         const fav =
           openPosition.side === 'long'
             ? currentCandle.close - openPosition.entryPrice
             : openPosition.entryPrice - currentCandle.close;
-        if (fav < resolvedOptions.earlyAbortMinR * openPosition.initialR) {
+        if (fav < 0.45 * openPosition.initialR) {
           const t = buildTrade({
             symbol,
             position: openPosition,
@@ -884,41 +861,96 @@ export function runStrategyBacktest(
           });
           balance = t.balanceAfter;
           trades.push(t);
-          equityCurve.push({
-            time: currentCandle.time,
-            balance: round(balance)
-          });
+          equityCurve.push({ time: currentCandle.time, balance: round(balance) });
           cooldownRemaining = resolvedOptions.cooldownCandles;
           openPosition = null;
           openPositionIndex = -1;
           openCommissionRemaining = false;
         }
       }
-    }
 
-    if (openPosition) {
-      const result = processExitsOnCandle({
-        symbol,
-        position: openPosition,
-        candle: currentCandle,
-        balance,
-        commissionRate: resolvedOptions.commissionRate,
-        barsHeld,
-        conservative: resolvedOptions.conservativeIntrabarExecution,
-        openCommissionRemaining
-      });
-      balance = result.balance;
-      openCommissionRemaining = result.openCommissionRemaining;
-      for (const t of result.trades) {
-        trades.push(t);
-        equityCurve.push({ time: currentCandle.time, balance: round(balance) });
-      }
+      if (openPosition) {
+        if (barsHeld >= resolvedOptions.timeStopBars) {
+          const t = buildTrade({
+            symbol,
+            position: openPosition,
+            qty: openPosition.quantity,
+            exitPrice: currentCandle.close,
+            closedAt: currentCandle.time,
+            closeReason: 'time_stop',
+            balanceBeforeClose: balance,
+            commissionRate: resolvedOptions.commissionRate,
+            barsHeld,
+            leg: 'full',
+            chargeOpenCommission: openCommissionRemaining
+          });
+          balance = t.balanceAfter;
+          trades.push(t);
+          equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+          cooldownRemaining = resolvedOptions.cooldownCandles;
+          openPosition = null;
+          openPositionIndex = -1;
+          openCommissionRemaining = false;
+        } else if (
+          resolvedOptions.earlyAbortBars > 0 &&
+          barsHeld >= resolvedOptions.earlyAbortBars &&
+          !openPosition.tp1Done
+        ) {
+          const fav =
+            openPosition.side === 'long'
+              ? currentCandle.close - openPosition.entryPrice
+              : openPosition.entryPrice - currentCandle.close;
+          if (fav < resolvedOptions.earlyAbortMinR * openPosition.initialR) {
+            const t = buildTrade({
+              symbol,
+              position: openPosition,
+              qty: openPosition.quantity,
+              exitPrice: currentCandle.close,
+              closedAt: currentCandle.time,
+              closeReason: 'early_abort',
+              balanceBeforeClose: balance,
+              commissionRate: resolvedOptions.commissionRate,
+              barsHeld,
+              leg: 'full',
+              chargeOpenCommission: openCommissionRemaining
+            });
+            balance = t.balanceAfter;
+            trades.push(t);
+            equityCurve.push({
+              time: currentCandle.time,
+              balance: round(balance)
+            });
+            cooldownRemaining = resolvedOptions.cooldownCandles;
+            openPosition = null;
+            openPositionIndex = -1;
+            openCommissionRemaining = false;
+          }
+        }
 
-      if (!result.stillOpen) {
-        cooldownRemaining = resolvedOptions.cooldownCandles;
-        openPosition = null;
-        openPositionIndex = -1;
-        openCommissionRemaining = false;
+        if (openPosition) {
+          const result = processExitsOnCandle({
+            symbol,
+            position: openPosition,
+            candle: currentCandle,
+            balance,
+            commissionRate: resolvedOptions.commissionRate,
+            barsHeld,
+            conservative: resolvedOptions.conservativeIntrabarExecution,
+            openCommissionRemaining
+          });
+          balance = result.balance;
+          openCommissionRemaining = result.openCommissionRemaining;
+          for (const t of result.trades) {
+            trades.push(t);
+            equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+          }
+          if (!result.stillOpen) {
+            cooldownRemaining = resolvedOptions.cooldownCandles;
+            openPosition = null;
+            openPositionIndex = -1;
+            openCommissionRemaining = false;
+          }
+        }
       }
     }
 
@@ -943,6 +975,7 @@ export function runStrategyBacktest(
       htfStats,
       sideFilter: resolvedOptions.sideFilter
     });
+
     if (maybeOpen) {
       openPosition = maybeOpen;
       openPositionIndex = i;
