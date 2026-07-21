@@ -7,8 +7,29 @@ import {
   STARTING_BALANCE
 } from '../services/strategy';
 
+// ============================================================================
+// КОНСТАНТЫ ЗАПУСКА / ВЫХОДА
+// ============================================================================
 const DEFAULT_COOLDOWN_CANDLES = 12;
 const PROGRESS_LOG_EVERY = 250;
+const COMMISSION_RATE = 0.0005;
+const MAX_TRADES_PER_DAY = 0; // 0 = выкл.
+const ONE_POSITION_AT_TIME = true;
+const CONSERVATIVE_INTRABAR = true;
+const RUNNER_TRAIL_R = 0;
+
+/** Time-stop: принудительный выход по close после N баров */
+const TIME_STOP_BARS = 64;
+
+/**
+ * Early abort: если за N баров не набрали earlyAbortMinR * R и TP1 ещё нет → выход по close.
+ * 0 = ВЫКЛ (A/B). Было 16.
+ */
+const EARLY_ABORT_BARS = 0;
+const EARLY_ABORT_MIN_R = 0.35;
+
+// Откат abort ON:
+// const EARLY_ABORT_BARS = 16;
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -212,6 +233,26 @@ function estimateBacktestTime(candlesCount: number): {
   if (candlesCount <= 30000) return { minSec: 30, maxSec: 120 };
   if (candlesCount <= 60000) return { minSec: 60, maxSec: 300 };
   return { minSec: 180, maxSec: 600 };
+}
+
+function formatExitModelLine(): string {
+  const abortPart =
+    EARLY_ABORT_BARS > 0
+      ? `abort ${EARLY_ABORT_BARS}b/${EARLY_ABORT_MIN_R}R`
+      : `abort OFF`;
+  return (
+    `Модель выхода: TP1 50%@1.2R → lock 0R → TP2@1.8R | ${abortPart} | ` +
+    `TS ${TIME_STOP_BARS} | trailR=${RUNNER_TRAIL_R}`
+  );
+}
+
+function formatTimeStopAbortLine(): string {
+  if (EARLY_ABORT_BARS > 0) {
+    return (
+      `Time-stop / abort: ${TIME_STOP_BARS} бар / ${EARLY_ABORT_BARS} бар @ ${EARLY_ABORT_MIN_R}R`
+    );
+  }
+  return `Time-stop / abort: ${TIME_STOP_BARS} бар / OFF (earlyAbortBars=0)`;
 }
 
 function printSummary(result: ReturnType<typeof runStrategyBacktest>): void {
@@ -445,11 +486,11 @@ function main(): void {
   );
   console.log(`Лог прогресса: каждые ${PROGRESS_LOG_EVERY} свечей`);
   console.log(`Риск на сделку: ${MAX_RISK_PER_TRADE * 100}%`);
+  console.log(formatExitModelLine());
   console.log(
-    `Модель выхода: TP1 50%@1.2R → lock 0R → TP2@1.8R | abort 16b/0.35R | TS 64 | trailR=0`
+    `Лимит входов в день: ${MAX_TRADES_PER_DAY > 0 ? MAX_TRADES_PER_DAY : 'выкл.'}`
   );
-  console.log(`Лимит входов в день: выкл.`);
-  console.log(`Time-stop / abort: 64 бар / 16 бар @ 0.35R`);
+  console.log(formatTimeStopAbortLine());
   console.log(`Кап стопа: ≤ 1.0% цены`);
   console.log(`Warmup: ${warmup} бар`);
   console.log(htfFilter ? `HTF 1h filter: ON (minAdx1h=${htfMinAdx1h})` : 'HTF 1h filter: OFF');
@@ -468,17 +509,17 @@ function main(): void {
     console.log(`Прогресс: 0/${candles.length} свечей`);
     result = runStrategyBacktest(symbolArg, candles, {
       startingBalance: STARTING_BALANCE,
-      commissionRate: 0.0005,
+      commissionRate: COMMISSION_RATE,
       warmupCandles: warmup,
-      onePositionAtTime: true,
-      conservativeIntrabarExecution: true,
+      onePositionAtTime: ONE_POSITION_AT_TIME,
+      conservativeIntrabarExecution: CONSERVATIVE_INTRABAR,
       cooldownCandles,
       progressLogEvery: PROGRESS_LOG_EVERY,
-      maxTradesPerDay: 0,
-      timeStopBars: 64,
-      earlyAbortBars: 0,
-      earlyAbortMinR: 0.35,
-      runnerTrailR: 0,
+      maxTradesPerDay: MAX_TRADES_PER_DAY,
+      timeStopBars: TIME_STOP_BARS,
+      earlyAbortBars: EARLY_ABORT_BARS,
+      earlyAbortMinR: EARLY_ABORT_MIN_R,
+      runnerTrailR: RUNNER_TRAIL_R,
       htfFilter,
       htfMinAdx1h,
       sideFilter
