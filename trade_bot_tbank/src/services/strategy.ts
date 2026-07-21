@@ -25,6 +25,10 @@ const TRADING_HOUR_UTC_TO = 15;
 const MIN_QUANTITY = 2;
 const DEFAULT_TIME_FAIL_BARS = 4;
 
+// Exhaustion: не входить, если цена уже уехала от swing на > N·ATR
+const EXHAUSTION_LOOKBACK = 24;
+const MAX_ATR_EXTENSION = 2.8;
+
 // ============================================================================
 // ТИПЫ
 // ============================================================================
@@ -347,8 +351,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 }
 
 // ============================================================================
-// ВХОД: только тренд + pullback к EMA
-// Убрано: breakout, ATR-percentile, volume gate, MACD-cross, bodyPct hard-filter
+// ВХОД: тренд + pullback к EMA + ATR exhaustion filter
 // ============================================================================
 export function analyzeMarket(
   candles: Candle[],
@@ -416,9 +419,19 @@ export function analyzeMarket(
   const touchLong = lastLow <= ema20 * 1.006 || lastLow <= ema50 * 1.01;
   const touchShort = lastHigh >= ema20 * 0.994 || lastHigh >= ema50 * 0.99;
 
-  // не гнаться далеко от EMA20
+  // не гнаться далеко от EMA20 (локальный pullback-фильтр)
   const notExtLong = extension > -0.003 && extension < MAX_EXTENSION_FROM_EMA20;
   const notExtShort = extension < 0.003 && extension > -MAX_EXTENSION_FROM_EMA20;
+
+  // --- ATR exhaustion: не догонять уже растянутый ход ---
+  const lookback = Math.min(EXHAUSTION_LOOKBACK, highs.length);
+  const swingHigh = Math.max(...highs.slice(-lookback));
+  const swingLow = Math.min(...lows.slice(-lookback));
+  const atrSafe = Math.max(lastAtr, price * 1e-6);
+  const extDownAtr = (swingHigh - price) / atrSafe;
+  const extUpAtr = (price - swingLow) / atrSafe;
+  const notExhaustedShort = extDownAtr <= MAX_ATR_EXTENSION;
+  const notExhaustedLong = extUpAtr <= MAX_ATR_EXTENSION;
 
   // простой pullback
   const pullbackLong =
@@ -428,7 +441,8 @@ export function analyzeMarket(
     macdBull &&
     lastRsi > 42 &&
     lastRsi < 68 &&
-    notExtLong;
+    notExtLong &&
+    notExhaustedLong;
 
   const pullbackShort =
     touchShort &&
@@ -437,12 +451,13 @@ export function analyzeMarket(
     macdBear &&
     lastRsi < 58 &&
     lastRsi > 32 &&
-    notExtShort;
+    notExtShort &&
+    notExhaustedShort;
 
   let longSignal = regime === 'trend_up' && price > ema200 && pullbackLong;
   let shortSignal = regime === 'trend_down' && price < ema200 && pullbackShort;
 
-  // опциональный HTF-фильтр (как был)
+  // опциональный HTF-фильтр
   if (htf.enabled && (longSignal || shortSignal)) {
     const minAdx = htf.minAdx1h ?? 18;
     const series = htf.precomputedHtf ?? buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
@@ -490,7 +505,12 @@ export function analyzeMarket(
         lastRsi,
         extension,
         pullbackLong,
-        pullbackShort
+        pullbackShort,
+        notExhaustedLong,
+        notExhaustedShort,
+        extDownAtr,
+        extUpAtr,
+        maxAtrExtension: MAX_ATR_EXTENSION
       }
     };
   }
@@ -546,6 +566,11 @@ export function analyzeMarket(
       tp2: takeProfit2Price,
       pullbackLong,
       pullbackShort,
+      notExhaustedLong,
+      notExhaustedShort,
+      extDownAtr,
+      extUpAtr,
+      maxAtrExtension: MAX_ATR_EXTENSION,
       htfEnabled: htf.enabled
     }
   };
