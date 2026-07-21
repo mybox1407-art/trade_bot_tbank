@@ -27,7 +27,7 @@ const DEFAULT_TIME_FAIL_BARS = 4;
 
 // Exhaustion: не входить, если цена уже уехала от swing на > N·ATR
 const EXHAUSTION_LOOKBACK = 24;
-const MAX_ATR_EXTENSION = 2.8;
+const MAX_ATR_EXTENSION = 4;
 
 // ============================================================================
 // ТИПЫ
