@@ -25,10 +25,14 @@ const TRADING_HOUR_UTC_TO = 15;
 const MIN_QUANTITY = 2;
 const DEFAULT_TIME_FAIL_BARS = 4;
 
-// Day extension: не догонять, если СЕССИЯ уже вытянута (не swing-24)
-// short: (sessionHigh - price) / ATR >= MAX_DAY_EXT → reject
-// long:  (price - sessionLow) / ATR >= MAX_DAY_EXT → reject
+// Day extension (сессия с 07:00 UTC)
 const MAX_DAY_EXT = 3.5;
+
+// Bounce still on: short только близко к recent low; long — к recent high
+// short ok: (price - lowest(low, N)) / ATR <= MAX_BOUNCE_ATR
+// long  ok: (highest(high, N) - price) / ATR <= MAX_BOUNCE_ATR
+const BOUNCE_LOOKBACK = 10;
+const MAX_BOUNCE_ATR = 1.1;
 
 // ============================================================================
 // ТИПЫ
@@ -101,7 +105,6 @@ function isTradingHour(ts: number) {
   return h >= TRADING_HOUR_UTC_FROM && h < TRADING_HOUR_UTC_TO;
 }
 
-/** Старт текущей торговой сессии: 07:00 UTC того же календарного дня (UTC). */
 function sessionStartTs(ts: number): number {
   const d = new Date(ts);
   return Date.UTC(
@@ -115,7 +118,6 @@ function sessionStartTs(ts: number): number {
   );
 }
 
-/** High/Low только с начала сессии до текущей свечи включительно. */
 function getSessionRange(candles: Candle[], ts: number): { high: number; low: number } | null {
   const start = sessionStartTs(ts);
   let hi = -Infinity;
@@ -386,8 +388,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 }
 
 // ============================================================================
-// ВХОД: тренд + pullback + day-extension (сессия с 07:00 UTC)
-// Swing-24 ATR exhaustion УБРАН
+// ВХОД: тренд + pullback + day-ext + bounce filter
 // ============================================================================
 export function analyzeMarket(
   candles: Candle[],
@@ -457,8 +458,9 @@ export function analyzeMarket(
   const notExtLong = extension > -0.003 && extension < MAX_EXTENSION_FROM_EMA20;
   const notExtShort = extension < 0.003 && extension > -MAX_EXTENSION_FROM_EMA20;
 
-  // --- Day / session extension (сброс в 07:00 UTC) ---
   const atrSafe = Math.max(lastAtr, price * 1e-6);
+
+  // --- Day / session extension ---
   const session = getSessionRange(candles, lastTs);
   let dayExtDown = 0;
   let dayExtUp = 0;
@@ -472,6 +474,17 @@ export function analyzeMarket(
     notDayExhaustedLong = dayExtUp < MAX_DAY_EXT;
   }
 
+  // --- Bounce still on: не short высоко над recent low; не long низко под recent high ---
+  const bounceLb = Math.min(BOUNCE_LOOKBACK, lows.length);
+  const recentLow = Math.min(...lows.slice(-bounceLb));
+  const recentHigh = Math.max(...highs.slice(-bounceLb));
+  const bounceUpAtr = (price - recentLow) / atrSafe;
+  const bounceDownAtr = (recentHigh - price) / atrSafe;
+  // short: bounce вверх от low ещё «живой», если далеко от low → reject
+  const notBounceShort = bounceUpAtr <= MAX_BOUNCE_ATR;
+  // long: symmetric
+  const notBounceLong = bounceDownAtr <= MAX_BOUNCE_ATR;
+
   const pullbackLong =
     touchLong &&
     bullCandle &&
@@ -480,7 +493,8 @@ export function analyzeMarket(
     lastRsi > 42 &&
     lastRsi < 68 &&
     notExtLong &&
-    notDayExhaustedLong;
+    notDayExhaustedLong &&
+    notBounceLong;
 
   const pullbackShort =
     touchShort &&
@@ -490,7 +504,8 @@ export function analyzeMarket(
     lastRsi < 58 &&
     lastRsi > 32 &&
     notExtShort &&
-    notDayExhaustedShort;
+    notDayExhaustedShort &&
+    notBounceShort;
 
   let longSignal = regime === 'trend_up' && price > ema200 && pullbackLong;
   let shortSignal = regime === 'trend_down' && price < ema200 && pullbackShort;
@@ -548,6 +563,13 @@ export function analyzeMarket(
         dayExtDown,
         dayExtUp,
         maxDayExt: MAX_DAY_EXT,
+        notBounceLong,
+        notBounceShort,
+        bounceUpAtr,
+        bounceDownAtr,
+        maxBounceAtr: MAX_BOUNCE_ATR,
+        recentLow,
+        recentHigh,
         sessionHigh: session?.high ?? null,
         sessionLow: session?.low ?? null
       }
@@ -610,6 +632,13 @@ export function analyzeMarket(
       dayExtDown,
       dayExtUp,
       maxDayExt: MAX_DAY_EXT,
+      notBounceLong,
+      notBounceShort,
+      bounceUpAtr,
+      bounceDownAtr,
+      maxBounceAtr: MAX_BOUNCE_ATR,
+      recentLow,
+      recentHigh,
       sessionHigh: session?.high ?? null,
       sessionLow: session?.low ?? null,
       htfEnabled: htf.enabled
