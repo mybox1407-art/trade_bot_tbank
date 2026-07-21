@@ -971,6 +971,4 @@ export function runStrategyBacktest(
     htfStats,
     regimeStats
   };
-}
-
-export { HTF_WARMUP_15M };
+};
