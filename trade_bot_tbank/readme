@@ -12,3 +12,5 @@ npx ts-node src/backtest/downloadCandles.ts BBG004S681W1 MTSS 100 15m
 npx ts-node src/backtest/runMomentumScalpBacktest.ts src/backtest/data/SBER_1m.json SBER
 
 npx ts-node src/backtest/runBacktest.ts src/backtest/data/SBER_15m.json SBER
+
+npx ts-node src/backtest/runBacktest.ts ./src/backtest/data/MTSS_15m.json MTSS 12 short
