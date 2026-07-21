@@ -476,7 +476,7 @@ function main(): void {
       progressLogEvery: PROGRESS_LOG_EVERY,
       maxTradesPerDay: 0,
       timeStopBars: 64,
-      earlyAbortBars: 16,
+      earlyAbortBars: 0,
       earlyAbortMinR: 0.35,
       runnerTrailR: 0,
       htfFilter,
