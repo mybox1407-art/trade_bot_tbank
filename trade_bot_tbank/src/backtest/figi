@@ -25,6 +25,7 @@ npm run download:candles -- BBG0041PHZD2 RUAL 730
 npx ts-node src/backtest/downloadCandles.ts BBG004730N88 SBER 7 1m
 npx ts-node src/backtest/downloadCandles.ts BBG004731354 ROSN 7 1m
 npx ts-node src/backtest/downloadCandles.ts BBG004731032 LKOH 7 1m
+npx ts-node src/backtest/downloadCandles.ts BBG004S681W1 MTSS 365 15m
 
 
 Запуск теста
