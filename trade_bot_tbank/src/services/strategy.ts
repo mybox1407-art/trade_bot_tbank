@@ -25,9 +25,10 @@ const TRADING_HOUR_UTC_TO = 15;
 const MIN_QUANTITY = 2;
 const DEFAULT_TIME_FAIL_BARS = 4;
 
-// Exhaustion: не входить, если цена уже уехала от swing на > N·ATR
-const EXHAUSTION_LOOKBACK = 24;
-const MAX_ATR_EXTENSION = 4;
+// Day extension: не догонять, если СЕССИЯ уже вытянута (не swing-24)
+// short: (sessionHigh - price) / ATR >= MAX_DAY_EXT → reject
+// long:  (price - sessionLow) / ATR >= MAX_DAY_EXT → reject
+const MAX_DAY_EXT = 2.8;
 
 // ============================================================================
 // ТИПЫ
@@ -98,6 +99,40 @@ function mean(values: number[]) {
 function isTradingHour(ts: number) {
   const h = new Date(ts).getUTCHours();
   return h >= TRADING_HOUR_UTC_FROM && h < TRADING_HOUR_UTC_TO;
+}
+
+/** Старт текущей торговой сессии: 07:00 UTC того же календарного дня (UTC). */
+function sessionStartTs(ts: number): number {
+  const d = new Date(ts);
+  return Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate(),
+    TRADING_HOUR_UTC_FROM,
+    0,
+    0,
+    0
+  );
+}
+
+/** High/Low только с начала сессии до текущей свечи включительно. */
+function getSessionRange(candles: Candle[], ts: number): { high: number; low: number } | null {
+  const start = sessionStartTs(ts);
+  let hi = -Infinity;
+  let lo = Infinity;
+  let n = 0;
+
+  for (let i = candles.length - 1; i >= 0; i--) {
+    const c = candles[i];
+    if (c.time < start) break;
+    if (c.time > ts) continue;
+    hi = Math.max(hi, c.high);
+    lo = Math.min(lo, c.low);
+    n += 1;
+  }
+
+  if (n === 0 || !Number.isFinite(hi) || !Number.isFinite(lo)) return null;
+  return { high: hi, low: lo };
 }
 
 function getStructureStop(params: {
@@ -351,7 +386,8 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 }
 
 // ============================================================================
-// ВХОД: тренд + pullback к EMA + ATR exhaustion filter
+// ВХОД: тренд + pullback + day-extension (сессия с 07:00 UTC)
+// Swing-24 ATR exhaustion УБРАН
 // ============================================================================
 export function analyzeMarket(
   candles: Candle[],
@@ -415,25 +451,27 @@ export function analyzeMarket(
   const bullCandle = price > lastOpen;
   const bearCandle = price < lastOpen;
 
-  // касание зоны EMA20/EMA50
   const touchLong = lastLow <= ema20 * 1.006 || lastLow <= ema50 * 1.01;
   const touchShort = lastHigh >= ema20 * 0.994 || lastHigh >= ema50 * 0.99;
 
-  // не гнаться далеко от EMA20 (локальный pullback-фильтр)
   const notExtLong = extension > -0.003 && extension < MAX_EXTENSION_FROM_EMA20;
   const notExtShort = extension < 0.003 && extension > -MAX_EXTENSION_FROM_EMA20;
 
-  // --- ATR exhaustion: не догонять уже растянутый ход ---
-  const lookback = Math.min(EXHAUSTION_LOOKBACK, highs.length);
-  const swingHigh = Math.max(...highs.slice(-lookback));
-  const swingLow = Math.min(...lows.slice(-lookback));
+  // --- Day / session extension (сброс в 07:00 UTC) ---
   const atrSafe = Math.max(lastAtr, price * 1e-6);
-  const extDownAtr = (swingHigh - price) / atrSafe;
-  const extUpAtr = (price - swingLow) / atrSafe;
-  const notExhaustedShort = extDownAtr <= MAX_ATR_EXTENSION;
-  const notExhaustedLong = extUpAtr <= MAX_ATR_EXTENSION;
+  const session = getSessionRange(candles, lastTs);
+  let dayExtDown = 0;
+  let dayExtUp = 0;
+  let notDayExhaustedShort = true;
+  let notDayExhaustedLong = true;
 
-  // простой pullback
+  if (session) {
+    dayExtDown = (session.high - price) / atrSafe;
+    dayExtUp = (price - session.low) / atrSafe;
+    notDayExhaustedShort = dayExtDown < MAX_DAY_EXT;
+    notDayExhaustedLong = dayExtUp < MAX_DAY_EXT;
+  }
+
   const pullbackLong =
     touchLong &&
     bullCandle &&
@@ -442,7 +480,7 @@ export function analyzeMarket(
     lastRsi > 42 &&
     lastRsi < 68 &&
     notExtLong &&
-    notExhaustedLong;
+    notDayExhaustedLong;
 
   const pullbackShort =
     touchShort &&
@@ -452,12 +490,11 @@ export function analyzeMarket(
     lastRsi < 58 &&
     lastRsi > 32 &&
     notExtShort &&
-    notExhaustedShort;
+    notDayExhaustedShort;
 
   let longSignal = regime === 'trend_up' && price > ema200 && pullbackLong;
   let shortSignal = regime === 'trend_down' && price < ema200 && pullbackShort;
 
-  // опциональный HTF-фильтр
   if (htf.enabled && (longSignal || shortSignal)) {
     const minAdx = htf.minAdx1h ?? 18;
     const series = htf.precomputedHtf ?? buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
@@ -506,11 +543,13 @@ export function analyzeMarket(
         extension,
         pullbackLong,
         pullbackShort,
-        notExhaustedLong,
-        notExhaustedShort,
-        extDownAtr,
-        extUpAtr,
-        maxAtrExtension: MAX_ATR_EXTENSION
+        notDayExhaustedLong,
+        notDayExhaustedShort,
+        dayExtDown,
+        dayExtUp,
+        maxDayExt: MAX_DAY_EXT,
+        sessionHigh: session?.high ?? null,
+        sessionLow: session?.low ?? null
       }
     };
   }
@@ -566,11 +605,13 @@ export function analyzeMarket(
       tp2: takeProfit2Price,
       pullbackLong,
       pullbackShort,
-      notExhaustedLong,
-      notExhaustedShort,
-      extDownAtr,
-      extUpAtr,
-      maxAtrExtension: MAX_ATR_EXTENSION,
+      notDayExhaustedLong,
+      notDayExhaustedShort,
+      dayExtDown,
+      dayExtUp,
+      maxDayExt: MAX_DAY_EXT,
+      sessionHigh: session?.high ?? null,
+      sessionLow: session?.low ?? null,
       htfEnabled: htf.enabled
     }
   };
