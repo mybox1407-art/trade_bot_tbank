@@ -4,7 +4,7 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-export const MAX_RISK_PER_TRADE = 0.03; //было 0.01
+export const MAX_RISK_PER_TRADE = 0.01; //было 0.01
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 export const TP1_FRACTION = 0.5;
@@ -14,7 +14,7 @@ export const PARTIAL_LOCK_R = 0;
 
 const MIN_STOP_DISTANCE_RATE = 0.004;
 const MAX_STOP_DISTANCE_RATE = 0.01;
-const MAX_POSITION_FRAC = 0.5; //было 0.25
+const MAX_POSITION_FRAC = 0.25; //было 0.25
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 const MIN_ADX_TREND = 20;
 const STOP_STRUCTURE_LOOKBACK = 8;
