@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { runBacktest } from './strategyBacktest';
-import { Candle, HtfFilterOptions, STARTING_BALANCE } from './strategy';
+import { Candle, HtfFilterOptions, STARTING_BALANCE } from '../services/strategy';
 
 type RawCandle = {
   time?: number;
