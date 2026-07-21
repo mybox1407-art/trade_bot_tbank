@@ -1,15 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runStrategyBacktest } from './strategyBacktest';
-
-type Candle = {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-};
+import { Candle } from '../services/strategy';
 
 const DEFAULT_COOLDOWN_CANDLES = 12;
 const PROGRESS_LOG_EVERY = 5000;
@@ -70,18 +62,14 @@ function printSummary(result: any): void {
   const h = result.htfStats;
   const r = result.regimeStats;
 
-  const winRatePct = round((s.winRate ?? 0) * 100, 2);
-  const returnPct = round((s.returnPct ?? 0) * 100, 2);
-  const maxDdPct = round((s.maxDrawdownPct ?? 0) * 100, 2);
-
   console.log('\n' + color('========== SUMMARY ==========', 'bold'));
   console.log(`Symbol:              ${result.symbol}`);
   console.log(`Trades:              ${s.tradesCount}`);
-  console.log(`Win rate:            ${winRatePct}%`);
+  console.log(`Win rate:            ${round((s.winRate ?? 0) * 100, 2)}%`);
   console.log(`Profit factor:       ${Number.isFinite(s.profitFactor) ? round(s.profitFactor, 4) : 'Infinity'}`);
   console.log(`Net profit:          ${round(s.netProfit, 2)}`);
-  console.log(`Return:              ${returnPct}%`);
-  console.log(`Max DD:              ${round(s.maxDrawdownAbs, 2)} (${maxDdPct}%)`);
+  console.log(`Return:              ${round((s.returnPct ?? 0) * 100, 2)}%`);
+  console.log(`Max DD:              ${round(s.maxDrawdownAbs, 2)} (${round((s.maxDrawdownPct ?? 0) * 100, 2)}%)`);
   console.log(`Avg win / loss:      ${round(s.avgWin, 2)} / ${round(s.avgLoss, 2)}`);
   console.log(`Gross profit / loss: ${round(s.grossProfit, 2)} / ${round(s.grossLoss, 2)}`);
   console.log(`Start / end balance: ${round(s.startBalance, 2)} / ${round(s.endBalance, 2)}`);
@@ -93,7 +81,9 @@ function printSummary(result: any): void {
 
   console.log('\n' + color('========== REGIME ==========', 'bold'));
   console.log(`Total bars:          ${r.totalBars ?? 0}`);
-  for (const [regime, bucket] of Object.entries(r.barsByRegime ?? {}) as Array<[string, { bars: number; pct: number }]>) {
+  for (const [regime, bucket] of Object.entries(r.barsByRegime ?? {}) as Array<
+    [string, { bars: number; pct: number }]
+  >) {
     console.log(`${regime}: ${bucket.bars} bars (${round((bucket.pct ?? 0) * 100, 2)}%)`);
   }
 
@@ -146,7 +136,7 @@ async function main() {
 
   if (args.length < 2) {
     console.log(
-      'Usage: tsx src/backtest/runBacktest.ts <candles.json> <SYMBOL> [cooldownCandles] [runnerTrailR] [htfFilter 0|1] [htfMinAdx1h] [timeStopBars] [earlyAbortBars] [earlyAbortMinR] [maxTradesPerDay] [sideFilter both|long|short]'
+      'Usage: tsx src/backtest/runBacktest.ts <candles.json> <SYMBOL> [cooldownCandles] [runnerTrailR] [htfFilter 0|1] [htfMinAdx1h] [timeStopBars] [earlyAbortBars] [earlyAbortMinR] [maxTradesPerDay]'
     );
     process.exit(1);
   }
@@ -161,7 +151,6 @@ async function main() {
   const earlyAbortBars = Number.parseInt(parseArg(args, 7, '16'), 10);
   const earlyAbortMinR = Number.parseFloat(parseArg(args, 8, '0.35'));
   const maxTradesPerDay = Number.parseInt(parseArg(args, 9, '0'), 10);
-  const sideFilter = parseArg(args, 10, 'both') as 'both' | 'long' | 'short';
 
   const candles = readCandlesFromJson(path.resolve(filePath));
 
@@ -176,7 +165,6 @@ async function main() {
   console.log(`Early abort bars:    ${earlyAbortBars}`);
   console.log(`Early abort min R:   ${earlyAbortMinR}`);
   console.log(`Max trades per day:  ${maxTradesPerDay}`);
-  console.log(`Side filter:         ${sideFilter}`);
   console.log(`Candles loaded:      ${candles.length}`);
 
   const startedAt = Date.now();
@@ -190,7 +178,6 @@ async function main() {
     earlyAbortBars,
     earlyAbortMinR,
     maxTradesPerDay,
-    sideFilter,
     progressLogEvery: PROGRESS_LOG_EVERY
   });
 
