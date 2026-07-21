@@ -1,12 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { runStrategyBacktest } from './strategyBacktest';
-import { Candle } from '../services/strategy';
+import { runStrategyBacktest, SideFilter } from './strategyBacktest';
+import {
+  Candle,
+  HTF_WARMUP_15M,
+  MAX_RISK_PER_TRADE,
+  STARTING_BALANCE
+} from '../services/strategy';
 
 const DEFAULT_COOLDOWN_CANDLES = 12;
 const PROGRESS_LOG_EVERY = 5000;
 
-/** ANSI-цвета для TTY */
 const ANSI = {
   reset: '\u001b[0m',
   green: '\u001b[32m',
@@ -86,10 +90,10 @@ function printSummary(result: any): void {
 
   console.log('\n' + color('========== REGIME ==========', 'bold'));
   console.log(`Total bars:          ${r.totalBars ?? 0}`);
-  for (const [regime, bucket] of Object.entries(r.barsByRegime ?? {})) {
-    console.log(
-      `${regime}: ${bucket.bars} bars (${round((bucket.pct ?? 0) * 100, 2)}%)`
-    );
+  for (const [regime, bucket] of Object.entries(r.barsByRegime ?? {}) as Array<
+    [string, { bars: number; pct: number }]
+  >) {
+    console.log(`${regime}: ${bucket.bars} bars (${round((bucket.pct ?? 0) * 100, 2)}%)`);
   }
 
   console.log('\n' + color('Close reasons:', 'bold'));
@@ -107,7 +111,8 @@ function printTrades(result: any): void {
 
   for (const t of result.trades) {
     const pnl = round(t.netPnl, 2);
-    const coloredPnl = pnl > 0 ? color(String(pnl), 'green') : pnl < 0 ? color(String(pnl), 'red') : color(String(pnl), 'yellow');
+    const coloredPnl =
+      pnl > 0 ? color(String(pnl), 'green') : pnl < 0 ? color(String(pnl), 'red') : color(String(pnl), 'yellow');
     const reasonColor =
       t.closeReason === 'take_profit_2' || t.closeReason === 'take_profit_1'
         ? 'green'
@@ -140,7 +145,7 @@ async function main() {
 
   if (args.length < 2) {
     console.log(
-      'Usage: tsx src/backtest/runBacktest.ts <candles.json> <SYMBOL> [cooldownCandles] [runnerTrailR] [htfFilter 0|1] [htfMinAdx1h] [timeStopBars] [earlyAbortBars] [earlyAbortMinR] [maxTradesPerDay]'
+      'Usage: tsx src/backtest/runBacktest.ts <candles.json> <SYMBOL> [cooldownCandles] [runnerTrailR] [htfFilter 0|1] [htfMinAdx1h] [timeStopBars] [earlyAbortBars] [earlyAbortMinR] [maxTradesPerDay] [sideFilter both|long|short]'
     );
     process.exit(1);
   }
@@ -155,6 +160,7 @@ async function main() {
   const earlyAbortBars = Number.parseInt(parseArg(args, 7, '16'), 10);
   const earlyAbortMinR = Number.parseFloat(parseArg(args, 8, '0.35'));
   const maxTradesPerDay = Number.parseInt(parseArg(args, 9, '0'), 10);
+  const sideFilter = parseArg(args, 10, 'both') as SideFilter;
 
   const candles = readCandlesFromJson(path.resolve(filePath));
 
@@ -169,7 +175,11 @@ async function main() {
   console.log(`Early abort bars:    ${earlyAbortBars}`);
   console.log(`Early abort min R:   ${earlyAbortMinR}`);
   console.log(`Max trades per day:  ${maxTradesPerDay}`);
+  console.log(`Side filter:         ${sideFilter}`);
   console.log(`Candles loaded:      ${candles.length}`);
+  console.log(`Warmup candles:      ${HTF_WARMUP_15M}`);
+  console.log(`Risk per trade:      ${MAX_RISK_PER_TRADE}`);
+  console.log(`Start balance:       ${STARTING_BALANCE}`);
 
   const startedAt = Date.now();
 
@@ -182,6 +192,7 @@ async function main() {
     earlyAbortBars,
     earlyAbortMinR,
     maxTradesPerDay,
+    sideFilter,
     progressLogEvery: PROGRESS_LOG_EVERY
   });
 
