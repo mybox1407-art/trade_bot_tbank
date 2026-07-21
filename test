@@ -1,4 +1,4 @@
-20_07_2026 - Тест 1
+20_07_2026 - Тест 11
 
 Риск: баланс 50 000; риск 1%; комиссия 0.05% на сторону; кап позиции ≤30%; мин. qty 2 (чётное).
 Вход 15m: режим trend_up/down (EMA20>50>200 + ADX≥20, не high_vol); pullback или MACD-cross у EMA20/50; body ≥40% range; RSI long 42–68 / short 32–58; без сильного extension от EMA20; сессия 10:00–18:00 МСК; стоп structural swing ±0.25 ATR, clamp 0.5–1.2% цены (ATR mult 1.45/1.6).
