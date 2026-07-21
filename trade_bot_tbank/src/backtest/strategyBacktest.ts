@@ -5,7 +5,6 @@ import {
   Candle,
   detectMarketRegime,
   HtfBarState,
-  HTF_WARMUP_15M,
   MarketRegime,
   PARTIAL_LOCK_R,
   TP1_FRACTION
