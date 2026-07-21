@@ -425,7 +425,7 @@ function main(): void {
   }
 
   const estimated = estimateBacktestTime(candles.length);
-  const warmup = htfFilter ? Math.max(250, HTF_WARMUP_15M) : 250;
+  const warmup = htfFilter ? Math.max(250, 850) : 250;
 
   console.log('\n========== ПАРАМЕТРЫ ЗАПУСКА ==========');
   console.log(`Файл: ${absolutePath}`);
