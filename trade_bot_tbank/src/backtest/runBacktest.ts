@@ -446,11 +446,11 @@ function main(): void {
   console.log(`Лог прогресса: каждые ${PROGRESS_LOG_EVERY} свечей`);
   console.log(`Риск на сделку: ${MAX_RISK_PER_TRADE * 100}%`);
   console.log(
-    `Модель выхода: TP1 40%@1.5R → lock 0R → TP2@2.0R | abort 16b/0.35R | TS 64`
+    `Модель выхода: TP1 50%@1.2R → lock 0R → TP2@1.8R | abort 16b/0.35R | TS 64 | trailR=0`
   );
   console.log(`Лимит входов в день: выкл.`);
   console.log(`Time-stop / abort: 64 бар / 16 бар @ 0.35R`);
-  console.log(`Кап стопа: ≤ 1.2% цены`);
+  console.log(`Кап стопа: ≤ 1.0% цены`);
   console.log(`Warmup: ${warmup} бар`);
   console.log(htfFilter ? `HTF 1h filter: ON (minAdx1h=${htfMinAdx1h})` : 'HTF 1h filter: OFF');
 
