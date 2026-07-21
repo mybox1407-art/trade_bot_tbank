@@ -7,7 +7,7 @@ docker network connect n8n-docker_default trade_bot_tbank
 npm install
 
 
-npx ts-node src/backtest/downloadCandles.ts BBG004730N88 SBER 60 1m
+npx ts-node src/backtest/downloadCandles.ts BBG004S681W1 MTSS 100 15m
 
 npx ts-node src/backtest/runMomentumScalpBacktest.ts src/backtest/data/SBER_1m.json SBER
 
