@@ -722,7 +722,7 @@ export function runStrategyBacktest(
     progressLogEvery: options.progressLogEvery ?? 250,
     maxTradesPerDay: options.maxTradesPerDay ?? 0,
     timeStopBars: options.timeStopBars ?? 64,
-    earlyAbortBars: options.earlyAbortBars ?? 0,
+    earlyAbortBars: options.earlyAbortBars ?? 16,
     earlyAbortMinR: options.earlyAbortMinR ?? 0.35,
     runnerTrailR: options.runnerTrailR ?? 0,
     htfFilter: options.htfFilter ?? false,
