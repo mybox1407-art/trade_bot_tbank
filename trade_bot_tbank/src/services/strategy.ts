@@ -41,6 +41,13 @@ const MIN_QUANTITY = 2;
 export const HTF_WARMUP_15M = 850;
 const MS_PER_HOUR = 3_600_000;
 
+const COMPRESSION_LOOKBACK = 48;
+const ATR_PERCENTILE_WINDOW = 120;
+const DEFAULT_ATR_PERCENTILE_MAX = 0.45;
+const DEFAULT_VOLUME_MULTIPLIER = 1.25;
+const DEFAULT_BREAKOUT_LOOKBACK = 12;
+const DEFAULT_TIME_FAIL_BARS = 4;
+
 export interface Candle {
   time: number;
   open: number;
@@ -95,6 +102,7 @@ export interface StrategySignal {
   quantity: number | null;
   regime: MarketRegime;
   initialR: number | null;
+  timeFailBars: number;
   indicators: Record<string, unknown>;
 }
 
@@ -109,6 +117,13 @@ function prev<T>(arr: T[]): T {
 function mean(values: number[]): number {
   if (values.length === 0) return 0;
   return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function percentile(values: number[], p: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
+  return sorted[idx];
 }
 
 function isTradingHour(timestamp: number): boolean {
@@ -380,8 +395,25 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
     quantity: null,
     regime,
     initialR: null,
+    timeFailBars: DEFAULT_TIME_FAIL_BARS,
     indicators: { ready: false }
   };
+}
+
+function getAtrPercentile(
+  candles: Candle[],
+  window = ATR_PERCENTILE_WINDOW
+): number {
+  if (candles.length < Math.max(30, window + 20)) return 0;
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const closes = candles.map(c => c.close);
+  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+  if (atr.length < 20) return 0;
+  const atrValues = atr.slice(-window).map(v => v);
+  const lastAtr = atrValues[atrValues.length - 1];
+  const rank = atrValues.filter(v => v <= lastAtr).length;
+  return atrValues.length > 0 ? rank / atrValues.length : 0;
 }
 
 /**
@@ -397,6 +429,7 @@ export function analyzeMarket(
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
   const opens = candles.map(c => c.open);
+  const volumes = candles.map(c => c.volume);
 
   const regimeInfo = detectMarketRegime(candles);
   const macd = MACD.calculate({
@@ -416,7 +449,7 @@ export function analyzeMarket(
     macd.length < 3 ||
     rsi.length < 2 ||
     atr.length < 2 ||
-    candles.length < 30
+    candles.length < 40
   ) {
     return emptySignal(closes[closes.length - 1] ?? 0);
   }
@@ -433,6 +466,9 @@ export function analyzeMarket(
   const lastHigh = last(highs);
   const lastLow = last(lows);
   const lastTs = last(candles).time;
+  const avgVol20 = mean(volumes.slice(-20));
+  const atrPct = (ind.atrPct as number) ?? 0;
+  const atrPercentile = getAtrPercentile(candles, ATR_PERCENTILE_WINDOW);
 
   if (!isTradingHour(lastTs) || regime === 'high_volatility') {
     return {
@@ -443,6 +479,7 @@ export function analyzeMarket(
 
   const ema20 = ind.ema20 as number;
   const ema50 = ind.ema50 as number;
+  const ema200 = ind.ema200 as number;
   const extension = (price - ema20) / price;
 
   const macdCrossUp =
@@ -461,6 +498,20 @@ export function analyzeMarket(
   const bodyPct = Math.abs(price - lastOpen) / range;
   const bullCandle = price > lastOpen && bodyPct >= 0.4;
   const bearCandle = price < lastOpen && bodyPct >= 0.4;
+
+  const breakoutLookback = DEFAULT_BREAKOUT_LOOKBACK;
+  const priorHigh = Math.max(...highs.slice(-(breakoutLookback + 1), -1));
+  const priorLow = Math.min(...lows.slice(-(breakoutLookback + 1), -1));
+
+  const closeOutsideRangeLong = price > priorHigh;
+  const closeOutsideRangeShort = price < priorLow;
+
+  const compressionOk =
+    atrPercentile > 0 &&
+    atrPercentile <= DEFAULT_ATR_PERCENTILE_MAX &&
+    atrPct <= 0.03;
+
+  const volumeOk = avgVol20 > 0 && last(candles).volume >= avgVol20 * DEFAULT_VOLUME_MULTIPLIER;
 
   const touchLong =
     lastLow <= ema20 * 1.006 ||
@@ -510,14 +561,44 @@ export function analyzeMarket(
     lastRsi > 32 &&
     notExtShort;
 
+  const breakoutLong =
+    regime !== 'high_volatility' &&
+    compressionOk &&
+    volumeOk &&
+    closeOutsideRangeLong &&
+    price > ema20 &&
+    price > ema50 &&
+    price > ema200 &&
+    lastRsi > 50 &&
+    lastRsi < 78 &&
+    (bullCandle || lastMacd.histogram! > prevMacd.histogram!);
+
+  const breakoutShort =
+    regime !== 'high_volatility' &&
+    compressionOk &&
+    volumeOk &&
+    closeOutsideRangeShort &&
+    price < ema20 &&
+    price < ema50 &&
+    price < ema200 &&
+    lastRsi < 50 &&
+    lastRsi > 22 &&
+    (bearCandle || lastMacd.histogram! < prevMacd.histogram!);
+
   let longSignal =
     regime === 'trend_up' &&
-    price > (ind.ema200 as number) &&
-    (pullbackLong || crossLong);
+    price > ema200 &&
+    (pullbackLong || crossLong || breakoutLong);
+
   let shortSignal =
     regime === 'trend_down' &&
-    price < (ind.ema200 as number) &&
-    (pullbackShort || crossShort);
+    price < ema200 &&
+    (pullbackShort || crossShort || breakoutShort);
+
+  if (!longSignal && !shortSignal) {
+    if (regime === 'range' && breakoutLong) longSignal = true;
+    if (regime === 'range' && breakoutShort) shortSignal = true;
+  }
 
   // ---------- HTF 1h GATE ----------
   if (htf.enabled && (longSignal || shortSignal)) {
@@ -573,13 +654,20 @@ export function analyzeMarket(
         pullbackLong,
         pullbackShort,
         crossLong,
-        crossShort
+        crossShort,
+        breakoutLong,
+        breakoutShort,
+        compressionOk,
+        volumeOk,
+        closeOutsideRangeLong,
+        closeOutsideRangeShort,
+        atrPercentile
       }
     };
   }
 
   const side: 'long' | 'short' = longSignal ? 'long' : 'short';
-  const atrStopMult = (ind.atrPct as number) > 0.015 ? 1.6 : 1.45;
+  const atrStopMult = atrPct > 0.015 ? 1.6 : 1.45;
 
   const stopLossPrice = getStructureStop({
     side,
@@ -638,6 +726,7 @@ export function analyzeMarket(
     quantity: sized.quantity,
     regime,
     initialR,
+    timeFailBars: DEFAULT_TIME_FAIL_BARS,
     indicators: {
       ready: true,
       lastRsi,
@@ -651,6 +740,13 @@ export function analyzeMarket(
       pullbackShort,
       crossLong,
       crossShort,
+      breakoutLong,
+      breakoutShort,
+      compressionOk,
+      volumeOk,
+      closeOutsideRangeLong,
+      closeOutsideRangeShort,
+      atrPercentile,
       htfEnabled: htf.enabled
     }
   };
