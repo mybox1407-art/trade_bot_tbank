@@ -1,4 +1,4 @@
-import { analyzeMarket, Candle, STARTING_BALANCE, HtfFilterOptions } from './strategy';
+import { analyzeMarket, Candle, STARTING_BALANCE, HtfFilterOptions } from '../services/strategy';
 
 export interface BacktestTrade {
   openedAt: number;
