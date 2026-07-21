@@ -10,3 +10,5 @@ npm install
 npx ts-node src/backtest/downloadCandles.ts BBG004730N88 SBER 60 1m
 
 npx ts-node src/backtest/runMomentumScalpBacktest.ts src/backtest/data/SBER_1m.json SBER
+
+npx ts-node src/backtest/runBacktest.ts src/backtest/data/SBER_15m.json SBER
