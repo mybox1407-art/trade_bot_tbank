@@ -1,307 +1,977 @@
-import { analyzeMarket, Candle, STARTING_BALANCE, HtfFilterOptions } from '../services/strategy';
+import {
+  analyzeMarket,
+  aggregateTo1h,
+  buildHtfBiasSeries,
+  Candle,
+  detectMarketRegime,
+  HtfBarState,
+  HTF_WARMUP_15M,
+  MarketRegime,
+  PARTIAL_LOCK_R,
+  TP1_FRACTION
+} from '../services/strategy';
 
-export interface BacktestTrade {
-  openedAt: number;
-  closedAt: number;
-  side: 'long' | 'short';
-  entry: number;
-  exit: number;
-  qty: number;
-  bars: number;
-  reason: string;
-  pnl: number;
-  comm: number;
-}
+export type SideFilter = 'both' | 'long' | 'short';
 
 export interface BacktestOptions {
+  startingBalance?: number;
+  commissionRate?: number;
+  warmupCandles?: number;
+  onePositionAtTime?: boolean;
+  conservativeIntrabarExecution?: boolean;
   cooldownCandles?: number;
-  runnerTrailR?: number;
-  htfFilter?: HtfFilterOptions;
+  progressLogEvery?: number;
+  maxTradesPerDay?: number;
   timeStopBars?: number;
   earlyAbortBars?: number;
   earlyAbortMinR?: number;
-  maxTradesPerDay?: number;
+  runnerTrailR?: number;
+  htfFilter?: boolean;
+  htfMinAdx1h?: number;
+  sideFilter?: SideFilter;
+}
+
+interface OpenPosition {
+  side: 'long' | 'short';
+  regime: MarketRegime | string;
+  openedAt: number;
+  entryPrice: number;
+  stopLossPrice: number;
+  initialStopLossPrice: number;
+  takeProfit1Price: number;
+  takeProfit2Price: number;
+  quantity: number;
+  initialQuantity: number;
+  positionSize: number;
+  balanceBefore: number;
+  initialR: number;
+  tp1Done: boolean;
+  tp1Fraction: number;
+}
+
+export interface BacktestTrade {
+  symbol: string;
+  side: 'long' | 'short';
+  regime: MarketRegime | string;
+  openedAt: number;
+  closedAt: number;
+  entryPrice: number;
+  exitPrice: number;
+  stopLossPrice: number;
+  takeProfitPrice: number;
+  quantity: number;
+  positionSize: number;
+  closeReason:
+    | 'stop_loss'
+    | 'take_profit'
+    | 'take_profit_1'
+    | 'take_profit_2'
+    | 'forced_close'
+    | 'time_stop'
+    | 'early_abort'
+    | 'breakeven'
+    | 'trail_stop';
+  grossPnl: number;
+  commissionOpen: number;
+  commissionClose: number;
+  totalCommission: number;
+  netPnl: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  barsHeld: number;
+  leg: 'partial' | 'full';
+}
+
+export interface BacktestSummary {
+  symbol: string;
+  tradesCount: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  grossProfit: number;
+  grossLoss: number;
+  netProfit: number;
+  avgNetPnl: number;
+  avgWin: number;
+  avgLoss: number;
+  profitFactor: number;
+  startBalance: number;
+  endBalance: number;
+  returnPct: number;
+  maxDrawdownAbs: number;
+  maxDrawdownPct: number;
+}
+
+export interface HtfStats {
+  rejects: number;
+  passes: number;
+  warmupRejects: number;
+}
+
+export interface RegimeBarBucket {
+  bars: number;
+  pct: number;
+}
+
+export interface RegimeTradeBucket {
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  netProfit: number;
+  grossProfit: number;
+  grossLoss: number;
+  profitFactor: number;
+  avgBarsHeld: number;
+  closeReasons: Record<string, number>;
+}
+
+export interface RegimeStats {
+  totalBars: number;
+  barsByRegime: Record<string, RegimeBarBucket>;
+  tradesByRegime: Record<string, RegimeTradeBucket>;
+  closeReasonsAll: Record<string, number>;
 }
 
 export interface BacktestResult {
-  symbol?: string;
+  symbol: string;
+  options: Required<BacktestOptions>;
   trades: BacktestTrade[];
-  startBalance: number;
-  endBalance: number;
-  netProfit: number;
-  returnPct: number;
-  winRate: number;
-  profitFactor: number;
-  maxDrawdown: number;
-  grossProfit: number;
-  grossLoss: number;
+  summary: BacktestSummary;
+  equityCurve: Array<{ time: number; balance: number }>;
+  htfStats: HtfStats;
+  regimeStats: RegimeStats;
 }
 
-type Position = {
-  openedAt: number;
-  entry: number;
+function toNumber(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function round(value: number, digits = 8): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'неизвестно';
+  if (seconds < 60) return `${Math.round(seconds)} сек`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  if (minutes < 60) return `${minutes} мин ${secs} сек`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return `${hours} ч ${mins} мин`;
+}
+
+function getCommission(turnover: number, commissionRate: number): number {
+  return turnover * commissionRate;
+}
+
+function getGrossPnl(params: {
   side: 'long' | 'short';
-  qty: number;
-  stop: number;
-  tp1: number;
-  tp2: number;
-  tp1Fraction: number;
-  initialR: number;
-  bars: number;
-  tp1Taken: boolean;
-  stopMoved: boolean;
-};
-
-function round(v: number) {
-  return Math.round(v * 100) / 100;
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+}): number {
+  const { side, entryPrice, exitPrice, quantity } = params;
+  if (side === 'long') return (exitPrice - entryPrice) * quantity;
+  return (entryPrice - exitPrice) * quantity;
 }
 
-function comm(notional: number) {
-  return notional * 0.0005;
+function utcDateKey(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
 }
 
-function isNewDay(a: number, b: number) {
-  return new Date(a).toISOString().slice(0, 10) !== new Date(b).toISOString().slice(0, 10);
+function emptyRegimeStats(): RegimeStats {
+  return {
+    totalBars: 0,
+    barsByRegime: {},
+    tradesByRegime: {},
+    closeReasonsAll: {}
+  };
 }
 
-export function runBacktest(candles: Candle[], symbol = '', options: BacktestOptions = {}): BacktestResult {
-  const cooldownCandles = options.cooldownCandles ?? 12;
-  const timeStopBars = options.timeStopBars ?? 64;
-  const earlyAbortBars = options.earlyAbortBars ?? 16;
-  const earlyAbortMinR = options.earlyAbortMinR ?? 0.35;
-  const maxTradesPerDay = options.maxTradesPerDay ?? 0;
-  const htfFilter = options.htfFilter ?? { enabled: false };
+function incReason(map: Record<string, number>, reason: string, n = 1): void {
+  map[reason] = (map[reason] ?? 0) + n;
+}
 
-  let balance = STARTING_BALANCE;
-  let peak = STARTING_BALANCE;
-  let maxDrawdown = 0;
-  let cooldown = 0;
-  let tradesToday = 0;
-  let pos: Position | null = null;
-  const trades: BacktestTrade[] = [];
+function buildRegimeStats(
+  trades: BacktestTrade[],
+  barCounts: Record<string, number>
+): RegimeStats {
+  const totalBars = Object.values(barCounts).reduce((a, b) => a + b, 0);
+  const barsByRegime: Record<string, RegimeBarBucket> = {};
+  for (const [reg, bars] of Object.entries(barCounts)) {
+    barsByRegime[reg] = {
+      bars,
+      pct: totalBars > 0 ? round(bars / totalBars, 6) : 0
+    };
+  }
 
-  let grossProfit = 0;
-  let grossLoss = 0;
-
-  const closePos = (i: number, price: number, reason: string) => {
-    if (!pos) return;
-    const ts = candles[i].time;
-    const entryNotional = pos.entry * pos.qty;
-    const exitNotional = price * pos.qty;
-    const c = comm(entryNotional) + comm(exitNotional);
-    const pnl = pos.side === 'long'
-      ? (price - pos.entry) * pos.qty - c
-      : (pos.entry - price) * pos.qty - c;
-
-    balance += pnl;
-    peak = Math.max(peak, balance);
-    maxDrawdown = Math.max(maxDrawdown, peak - balance);
-
-    if (pnl >= 0) grossProfit += pnl;
-    else grossLoss += pnl;
-
-    trades.push({
-      openedAt: pos.openedAt,
-      closedAt: ts,
-      side: pos.side,
-      entry: round(pos.entry),
-      exit: round(price),
-      qty: pos.qty,
-      bars: pos.bars,
-      reason,
-      pnl: round(pnl),
-      comm: round(c)
-    });
-
-    pos = null;
-    cooldown = cooldownCandles;
+  type Agg = {
+    regime: string;
+    net: number;
+    barsMax: number;
+    reasons: Record<string, number>;
   };
 
-  for (let i = 0; i < candles.length; i++) {
-    const candle = candles[i];
+  const groups = new Map<string, Agg>();
 
-    if (i === 0 || isNewDay(candles[i - 1].time, candle.time)) {
-      tradesToday = 0;
+  for (const t of trades) {
+    const key = `${t.openedAt}|${t.side}|${t.entryPrice}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        regime: String(t.regime ?? 'unknown'),
+        net: 0,
+        barsMax: 0,
+        reasons: {}
+      };
+      groups.set(key, g);
     }
-
-    if (pos) {
-      pos.bars += 1;
-      const high = candle.high;
-      const low = candle.low;
-
-      if (pos.side === 'long') {
-        if (low <= pos.stop) {
-          closePos(i, pos.stop, 'stop_loss');
-          continue;
-        }
-
-        if (!pos.tp1Taken && high >= pos.tp1) {
-          const qty1 = Math.floor(pos.qty * pos.tp1Fraction);
-          const qty2 = pos.qty - qty1;
-          const c = comm(pos.entry * qty1) + comm(pos.tp1 * qty1);
-          const pnl = (pos.tp1 - pos.entry) * qty1 - c;
-
-          balance += pnl;
-          if (pnl >= 0) grossProfit += pnl;
-          else grossLoss += pnl;
-
-          trades.push({
-            openedAt: pos.openedAt,
-            closedAt: candle.time,
-            side: pos.side,
-            entry: round(pos.entry),
-            exit: round(pos.tp1),
-            qty: qty1,
-            bars: pos.bars,
-            reason: 'take_profit_1',
-            pnl: round(pnl),
-            comm: round(c)
-          });
-
-          pos.qty = qty2;
-          pos.tp1Taken = true;
-
-          if (qty2 <= 0) {
-            pos = null;
-            cooldown = cooldownCandles;
-            continue;
-          }
-
-          pos.stop = pos.entry;
-          pos.stopMoved = true;
-        }
-
-        if (high >= pos.tp2) {
-          closePos(i, pos.tp2, 'take_profit_2');
-          continue;
-        }
-      } else {
-        if (high >= pos.stop) {
-          closePos(i, pos.stop, 'stop_loss');
-          continue;
-        }
-
-        if (!pos.tp1Taken && low <= pos.tp1) {
-          const qty1 = Math.floor(pos.qty * pos.tp1Fraction);
-          const qty2 = pos.qty - qty1;
-          const c = comm(pos.entry * qty1) + comm(pos.tp1 * qty1);
-          const pnl = (pos.entry - pos.tp1) * qty1 - c;
-
-          balance += pnl;
-          if (pnl >= 0) grossProfit += pnl;
-          else grossLoss += pnl;
-
-          trades.push({
-            openedAt: pos.openedAt,
-            closedAt: candle.time,
-            side: pos.side,
-            entry: round(pos.entry),
-            exit: round(pos.tp1),
-            qty: qty1,
-            bars: pos.bars,
-            reason: 'take_profit_1',
-            pnl: round(pnl),
-            comm: round(c)
-          });
-
-          pos.qty = qty2;
-          pos.tp1Taken = true;
-
-          if (qty2 <= 0) {
-            pos = null;
-            cooldown = cooldownCandles;
-            continue;
-          }
-
-          pos.stop = pos.entry;
-          pos.stopMoved = true;
-        }
-
-        if (low <= pos.tp2) {
-          closePos(i, pos.tp2, 'take_profit_2');
-          continue;
-        }
-      }
-
-      if (pos) {
-        if (!pos.tp1Taken && pos.bars >= earlyAbortBars) {
-          const unrealR = pos.side === 'long'
-            ? (candle.close - pos.entry) / pos.initialR
-            : (pos.entry - candle.close) / pos.initialR;
-
-          if (unrealR < earlyAbortMinR) {
-            closePos(i, candle.close, 'early_abort');
-            continue;
-          }
-        }
-
-        if (pos.bars >= timeStopBars) {
-          closePos(i, candle.close, 'time_stop');
-          continue;
-        }
-      }
-    }
-
-    if (cooldown > 0) {
-      cooldown -= 1;
-      continue;
-    }
-
-    if (pos) continue;
-
-    const signal = analyzeMarket(candles.slice(0, i + 1), balance, htfFilter);
-    if (
-      signal.side === 'none' ||
-      signal.quantity == null ||
-      signal.stopLossPrice == null ||
-      signal.takeProfit1Price == null ||
-      signal.takeProfit2Price == null
-    ) {
-      continue;
-    }
-
-    if (maxTradesPerDay > 0 && tradesToday >= maxTradesPerDay) {
-      continue;
-    }
-
-    pos = {
-      openedAt: candle.time,
-      entry: signal.price,
-      side: signal.side,
-      qty: signal.quantity,
-      stop: signal.stopLossPrice,
-      tp1: signal.takeProfit1Price,
-      tp2: signal.takeProfit2Price,
-      tp1Fraction: signal.tp1Fraction,
-      initialR: signal.initialR ?? Math.abs(signal.price - signal.stopLossPrice),
-      bars: 0,
-      tp1Taken: false,
-      stopMoved: false
-    };
-
-    tradesToday += 1;
+    g.net += t.netPnl;
+    g.barsMax = Math.max(g.barsMax, t.barsHeld);
+    incReason(g.reasons, t.closeReason);
   }
 
-  if (pos) {
-    closePos(candles.length - 1, candles[candles.length - 1].close, 'forced_close');
+  const tradesByRegime: Record<string, RegimeTradeBucket> = {};
+  const closeReasonsAll: Record<string, number> = {};
+
+  for (const g of groups.values()) {
+    const reg = g.regime || 'unknown';
+    let b = tradesByRegime[reg];
+    if (!b) {
+      b = {
+        trades: 0,
+        wins: 0,
+        losses: 0,
+        winRate: 0,
+        netProfit: 0,
+        grossProfit: 0,
+        grossLoss: 0,
+        profitFactor: 0,
+        avgBarsHeld: 0,
+        closeReasons: {}
+      };
+      tradesByRegime[reg] = b;
+    }
+
+    b.trades += 1;
+    b.netProfit += g.net;
+    if (g.net > 0) {
+      b.wins += 1;
+      b.grossProfit += g.net;
+    } else {
+      b.losses += 1;
+      b.grossLoss += g.net;
+    }
+
+    b.avgBarsHeld += g.barsMax;
+    for (const [reason, n] of Object.entries(g.reasons)) {
+      incReason(b.closeReasons, reason, n);
+      incReason(closeReasonsAll, reason, n);
+    }
   }
 
-  const wins = trades.filter(t => t.pnl > 0).length;
-  const totalPnL = trades.reduce((s, t) => s + t.pnl, 0);
-  const winRate = trades.length ? wins / trades.length : 0;
-  const profitFactor = grossLoss < 0 ? grossProfit / Math.abs(grossLoss) : 0;
+  for (const b of Object.values(tradesByRegime)) {
+    const gl = Math.abs(b.grossLoss);
+    b.winRate = b.trades > 0 ? round(b.wins / b.trades, 6) : 0;
+    b.netProfit = round(b.netProfit);
+    b.grossProfit = round(b.grossProfit);
+    b.grossLoss = round(b.grossLoss);
+    b.profitFactor =
+      gl > 0 ? round(b.grossProfit / gl, 6) : b.grossProfit > 0 ? Infinity : 0;
+    b.avgBarsHeld = b.trades > 0 ? round(b.avgBarsHeld / b.trades, 2) : 0;
+  }
+
+  return { totalBars, barsByRegime, tradesByRegime, closeReasonsAll };
+}
+
+function tryOpenPosition(params: {
+  visibleCandles: Candle[];
+  currentBalance: number;
+  htfEnabled: boolean;
+  htfMinAdx1h: number;
+  precomputedHtf?: HtfBarState[];
+  htfStats: HtfStats;
+  sideFilter: SideFilter;
+}): OpenPosition | null {
+  const {
+    visibleCandles,
+    currentBalance,
+    htfEnabled,
+    htfMinAdx1h,
+    precomputedHtf,
+    htfStats,
+    sideFilter
+  } = params;
+
+  const signal = analyzeMarket(visibleCandles, currentBalance, {
+    enabled: htfEnabled,
+    minAdx1h: htfMinAdx1h,
+    precomputedHtf
+  });
+
+  if (sideFilter === 'long' && signal.side !== 'long') return null;
+  if (sideFilter === 'short' && signal.side !== 'short') return null;
+
+  const reject = signal.indicators?.reject;
+  if (htfEnabled) {
+    if (reject === 'htf_warmup') htfStats.warmupRejects += 1;
+    else if (reject === 'htf_gate') htfStats.rejects += 1;
+  }
+
+  if (
+    signal.side === 'none' ||
+    signal.quantity == null ||
+    signal.positionSize == null ||
+    signal.stopLossPrice == null ||
+    signal.takeProfit1Price == null ||
+    signal.takeProfit2Price == null ||
+    signal.initialR == null
+  ) {
+    return null;
+  }
+
+  if (htfEnabled) htfStats.passes += 1;
+
+  const lastCandle = visibleCandles[visibleCandles.length - 1];
+  const entryPrice = toNumber(signal.price);
+  const stopLossPrice = toNumber(signal.stopLossPrice);
+  const initialR = toNumber(signal.initialR);
+  if (entryPrice <= 0 || initialR <= 0) return null;
+
+  return {
+    side: signal.side,
+    regime: signal.regime,
+    openedAt: lastCandle.time,
+    entryPrice,
+    stopLossPrice,
+    initialStopLossPrice: stopLossPrice,
+    takeProfit1Price: toNumber(signal.takeProfit1Price),
+    takeProfit2Price: toNumber(signal.takeProfit2Price),
+    quantity: toNumber(signal.quantity),
+    initialQuantity: toNumber(signal.quantity),
+    positionSize: toNumber(signal.positionSize),
+    balanceBefore: currentBalance,
+    initialR,
+    tp1Done: false,
+    tp1Fraction: signal.tp1Fraction ?? TP1_FRACTION
+  };
+}
+
+function updateRunnerTrail(params: {
+  position: OpenPosition;
+  candle: Candle;
+  trailR: number;
+}): void {
+  const { position, candle, trailR } = params;
+  if (!position.tp1Done || trailR <= 0) return;
+
+  const r = position.initialR;
+  if (r <= 0) return;
+  const lock = r * PARTIAL_LOCK_R;
+
+  if (position.side === 'long') {
+    const floor = position.entryPrice + lock;
+    const next = Math.max(floor, candle.high - trailR * r);
+    if (next > position.stopLossPrice) position.stopLossPrice = next;
+  } else {
+    const ceiling = position.entryPrice - lock;
+    const next = Math.min(ceiling, candle.low + trailR * r);
+    if (next < position.stopLossPrice) position.stopLossPrice = next;
+  }
+}
+
+function buildTrade(params: {
+  symbol: string;
+  position: OpenPosition;
+  qty: number;
+  exitPrice: number;
+  closedAt: number;
+  closeReason: BacktestTrade['closeReason'];
+  balanceBeforeClose: number;
+  commissionRate: number;
+  barsHeld: number;
+  leg: 'partial' | 'full';
+  chargeOpenCommission: boolean;
+}): BacktestTrade {
+  const {
+    symbol,
+    position,
+    qty,
+    exitPrice,
+    closedAt,
+    closeReason,
+    balanceBeforeClose,
+    commissionRate,
+    barsHeld,
+    leg,
+    chargeOpenCommission
+  } = params;
+
+  const commissionOpen = chargeOpenCommission
+    ? getCommission(position.entryPrice * qty, commissionRate)
+    : 0;
+  const commissionClose = getCommission(exitPrice * qty, commissionRate);
+  const totalCommission = commissionOpen + commissionClose;
+  const grossPnl = getGrossPnl({
+    side: position.side,
+    entryPrice: position.entryPrice,
+    exitPrice,
+    quantity: qty
+  });
+  const netPnl = grossPnl - totalCommission;
 
   return {
     symbol,
-    trades,
-    startBalance: STARTING_BALANCE,
-    endBalance: balance,
-    netProfit: totalPnL,
-    returnPct: STARTING_BALANCE ? totalPnL / STARTING_BALANCE : 0,
-    winRate,
-    profitFactor,
-    maxDrawdown,
-    grossProfit,
-    grossLoss
+    side: position.side,
+    regime: position.regime,
+    openedAt: position.openedAt,
+    closedAt,
+    entryPrice: round(position.entryPrice),
+    exitPrice: round(exitPrice),
+    stopLossPrice: round(position.stopLossPrice),
+    takeProfitPrice: round(
+      leg === 'partial' ? position.takeProfit1Price : position.takeProfit2Price
+    ),
+    quantity: round(qty, 12),
+    positionSize: round(position.entryPrice * qty, 8),
+    closeReason,
+    grossPnl: round(grossPnl),
+    commissionOpen: round(commissionOpen),
+    commissionClose: round(commissionClose),
+    totalCommission: round(totalCommission),
+    netPnl: round(netPnl),
+    balanceBefore: round(position.balanceBefore),
+    balanceAfter: round(balanceBeforeClose + netPnl),
+    barsHeld,
+    leg
   };
 }
+
+function stopReasonAfterTp1(position: OpenPosition): 'breakeven' | 'trail_stop' {
+  const lockDist = position.initialR * PARTIAL_LOCK_R;
+  const moved = Math.abs(position.stopLossPrice - position.entryPrice);
+  if (lockDist <= 1e-12) return 'breakeven';
+  return moved > lockDist * 1.15 ? 'trail_stop' : 'breakeven';
+}
+
+function processExitsOnCandle(params: {
+  symbol: string;
+  position: OpenPosition;
+  candle: Candle;
+  balance: number;
+  commissionRate: number;
+  barsHeld: number;
+  conservative: boolean;
+  openCommissionRemaining: boolean;
+}): {
+  trades: BacktestTrade[];
+  balance: number;
+  stillOpen: boolean;
+  openCommissionRemaining: boolean;
+} {
+  const { symbol, position, candle, commissionRate, barsHeld, conservative } = params;
+  let { balance, openCommissionRemaining } = params;
+  const trades: BacktestTrade[] = [];
+
+  const hitStop =
+    position.side === 'long'
+      ? candle.low <= position.stopLossPrice
+      : candle.high >= position.stopLossPrice;
+
+  const hitTp1 =
+    !position.tp1Done &&
+    (position.side === 'long'
+      ? candle.high >= position.takeProfit1Price
+      : candle.low <= position.takeProfit1Price);
+
+  const hitTp2 =
+    position.side === 'long'
+      ? candle.high >= position.takeProfit2Price
+      : candle.low <= position.takeProfit2Price;
+
+  if (hitStop && (hitTp1 || hitTp2) && conservative) {
+    const reason = position.tp1Done ? stopReasonAfterTp1(position) : 'stop_loss';
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.stopLossPrice,
+      closedAt: candle.time,
+      closeReason: reason,
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  if (hitTp1 && position.quantity > 1) {
+    let qty1 = Math.floor(position.initialQuantity * position.tp1Fraction);
+    qty1 = Math.max(1, Math.min(qty1, position.quantity - 1));
+
+    const t1 = buildTrade({
+      symbol,
+      position,
+      qty: qty1,
+      exitPrice: position.takeProfit1Price,
+      closedAt: candle.time,
+      closeReason: 'take_profit_1',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'partial',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t1.balanceAfter;
+    trades.push(t1);
+    openCommissionRemaining = false;
+    position.quantity -= qty1;
+    position.tp1Done = true;
+
+    const lock = position.initialR * PARTIAL_LOCK_R;
+    if (position.side === 'long') {
+      position.stopLossPrice = Math.max(position.stopLossPrice, position.entryPrice + lock);
+    } else {
+      position.stopLossPrice = Math.min(position.stopLossPrice, position.entryPrice - lock);
+    }
+  }
+
+  if (hitTp1 && !position.tp1Done && position.quantity === 1) {
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: 1,
+      exitPrice: position.takeProfit1Price,
+      closedAt: candle.time,
+      closeReason: 'take_profit_1',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  const hitStop2 =
+    position.side === 'long'
+      ? candle.low <= position.stopLossPrice
+      : candle.high >= position.stopLossPrice;
+
+  const hitTp2b =
+    position.side === 'long'
+      ? candle.high >= position.takeProfit2Price
+      : candle.low <= position.takeProfit2Price;
+
+  if (position.quantity > 0 && hitStop2 && hitTp2b && conservative) {
+    const reason = position.tp1Done ? stopReasonAfterTp1(position) : 'stop_loss';
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.stopLossPrice,
+      closedAt: candle.time,
+      closeReason: reason,
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  if (position.quantity > 0 && hitStop2) {
+    const reason = position.tp1Done ? stopReasonAfterTp1(position) : 'stop_loss';
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.stopLossPrice,
+      closedAt: candle.time,
+      closeReason: reason,
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  if (position.quantity > 0 && hitTp2b) {
+    const t = buildTrade({
+      symbol,
+      position,
+      qty: position.quantity,
+      exitPrice: position.takeProfit2Price,
+      closedAt: candle.time,
+      closeReason: 'take_profit_2',
+      balanceBeforeClose: balance,
+      commissionRate,
+      barsHeld,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    position.quantity = 0;
+    return { trades, balance, stillOpen: false, openCommissionRemaining: false };
+  }
+
+  return {
+    trades,
+    balance,
+    stillOpen: position.quantity > 0,
+    openCommissionRemaining
+  };
+}
+
+function calculateDrawdown(equityCurve: Array<{ time: number; balance: number }>) {
+  let peak = equityCurve.length ? equityCurve[0].balance : 0;
+  let maxDrawdownAbs = 0;
+  let maxDrawdownPct = 0;
+  for (const point of equityCurve) {
+    if (point.balance > peak) peak = point.balance;
+    const d = peak - point.balance;
+    const dp = peak > 0 ? d / peak : 0;
+    if (d > maxDrawdownAbs) maxDrawdownAbs = d;
+    if (dp > maxDrawdownPct) maxDrawdownPct = dp;
+  }
+  return {
+    maxDrawdownAbs: round(maxDrawdownAbs),
+    maxDrawdownPct: round(maxDrawdownPct, 6)
+  };
+}
+
+function buildSummary(params: {
+  symbol: string;
+  trades: BacktestTrade[];
+  startBalance: number;
+  endBalance: number;
+  equityCurve: Array<{ time: number; balance: number }>;
+}): BacktestSummary {
+  const { symbol, trades, startBalance, endBalance, equityCurve } = params;
+  const groups = new Map<string, number>();
+  for (const t of trades) {
+    const key = `${t.openedAt}|${t.side}|${t.entryPrice}`;
+    groups.set(key, (groups.get(key) ?? 0) + t.netPnl);
+  }
+
+  const groupPnls = [...groups.values()];
+  const wins = groupPnls.filter(p => p > 0);
+  const losses = groupPnls.filter(p => p <= 0);
+  const grossProfit = wins.reduce((a, b) => a + b, 0);
+  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0));
+  const netProfit = groupPnls.reduce((a, b) => a + b, 0);
+  const profitFactor =
+    grossLossAbs > 0 ? grossProfit / grossLossAbs : grossProfit > 0 ? Infinity : 0;
+  const returnPct = startBalance > 0 ? (endBalance - startBalance) / startBalance : 0;
+  const dd = calculateDrawdown(equityCurve);
+
+  return {
+    symbol,
+    tradesCount: groupPnls.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: round(groupPnls.length ? wins.length / groupPnls.length : 0, 6),
+    grossProfit: round(grossProfit),
+    grossLoss: round(-grossLossAbs),
+    netProfit: round(netProfit),
+    avgNetPnl: round(groupPnls.length ? netProfit / groupPnls.length : 0),
+    avgWin: round(wins.length ? grossProfit / wins.length : 0),
+    avgLoss: round(losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0),
+    profitFactor: Number.isFinite(profitFactor) ? round(profitFactor, 6) : Infinity,
+    startBalance: round(startBalance),
+    endBalance: round(endBalance),
+    returnPct: round(returnPct, 6),
+    maxDrawdownAbs: dd.maxDrawdownAbs,
+    maxDrawdownPct: dd.maxDrawdownPct
+  };
+}
+
+export function runStrategyBacktest(
+  symbol: string,
+  candles: Candle[],
+  options: BacktestOptions = {}
+): BacktestResult {
+  const resolvedOptions: Required<BacktestOptions> = {
+    startingBalance: options.startingBalance ?? 50000,
+    commissionRate: options.commissionRate ?? 0.0005,
+    warmupCandles: options.warmupCandles ?? 250,
+    onePositionAtTime: options.onePositionAtTime ?? true,
+    conservativeIntrabarExecution: options.conservativeIntrabarExecution ?? true,
+    cooldownCandles: options.cooldownCandles ?? 12,
+    progressLogEvery: options.progressLogEvery ?? 250,
+    maxTradesPerDay: options.maxTradesPerDay ?? 0,
+    timeStopBars: options.timeStopBars ?? 64,
+    earlyAbortBars: options.earlyAbortBars ?? 16,
+    earlyAbortMinR: options.earlyAbortMinR ?? 0.35,
+    runnerTrailR: options.runnerTrailR ?? 0,
+    htfFilter: options.htfFilter ?? false,
+    htfMinAdx1h: options.htfMinAdx1h ?? 18,
+    sideFilter: options.sideFilter ?? 'both'
+  };
+
+  const emptyHtf: HtfStats = { rejects: 0, passes: 0, warmupRejects: 0 };
+
+  if (!Array.isArray(candles) || candles.length === 0) {
+    return {
+      symbol,
+      options: resolvedOptions,
+      trades: [],
+      summary: buildSummary({
+        symbol,
+        trades: [],
+        startBalance: resolvedOptions.startingBalance,
+        endBalance: resolvedOptions.startingBalance,
+        equityCurve: []
+      }),
+      equityCurve: [],
+      htfStats: emptyHtf,
+      regimeStats: emptyRegimeStats()
+    };
+  }
+
+  const sortedCandles = [...candles].sort((a, b) => a.time - b.time);
+  let balance = resolvedOptions.startingBalance;
+  let openPosition: OpenPosition | null = null;
+  let openPositionIndex = -1;
+  let openCommissionRemaining = false;
+  let cooldownRemaining = 0;
+  const entriesPerDay = new Map<string, number>();
+  const trades: BacktestTrade[] = [];
+  const equityCurve: Array<{ time: number; balance: number }> = [
+    { time: sortedCandles[0].time, balance: round(balance) }
+  ];
+  const htfStats: HtfStats = { rejects: 0, passes: 0, warmupRejects: 0 };
+  const barCounts: Record<string, number> = {};
+
+  let precomputedHtf: HtfBarState[] | undefined;
+  if (resolvedOptions.htfFilter) {
+    precomputedHtf = buildHtfBiasSeries(
+      aggregateTo1h(sortedCandles),
+      resolvedOptions.htfMinAdx1h
+    );
+  }
+
+  const startedAt = Date.now();
+  const totalBarsToProcess = Math.max(sortedCandles.length - resolvedOptions.warmupCandles, 0);
+
+  for (let i = resolvedOptions.warmupCandles; i < sortedCandles.length; i++) {
+    const visibleCandles = sortedCandles.slice(0, i + 1);
+    const currentCandle = sortedCandles[i];
+
+    const regInfo = detectMarketRegime(visibleCandles);
+    const regName = regInfo.ready ? regInfo.regime : 'unknown';
+    barCounts[regName] = (barCounts[regName] ?? 0) + 1;
+
+    if (resolvedOptions.progressLogEvery > 0) {
+      const processedBars = i - resolvedOptions.warmupCandles;
+      const shouldLog =
+        processedBars > 0 &&
+        (processedBars % resolvedOptions.progressLogEvery === 0 ||
+          i === sortedCandles.length - 1);
+      if (shouldLog) {
+        const elapsedSec = (Date.now() - startedAt) / 1000;
+        const speed = processedBars / Math.max(elapsedSec, 1e-9);
+        const remainingBars = Math.max(totalBarsToProcess - processedBars, 0);
+        const etaSec = remainingBars / Math.max(speed, 1e-9);
+        const progressPct =
+          totalBarsToProcess > 0 ? (processedBars / totalBarsToProcess) * 100 : 100;
+
+        console.log(
+          [
+            `[${symbol}]`,
+            `Прогресс: ${processedBars}/${totalBarsToProcess}`,
+            `${round(progressPct, 2)}%`,
+            `Скорость: ${round(speed, 2)} свеч/сек`,
+            `ETA: ${formatDuration(etaSec)}`,
+            `Сделок: ${trades.length}`,
+            `Баланс: ${round(balance, 2)}`,
+            `Открыта: ${openPosition ? `${openPosition.side}@${round(openPosition.entryPrice, 2)}` : 'нет'}`
+          ].join(' | ')
+        );
+      }
+    }
+
+    if (openPosition) {
+      const barsHeld = i - openPositionIndex;
+
+      updateRunnerTrail({
+        position: openPosition,
+        candle: currentCandle,
+        trailR: resolvedOptions.runnerTrailR
+      });
+
+      if (barsHeld >= resolvedOptions.timeStopBars) {
+        const t = buildTrade({
+          symbol,
+          position: openPosition,
+          qty: openPosition.quantity,
+          exitPrice: currentCandle.close,
+          closedAt: currentCandle.time,
+          closeReason: 'time_stop',
+          balanceBeforeClose: balance,
+          commissionRate: resolvedOptions.commissionRate,
+          barsHeld,
+          leg: 'full',
+          chargeOpenCommission: openCommissionRemaining
+        });
+        balance = t.balanceAfter;
+        trades.push(t);
+        equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+        cooldownRemaining = resolvedOptions.cooldownCandles;
+        openPosition = null;
+        openPositionIndex = -1;
+        openCommissionRemaining = false;
+      } else if (
+        resolvedOptions.earlyAbortBars > 0 &&
+        barsHeld >= resolvedOptions.earlyAbortBars &&
+        !openPosition.tp1Done
+      ) {
+        const fav =
+          openPosition.side === 'long'
+            ? currentCandle.close - openPosition.entryPrice
+            : openPosition.entryPrice - currentCandle.close;
+        if (fav < resolvedOptions.earlyAbortMinR * openPosition.initialR) {
+          const t = buildTrade({
+            symbol,
+            position: openPosition,
+            qty: openPosition.quantity,
+            exitPrice: currentCandle.close,
+            closedAt: currentCandle.time,
+            closeReason: 'early_abort',
+            balanceBeforeClose: balance,
+            commissionRate: resolvedOptions.commissionRate,
+            barsHeld,
+            leg: 'full',
+            chargeOpenCommission: openCommissionRemaining
+          });
+          balance = t.balanceAfter;
+          trades.push(t);
+          equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+          cooldownRemaining = resolvedOptions.cooldownCandles;
+          openPosition = null;
+          openPositionIndex = -1;
+          openCommissionRemaining = false;
+        }
+      }
+    }
+
+    if (openPosition) {
+      const result = processExitsOnCandle({
+        symbol,
+        position: openPosition,
+        candle: currentCandle,
+        balance,
+        commissionRate: resolvedOptions.commissionRate,
+        barsHeld: i - openPositionIndex,
+        conservative: resolvedOptions.conservativeIntrabarExecution,
+        openCommissionRemaining
+      });
+      balance = result.balance;
+      openCommissionRemaining = result.openCommissionRemaining;
+      for (const t of result.trades) {
+        trades.push(t);
+        equityCurve.push({ time: currentCandle.time, balance: round(balance) });
+      }
+      if (!result.stillOpen) {
+        cooldownRemaining = resolvedOptions.cooldownCandles;
+        openPosition = null;
+        openPositionIndex = -1;
+        openCommissionRemaining = false;
+      }
+    }
+
+    if (openPosition && resolvedOptions.onePositionAtTime) continue;
+    if (cooldownRemaining > 0) {
+      cooldownRemaining -= 1;
+      continue;
+    }
+
+    if (resolvedOptions.maxTradesPerDay > 0) {
+      const dayKey = utcDateKey(currentCandle.time);
+      const used = entriesPerDay.get(dayKey) ?? 0;
+      if (used >= resolvedOptions.maxTradesPerDay) continue;
+    }
+
+    const maybeOpen = tryOpenPosition({
+      visibleCandles,
+      currentBalance: balance,
+      htfEnabled: resolvedOptions.htfFilter,
+      htfMinAdx1h: resolvedOptions.htfMinAdx1h,
+      precomputedHtf,
+      htfStats,
+      sideFilter: resolvedOptions.sideFilter
+    });
+
+    if (maybeOpen) {
+      openPosition = maybeOpen;
+      openPositionIndex = i;
+      openCommissionRemaining = true;
+      if (resolvedOptions.maxTradesPerDay > 0) {
+        const dayKey = utcDateKey(currentCandle.time);
+        entriesPerDay.set(dayKey, (entriesPerDay.get(dayKey) ?? 0) + 1);
+      }
+    }
+  }
+
+  if (openPosition) {
+    const lastCandle = sortedCandles[sortedCandles.length - 1];
+    const t = buildTrade({
+      symbol,
+      position: openPosition,
+      qty: openPosition.quantity,
+      exitPrice: lastCandle.close,
+      closedAt: lastCandle.time,
+      closeReason: 'forced_close',
+      balanceBeforeClose: balance,
+      commissionRate: resolvedOptions.commissionRate,
+      barsHeld: sortedCandles.length - 1 - openPositionIndex,
+      leg: 'full',
+      chargeOpenCommission: openCommissionRemaining
+    });
+    balance = t.balanceAfter;
+    trades.push(t);
+    equityCurve.push({ time: lastCandle.time, balance: round(balance) });
+  }
+
+  const regimeStats = buildRegimeStats(trades, barCounts);
+
+  return {
+    symbol,
+    options: resolvedOptions,
+    trades,
+    summary: buildSummary({
+      symbol,
+      trades,
+      startBalance: resolvedOptions.startingBalance,
+      endBalance: balance,
+      equityCurve
+    }),
+    equityCurve,
+    htfStats,
+    regimeStats
+  };
+}
+
+export { HTF_WARMUP_15M };
