@@ -28,7 +28,7 @@ const DEFAULT_TIME_FAIL_BARS = 4;
 // Day extension: не догонять, если СЕССИЯ уже вытянута (не swing-24)
 // short: (sessionHigh - price) / ATR >= MAX_DAY_EXT → reject
 // long:  (price - sessionLow) / ATR >= MAX_DAY_EXT → reject
-const MAX_DAY_EXT = 2.8;
+const MAX_DAY_EXT = 3.5;
 
 // ============================================================================
 // ТИПЫ
