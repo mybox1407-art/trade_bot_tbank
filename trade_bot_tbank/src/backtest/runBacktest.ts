@@ -25,7 +25,7 @@ const TIME_STOP_BARS = 64;
  * Early abort: если за N баров не набрали earlyAbortMinR * R и TP1 ещё нет → выход по close.
  * 0 = ВЫКЛ (A/B). Было 16.
  */
-const EARLY_ABORT_BARS = 0;
+const EARLY_ABORT_BARS = 16;
 const EARLY_ABORT_MIN_R = 0.35;
 
 // Откат abort ON:
