@@ -3,7 +3,6 @@ import path from 'node:path';
 import { runStrategyBacktest, SideFilter } from './strategyBacktest';
 import {
   Candle,
-  HTF_WARMUP_15M,
   MAX_RISK_PER_TRADE,
   STARTING_BALANCE
 } from '../services/strategy';
