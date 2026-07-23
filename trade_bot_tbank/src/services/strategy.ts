@@ -26,7 +26,7 @@ const STOP_SWING_PAD_ATR = 0.18;
 const MAX_EXTENSION_FROM_EMA20 = 0.01;
 const TRADING_HOUR_UTC_FROM = 7;
 const TRADING_HOUR_UTC_TO = 15;
-const MIN_QUANTITY = 2;
+export const MIN_QUANTITY = 2;
 const DEFAULT_TIME_FAIL_BARS = 4;
 
 const MAX_DAY_EXT = 3.5;
@@ -103,7 +103,7 @@ function mean(values: number[]) {
   return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
 }
 
-function isTradingHour(ts: number) {
+export function isTradingHour(ts: number) {
   const h = new Date(ts).getUTCHours();
   return h >= TRADING_HOUR_UTC_FROM && h < TRADING_HOUR_UTC_TO;
 }
