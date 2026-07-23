@@ -9,7 +9,7 @@ const CLOSE_OPEN_POSITION_ON_END =
   String(process.env.BACKTEST_CLOSE_OPEN_POSITION_ON_END ?? 'false').toLowerCase() === 'true';
 const SIDE_FILTER_ENV = process.env.BACKTEST_SIDE_FILTER ?? 'both';
 const TRADE_START_AT = process.env.BACKTEST_TRADE_START_AT ?? '';
-const HTF_ENABLED = String(process.env.BACKTEST_HTF_ENABLED ?? 'true').toLowerCase() === 'true';
+const HTF_ENABLED = String(process.env.BACKTEST_HTF_ENABLED ?? 'false').toLowerCase() === 'true';
 const HTF_MIN_ADX = Number(process.env.BACKTEST_HTF_MIN_ADX ?? '18');
 
 const ANSI = {
