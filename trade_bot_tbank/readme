@@ -20,6 +20,12 @@ npx ts-node src/backtest/downloadCandles.ts BBG004S681W1 MTSS 120 1m
 
 # Базовый запуск
 npx tsx src/backtest/runBacktest.ts \
+  ./src/backtest/data/ROSN_15m.json \
+  ./src/backtest/data/ROSN_1m.json \
+  ROSN
+
+# Базовый запуск
+npx tsx src/backtest/runBacktest.ts \
   ./src/backtest/data/SBER_15m.json \
   ./src/backtest/data/SBER_1m.json \
   SBER
