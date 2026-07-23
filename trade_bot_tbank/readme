@@ -15,17 +15,17 @@ export TINVEST_TOKEN=t.JEad0aPyZeL3vpVxMbMYWlHkkZKnt5TPIEqGgbv9z4Avxo_j45AYmw-xD
 
 npx ts-node src/backtest/downloadCandles.ts BBG004730RP0 GAZP 365 1m
 npx ts-node src/backtest/downloadCandles.ts BBG00475KKY8 NVTK 365 1m
-
 npx ts-node src/backtest/downloadCandles.ts BBG00475K6C3 SNGS 365 1m
+
+npx ts-node src/backtest/downloadCandles.ts BBG004RVFFC0 TATN 365 1m
+
 
 
 Для теста
-BBG001M7R9V1 PLZL
-BBG00475K6C3 SNGS
-BBG00B2HD7Y3 MOEX
-BBG000DSM6V1 X5
-BBG00BZ1H8J3 OZON 
-BBG004RVFFC0 TATN 
+BBG001M7R9V1 PLZL ?
+BBG00B2HD7Y3 MOEX ?
+BBG000DSM6V1 X5 ?
+BBG00BZ1H8J3 OZON ?
 
 npx ts-node src/backtest/downloadCandles.ts BBG004731354 ROSN 120 1m
 npx ts-node src/backtest/downloadCandles.ts BBG004731032 LKOH 120 1m
