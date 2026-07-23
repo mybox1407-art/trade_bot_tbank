@@ -13,10 +13,10 @@ tmux attach -t backtest_moex
 
 export TINVEST_TOKEN=t.JEad0aPyZeL3vpVxMbMYWlHkkZKnt5TPIEqGgbv9z4Avxo_j45AYmw-xDgNIsFLmndf61-5VSgM_jX82sYsadw
 
-npx ts-node src/backtest/downloadCandles.ts BBG004730RP0 GAZP 120 1m
-npx ts-node src/backtest/downloadCandles.ts BBG00475KKY8 NVTK 120 1m
+npx ts-node src/backtest/downloadCandles.ts BBG004730RP0 GAZP 365 1m
+npx ts-node src/backtest/downloadCandles.ts BBG00475KKY8 NVTK 365 1m
 
-npx ts-node src/backtest/downloadCandles.ts BBG001M7R9V1 PLZL 120 1m
+npx ts-node src/backtest/downloadCandles.ts BBG001M7R9V1 PLZL 365 1m
 
 
 Для теста
