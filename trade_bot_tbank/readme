@@ -9,8 +9,31 @@ npm install
 
 npx ts-node src/backtest/downloadCandles.ts BBG004S681W1 MTSS 100 15m
 
-npx ts-node src/backtest/runMomentumScalpBacktest.ts src/backtest/data/SBER_1m.json SBER
+# Базовый запуск
+npx tsx src/backtest/runBacktest.ts \
+  ./src/backtest/data/SBER_15m.json \
+  ./src/backtest/data/SBER_1m.json \
+  SBER
 
-npx ts-node src/backtest/runBacktest.ts src/backtest/data/SBER_15m.json SBER
+# С HTF-фильтром
+BACKTEST_HTF_ENABLED=true \
+BACKTEST_HTF_MIN_ADX=18 \
+npx tsx src/backtest/runBacktest.ts \
+  ./src/backtest/data/SBER_15m.json \
+  ./src/backtest/data/SBER_1m.json \
+  SBER
 
-npx ts-node src/backtest/runBacktest.ts ./src/backtest/data/MTSS_15m.json MTSS 12 short
+# Только лонги, с закрытием позиции на конце
+BACKTEST_SIDE_FILTER=long \
+BACKTEST_CLOSE_OPEN_POSITION_ON_END=true \
+npx tsx src/backtest/runBacktest.ts \
+  ./src/backtest/data/SBER_15m.json \
+  ./src/backtest/data/SBER_1m.json \
+  SBER
+
+# С датой старта торгов
+BACKTEST_TRADE_START_AT="2025-01-15T07:00:00Z" \
+npx tsx src/backtest/runBacktest.ts \
+  ./src/backtest/data/SBER_15m.json \
+  ./src/backtest/data/SBER_1m.json \
+  SBER
