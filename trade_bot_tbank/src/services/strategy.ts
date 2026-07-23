@@ -401,7 +401,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 }
 
 // ============================================================================
-// ВХОД
+// ВХОД — ТОЛЬКО BREAKOUT
 // ============================================================================
 export function analyzeMarket(
   candles: Candle[],
@@ -443,15 +443,10 @@ export function analyzeMarket(
   const regime = regimeInfo.regime;
   const ind = regimeInfo.indicators;
   const lastAtr = last(atr);
-  const lastMacd = last(macd);
   const lastRsi = last(rsi);
-  const lastOpen = last(opens);
-  const lastHigh = last(highs);
-  const lastLow = last(lows);
-  const lastTs = last(candles).time;
   const lastCandle = last(candles);
   const lastBb = last(bb);
-  const atrPct = (ind.atrPct as number) ?? 0;
+  const lastTs = last(candles).time;
 
   if (!isTradingHour(lastTs)) {
     return {
@@ -460,73 +455,11 @@ export function analyzeMarket(
     };
   }
 
-  const ema20 = ind.ema20 as number;
-  const ema50 = ind.ema50 as number;
-  const ema200 = ind.ema200 as number;
-  const extension = (price - ema20) / price;
+  // Pullback отключены
+  let longSignal = false;
+  let shortSignal = false;
 
-  const macdBull = lastMacd.MACD! > lastMacd.signal!;
-  const macdBear = lastMacd.MACD! < lastMacd.signal!;
-  const bullCandle = price > lastOpen;
-  const bearCandle = price < lastOpen;
-
-  const touchLong = lastLow <= ema20 * 1.006 || lastLow <= ema50 * 1.01;
-  const touchShort = lastHigh >= ema20 * 0.994 || lastHigh >= ema50 * 0.99;
-
-  const notExtLong = extension > -0.003 && extension < MAX_EXTENSION_FROM_EMA20;
-  const notExtShort = extension < 0.003 && extension > -MAX_EXTENSION_FROM_EMA20;
-
-  const atrSafe = Math.max(lastAtr, price * 1e-6);
-
-  // --- Day / session extension ---
-  const session = getSessionRange(candles, lastTs);
-  let dayExtDown = 0;
-  let dayExtUp = 0;
-  let notDayExhaustedShort = true;
-  let notDayExhaustedLong = true;
-
-  if (session) {
-    dayExtDown = (session.high - price) / atrSafe;
-    dayExtUp = (price - session.low) / atrSafe;
-    notDayExhaustedShort = dayExtDown < MAX_DAY_EXT;
-    notDayExhaustedLong = dayExtUp < MAX_DAY_EXT;
-  }
-
-  // --- Bounce filter ---
-  const bounceLb = Math.min(BOUNCE_LOOKBACK, lows.length);
-  const recentLow = Math.min(...lows.slice(-bounceLb));
-  const recentHigh = Math.max(...highs.slice(-bounceLb));
-  const bounceUpAtr = (price - recentLow) / atrSafe;
-  const bounceDownAtr = (recentHigh - price) / atrSafe;
-  const notBounceShort = bounceUpAtr <= MAX_BOUNCE_ATR;
-  const notBounceLong = bounceDownAtr <= MAX_BOUNCE_ATR;
-
-  const pullbackLong =
-    touchLong &&
-    bullCandle &&
-    price >= ema20 * 0.997 &&
-    macdBull &&
-    lastRsi > 42 &&
-    lastRsi < 68 &&
-    notExtLong &&
-    notDayExhaustedLong &&
-    notBounceLong;
-
-  const pullbackShort =
-    touchShort &&
-    bearCandle &&
-    price <= ema20 * 1.003 &&
-    macdBear &&
-    lastRsi < 58 &&
-    lastRsi > 32 &&
-    notExtShort &&
-    notDayExhaustedShort &&
-    notBounceShort;
-
-  let longSignal = regime === 'trend_up' && price > ema200 && pullbackLong;
-  let shortSignal = regime === 'trend_down' && price < ema200 && pullbackShort;
-
-  // --- Breakout module ---
+  // --- Breakout module (единственный источник сигналов) ---
   let breakoutUp = false;
   let breakoutDown = false;
   let breakoutSide: 'long' | 'short' | 'none' = 'none';
@@ -545,7 +478,7 @@ export function analyzeMarket(
   }
 
   // --- HTF filter ---
-  const sideWouldBe: 'long' | 'short' | 'none' = longSignal ? 'long' : shortSignal ? 'short' : breakoutSide;
+  const sideWouldBe: 'long' | 'short' | 'none' = breakoutSide;
 
   if (htf.enabled && sideWouldBe !== 'none') {
     const minAdx = htf.minAdx1h ?? 18;
@@ -558,8 +491,6 @@ export function analyzeMarket(
         indicators: {
           ready: true,
           reject: 'htf_warmup',
-          longWould: longSignal,
-          shortWould: shortSignal,
           breakoutUp,
           breakoutDown,
           sideWouldBe
@@ -567,12 +498,10 @@ export function analyzeMarket(
       };
     }
 
-    if (longSignal && st.bias !== 'up') longSignal = false;
-    if (shortSignal && st.bias !== 'down') shortSignal = false;
     if (breakoutUp && st.bias !== 'up') breakoutUp = false;
     if (breakoutDown && st.bias !== 'down') breakoutDown = false;
 
-    if (!longSignal && !shortSignal && !breakoutUp && !breakoutDown) {
+    if (!breakoutUp && !breakoutDown) {
       return {
         ...emptySignal(price, regime),
         indicators: {
@@ -588,27 +517,17 @@ export function analyzeMarket(
     }
   }
 
-  // --- Dispatch by regime ---
+  // --- Dispatch ---
   let side: 'long' | 'short' | 'none' = 'none';
   let entryPrice = price;
-  let tp1R = TREND_TP1_R;
-  let tp2R = TREND_TP2_R;
-  let atrStopMult = atrPct > 0.015 ? 1.4 : 1.3;
+  let tp1R = BREAKOUT_TP1_R;
+  let tp2R = BREAKOUT_TP2_R;
+  let atrStopMult = BREAKOUT_ATR_STOP_MULT;
 
-  if (longSignal) {
+  if (breakoutUp) {
     side = 'long';
-  } else if (shortSignal) {
-    side = 'short';
-  } else if (breakoutUp) {
-    side = 'long';
-    tp1R = BREAKOUT_TP1_R;
-    tp2R = BREAKOUT_TP2_R;
-    atrStopMult = BREAKOUT_ATR_STOP_MULT;
   } else if (breakoutDown) {
     side = 'short';
-    tp1R = BREAKOUT_TP1_R;
-    tp2R = BREAKOUT_TP2_R;
-    atrStopMult = BREAKOUT_ATR_STOP_MULT;
   }
 
   if (side === 'none') {
@@ -621,23 +540,8 @@ export function analyzeMarket(
         breakoutUp,
         breakoutDown,
         lastRsi,
-        extension,
-        pullbackLong,
-        pullbackShort,
-        notDayExhaustedLong,
-        notDayExhaustedShort,
-        dayExtDown,
-        dayExtUp,
-        maxDayExt: MAX_DAY_EXT,
-        notBounceLong,
-        notBounceShort,
-        bounceUpAtr,
-        bounceDownAtr,
-        maxBounceAtr: MAX_BOUNCE_ATR,
-        recentLow,
-        recentHigh,
-        sessionHigh: session?.high ?? null,
-        sessionLow: session?.low ?? null
+        regime,
+        htfEnabled: htf.enabled
       }
     };
   }
@@ -684,29 +588,12 @@ export function analyzeMarket(
     indicators: {
       ready: true,
       lastRsi,
-      extension,
       initialR,
       stopPct,
       tp1: takeProfit1Price,
       tp2: takeProfit2Price,
-      pullbackLong,
-      pullbackShort,
       breakoutUp,
       breakoutDown,
-      notDayExhaustedLong,
-      notDayExhaustedShort,
-      dayExtDown,
-      dayExtUp,
-      maxDayExt: MAX_DAY_EXT,
-      notBounceLong,
-      notBounceShort,
-      bounceUpAtr,
-      bounceDownAtr,
-      maxBounceAtr: MAX_BOUNCE_ATR,
-      recentLow,
-      recentHigh,
-      sessionHigh: session?.high ?? null,
-      sessionLow: session?.low ?? null,
       htfEnabled: htf.enabled
     }
   };
