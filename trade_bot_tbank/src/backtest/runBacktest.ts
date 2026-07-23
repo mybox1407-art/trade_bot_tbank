@@ -4,7 +4,7 @@ import { runStrategyBacktest, SideFilter } from './strategyBacktest';
 import { Candle, STARTING_BALANCE, MAX_RISK_PER_TRADE, COMMISSION_RATE, DEFAULT_HTF_FILTER } from '../services/strategy';
 
 const PROGRESS_LOG_EVERY = Number(process.env.BACKTEST_PROGRESS_EVERY ?? '250');
-const WARMUP_CANDLES_15M = Number(process.env.BACKTEST_WARMUP ?? '300');
+const WARMUP_CANDLES_15M = Number(process.env.BACKTEST_WARMUP ?? '0');
 const CLOSE_OPEN_POSITION_ON_END =
   String(process.env.BACKTEST_CLOSE_OPEN_POSITION_ON_END ?? 'false').toLowerCase() === 'true';
 const SIDE_FILTER_ENV = process.env.BACKTEST_SIDE_FILTER ?? 'both';
