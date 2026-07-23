@@ -17,6 +17,9 @@ npx ts-node src/backtest/downloadCandles.ts BBG004730N88 SBER 120 1m
 npx ts-node src/backtest/downloadCandles.ts BBG004731354 ROSN 120 1m
 npx ts-node src/backtest/downloadCandles.ts BBG004731032 LKOH 120 1m
 npx ts-node src/backtest/downloadCandles.ts BBG004S681W1 MTSS 120 1m
+npx ts-node src/backtest/downloadCandles.ts BBG004730RP0 GAZP 120 1m
+npx ts-node src/backtest/downloadCandles.ts BBG00475KKY8 NVTK 120 1m
+npx ts-node src/backtest/downloadCandles.ts BBG000R607Y3 IRKT 120 1m
 
 # Базовый запуск
 npx tsx src/backtest/runBacktest.ts \
