@@ -4,19 +4,23 @@ import { MACD, RSI, ATR, ADX, BollingerBands, EMA } from 'technicalindicators';
 // КАПИТАЛ / РИСК
 // ============================================================================
 export const STARTING_BALANCE = 50000;
-export const MAX_RISK_PER_TRADE = 0.01; //было 0.01
+export const MAX_RISK_PER_TRADE = 0.01;
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 export const TP1_FRACTION = 0.5;
-export const TP1_R = 1.2;
-export const TP2_R = 1.8;
+export const TREND_TP1_R = 1.2;
+export const TREND_TP2_R = 1.8;
+export const BREAKOUT_TP1_R = 1.0;
+export const BREAKOUT_TP2_R = 2.5;
 export const PARTIAL_LOCK_R = 0;
 
 const MIN_STOP_DISTANCE_RATE = 0.004;
 const MAX_STOP_DISTANCE_RATE = 0.01;
-const MAX_POSITION_FRAC = 0.25; //было 0.25
+const MAX_POSITION_FRAC = 0.25;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 const MIN_ADX_TREND = 20;
+const MIN_ADX_RANGE = 18;
+const BB_SQUEEZE_THRESHOLD = 0.05;
 const STOP_STRUCTURE_LOOKBACK = 8;
 const STOP_SWING_PAD_ATR = 0.18;
 const MAX_EXTENSION_FROM_EMA20 = 0.01;
@@ -25,14 +29,13 @@ const TRADING_HOUR_UTC_TO = 15;
 const MIN_QUANTITY = 2;
 const DEFAULT_TIME_FAIL_BARS = 4;
 
-// Day extension (сессия с 07:00 UTC)
 const MAX_DAY_EXT = 3.5;
-
-// Bounce still on: short только близко к recent low; long — к recent high
-// short ok: (price - lowest(low, N)) / ATR <= MAX_BOUNCE_ATR
-// long  ok: (highest(high, N) - price) / ATR <= MAX_BOUNCE_ATR
 const BOUNCE_LOOKBACK = 10;
 const MAX_BOUNCE_ATR = 1.1;
+
+const BREAKOUT_ATR_BUFFER_K = 0.2;
+const BREAKOUT_BODY_ATR_MIN = 0.5;
+const BREAKOUT_ATR_STOP_MULT = 1.5;
 
 // ============================================================================
 // ТИПЫ
@@ -46,7 +49,7 @@ export interface Candle {
   volume: number;
 }
 
-export type MarketRegime = 'trend_up' | 'trend_down' | 'range' | 'high_volatility' | 'unknown';
+export type MarketRegime = 'trend_up' | 'trend_down' | 'range' | 'breakout_watch' | 'high_volatility' | 'unknown';
 export type HtfBias = 'up' | 'down' | 'neutral';
 
 export interface HtfBarState {
@@ -162,7 +165,7 @@ function getStructureStop(params: {
 
   let stop = recentHigh + pad;
   if (stop - price < minDist) stop = price + minDist;
-  if (stop - price > maxDist) stop = price + maxDist;
+  if (stop - price > maxDist) stop = price - maxDist;
   if (stop <= price) stop = price + minDist;
   return stop;
 }
@@ -194,6 +197,11 @@ function calcPositionSize(params: {
   }
 
   return { quantity, positionSize: quantity * price };
+}
+
+function getVolumeSpike(volumes: number[], avgVol: number) {
+  const v = volumes[volumes.length - 1] ?? 0;
+  return v >= avgVol * 1.1;
 }
 
 // ============================================================================
@@ -332,6 +340,7 @@ export function detectMarketRegime(candles: Candle[]) {
   const lastEma50 = last(ema50);
   const lastEma200 = last(ema200);
   const lastBb = last(bb);
+  const avgVol20 = mean(volumes.slice(-20));
 
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
@@ -340,14 +349,18 @@ export function detectMarketRegime(candles: Candle[]) {
   const stackUp = lastEma20 > lastEma50 && lastEma50 > lastEma200;
   const stackDown = lastEma20 < lastEma50 && lastEma50 < lastEma200;
   const highVolatility = atrPct > 0.028 || bbWidth > 0.13;
+  const compression = bbWidth <= BB_SQUEEZE_THRESHOLD;
   const trendUp = !highVolatility && lastClose > lastEma200 && stackUp && adxOk;
   const trendDown = !highVolatility && lastClose < lastEma200 && stackDown && adxOk;
+  const range = lastAdx.adx < MIN_ADX_RANGE && bbWidth < 0.08;
+  const breakoutWatch = compression && lastAdx.adx >= 15 && lastAdx.adx <= 28 && getVolumeSpike(volumes, avgVol20) && !highVolatility;
 
   let regime: MarketRegime = 'unknown';
   if (highVolatility) regime = 'high_volatility';
   else if (trendUp) regime = 'trend_up';
   else if (trendDown) regime = 'trend_down';
-  else if (lastAdx.adx < 18) regime = 'range';
+  else if (breakoutWatch) regime = 'breakout_watch';
+  else if (range) regime = 'range';
 
   return {
     regime,
@@ -362,7 +375,7 @@ export function detectMarketRegime(candles: Candle[]) {
       ema50: lastEma50,
       ema200: lastEma200,
       bbWidth,
-      avgVol20: mean(volumes.slice(-20))
+      avgVol20
     }
   };
 }
@@ -388,7 +401,7 @@ function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategyS
 }
 
 // ============================================================================
-// ВХОД: тренд + pullback + day-ext + bounce filter
+// ВХОД
 // ============================================================================
 export function analyzeMarket(
   candles: Candle[],
@@ -399,6 +412,7 @@ export function analyzeMarket(
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
   const opens = candles.map(c => c.open);
+  const volumes = candles.map(c => c.volume);
 
   const regimeInfo = detectMarketRegime(candles);
   const macd = MACD.calculate({
@@ -411,6 +425,7 @@ export function analyzeMarket(
   });
   const rsi = RSI.calculate({ period: 14, values: closes });
   const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
 
   if (
     !regimeInfo.ready ||
@@ -418,6 +433,7 @@ export function analyzeMarket(
     macd.length < 2 ||
     rsi.length < 2 ||
     atr.length < 2 ||
+    bb.length < 2 ||
     candles.length < 40
   ) {
     return emptySignal(closes[closes.length - 1] ?? 0);
@@ -433,6 +449,8 @@ export function analyzeMarket(
   const lastHigh = last(highs);
   const lastLow = last(lows);
   const lastTs = last(candles).time;
+  const lastCandle = last(candles);
+  const lastBb = last(bb);
   const atrPct = (ind.atrPct as number) ?? 0;
 
   if (!isTradingHour(lastTs)) {
@@ -474,15 +492,13 @@ export function analyzeMarket(
     notDayExhaustedLong = dayExtUp < MAX_DAY_EXT;
   }
 
-  // --- Bounce still on: не short высоко над recent low; не long низко под recent high ---
+  // --- Bounce filter ---
   const bounceLb = Math.min(BOUNCE_LOOKBACK, lows.length);
   const recentLow = Math.min(...lows.slice(-bounceLb));
   const recentHigh = Math.max(...highs.slice(-bounceLb));
   const bounceUpAtr = (price - recentLow) / atrSafe;
   const bounceDownAtr = (recentHigh - price) / atrSafe;
-  // short: bounce вверх от low ещё «живой», если далеко от low → reject
   const notBounceShort = bounceUpAtr <= MAX_BOUNCE_ATR;
-  // long: symmetric
   const notBounceLong = bounceDownAtr <= MAX_BOUNCE_ATR;
 
   const pullbackLong =
@@ -510,7 +526,28 @@ export function analyzeMarket(
   let longSignal = regime === 'trend_up' && price > ema200 && pullbackLong;
   let shortSignal = regime === 'trend_down' && price < ema200 && pullbackShort;
 
-  if (htf.enabled && (longSignal || shortSignal)) {
+  // --- Breakout module ---
+  let breakoutUp = false;
+  let breakoutDown = false;
+  let breakoutSide: 'long' | 'short' | 'none' = 'none';
+
+  if (regime === 'breakout_watch') {
+    const candleBody = Math.abs(lastCandle.close - lastCandle.open);
+    const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
+    const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
+    const volumeSpike = getVolumeSpike(volumes, ind.avgVol20 as number);
+
+    breakoutUp = price > lastBb.upper + atrBuffer && candleBody >= minBody && lastRsi > 55 && volumeSpike;
+    breakoutDown = price < lastBb.lower - atrBuffer && candleBody >= minBody && lastRsi < 45 && volumeSpike;
+
+    if (breakoutUp) breakoutSide = 'long';
+    if (breakoutDown) breakoutSide = 'short';
+  }
+
+  // --- HTF filter ---
+  const sideWouldBe: 'long' | 'short' | 'none' = longSignal ? 'long' : shortSignal ? 'short' : breakoutSide;
+
+  if (htf.enabled && sideWouldBe !== 'none') {
     const minAdx = htf.minAdx1h ?? 18;
     const series = htf.precomputedHtf ?? buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
     const st = getHtfBiasAt(series, lastTs);
@@ -522,16 +559,20 @@ export function analyzeMarket(
           ready: true,
           reject: 'htf_warmup',
           longWould: longSignal,
-          shortWould: shortSignal
+          shortWould: shortSignal,
+          breakoutUp,
+          breakoutDown,
+          sideWouldBe
         }
       };
     }
 
-    const sideWouldBe: 'long' | 'short' = longSignal ? 'long' : 'short';
     if (longSignal && st.bias !== 'up') longSignal = false;
     if (shortSignal && st.bias !== 'down') shortSignal = false;
+    if (breakoutUp && st.bias !== 'up') breakoutUp = false;
+    if (breakoutDown && st.bias !== 'down') breakoutDown = false;
 
-    if (!longSignal && !shortSignal) {
+    if (!longSignal && !shortSignal && !breakoutUp && !breakoutDown) {
       return {
         ...emptySignal(price, regime),
         indicators: {
@@ -547,13 +588,38 @@ export function analyzeMarket(
     }
   }
 
-  if (!longSignal && !shortSignal) {
+  // --- Dispatch by regime ---
+  let side: 'long' | 'short' | 'none' = 'none';
+  let entryPrice = price;
+  let tp1R = TREND_TP1_R;
+  let tp2R = TREND_TP2_R;
+  let atrStopMult = atrPct > 0.015 ? 1.4 : 1.3;
+
+  if (longSignal) {
+    side = 'long';
+  } else if (shortSignal) {
+    side = 'short';
+  } else if (breakoutUp) {
+    side = 'long';
+    tp1R = BREAKOUT_TP1_R;
+    tp2R = BREAKOUT_TP2_R;
+    atrStopMult = BREAKOUT_ATR_STOP_MULT;
+  } else if (breakoutDown) {
+    side = 'short';
+    tp1R = BREAKOUT_TP1_R;
+    tp2R = BREAKOUT_TP2_R;
+    atrStopMult = BREAKOUT_ATR_STOP_MULT;
+  }
+
+  if (side === 'none') {
     return {
       ...emptySignal(price, regime),
       indicators: {
         ready: true,
         longSignal,
         shortSignal,
+        breakoutUp,
+        breakoutDown,
         lastRsi,
         extension,
         pullbackLong,
@@ -576,11 +642,9 @@ export function analyzeMarket(
     };
   }
 
-  const side: 'long' | 'short' = longSignal ? 'long' : 'short';
-  const atrStopMult = atrPct > 0.015 ? 1.4 : 1.3;
-  const stopLossPrice = getStructureStop({ side, highs, lows, price, lastAtr, atrStopMult });
-  const initialR = Math.abs(price - stopLossPrice);
-  const stopPct = initialR / price;
+  const stopLossPrice = getStructureStop({ side, highs, lows, price: entryPrice, lastAtr, atrStopMult });
+  const initialR = Math.abs(entryPrice - stopLossPrice);
+  const stopPct = initialR / entryPrice;
 
   if (initialR <= 0 || stopPct < MIN_STOP_DISTANCE_RATE || stopPct > MAX_STOP_DISTANCE_RATE) {
     return {
@@ -589,11 +653,11 @@ export function analyzeMarket(
     };
   }
 
-  const takeProfit1Price = side === 'long' ? price + TP1_R * initialR : price - TP1_R * initialR;
-  const takeProfit2Price = side === 'long' ? price + TP2_R * initialR : price - TP2_R * initialR;
+  const takeProfit1Price = side === 'long' ? entryPrice + tp1R * initialR : entryPrice - tp1R * initialR;
+  const takeProfit2Price = side === 'long' ? entryPrice + tp2R * initialR : entryPrice - tp2R * initialR;
 
   const riskCapital = balance * MAX_RISK_PER_TRADE;
-  const sized = calcPositionSize({ price, stopLossPrice, riskCapital, balance });
+  const sized = calcPositionSize({ price: entryPrice, stopLossPrice, riskCapital, balance });
 
   if (sized.quantity == null) {
     return {
@@ -603,7 +667,7 @@ export function analyzeMarket(
   }
 
   return {
-    price,
+    price: entryPrice,
     buy: side === 'long',
     sell: side === 'short',
     side,
@@ -627,6 +691,8 @@ export function analyzeMarket(
       tp2: takeProfit2Price,
       pullbackLong,
       pullbackShort,
+      breakoutUp,
+      breakoutDown,
       notDayExhaustedLong,
       notDayExhaustedShort,
       dayExtDown,
