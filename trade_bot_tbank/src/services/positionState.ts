@@ -7,6 +7,7 @@ export interface VirtualPosition {
   takeProfitPrice: number;
   stopLossPrice: number;
   openedAt: string;
+  entryCommission: number;
 }
 
 export interface ClosedTrade {
@@ -19,11 +20,14 @@ export interface ClosedTrade {
   realizedPnL: number;
   closedAt: string;
   reason: 'take_profit' | 'stop_loss' | 'manual';
+  entryCommission: number;
+  exitCommission: number;
+  totalCommission: number;
 }
 
 const STARTING_BALANCE = 50000;
-const POSITION_PERCENT = 0.10;
-const COMMISSION_RATE = 0.003; // 0.3% за сделку, тариф "Инвестор"
+const COMMISSION_RATE = 0.0005;
+const MAX_OPEN_POSITIONS = 3;
 
 let balance = STARTING_BALANCE;
 const positions = new Map<string, VirtualPosition>();
@@ -45,6 +49,18 @@ export function getAllPositions() {
   return Array.from(positions.values());
 }
 
+export function getOpenPositionsCount() {
+  return positions.size;
+}
+
+export function getReservedNotional() {
+  return Array.from(positions.values()).reduce((sum, p) => sum + p.notional, 0);
+}
+
+export function getAvailableBalance() {
+  return Math.max(0, balance - getReservedNotional());
+}
+
 export function getLastClosedTrade(symbol?: string) {
   if (symbol) {
     return lastClosedTrades.get(normalizeSymbol(symbol)) ?? null;
@@ -56,10 +72,6 @@ export function getLastClosedTrade(symbol?: string) {
   return trades.sort(
     (a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime()
   )[0];
-}
-
-export function getPositionNotional() {
-  return balance * POSITION_PERCENT;
 }
 
 export function openPosition(data: {
@@ -82,19 +94,48 @@ export function openPosition(data: {
     };
   }
 
+  if (positions.size >= MAX_OPEN_POSITIONS) {
+    return {
+      ok: false,
+      message: `Max open positions limit reached (${MAX_OPEN_POSITIONS})`
+    };
+  }
+
   let quantity: number;
   let notional: number;
 
   if (data.quantity != null && data.quantity > 0) {
-    quantity = data.quantity;
+    quantity = Math.floor(data.quantity);
     notional = quantity * data.entryPrice;
   } else if (data.positionSize != null && data.positionSize > 0) {
-    notional = data.positionSize;
-    quantity = notional / data.entryPrice;
+    quantity = Math.floor(data.positionSize / data.entryPrice);
+    notional = quantity * data.entryPrice;
   } else {
-    notional = getPositionNotional();
-    quantity = notional / data.entryPrice;
+    return {
+      ok: false,
+      message: 'quantity or positionSize is required'
+    };
   }
+
+  if (quantity <= 0 || notional <= 0) {
+    return {
+      ok: false,
+      message: 'Invalid position size'
+    };
+  }
+
+  const entryCommission = notional * COMMISSION_RATE;
+  const requiredCash = notional + entryCommission;
+  const availableBalance = getAvailableBalance();
+
+  if (requiredCash > availableBalance) {
+    return {
+      ok: false,
+      message: `Insufficient available balance: required=${requiredCash.toFixed(2)}, available=${availableBalance.toFixed(2)}`
+    };
+  }
+
+  balance -= entryCommission;
 
   const position: VirtualPosition = {
     symbol,
@@ -104,7 +145,8 @@ export function openPosition(data: {
     notional,
     takeProfitPrice: data.takeProfitPrice,
     stopLossPrice: data.stopLossPrice,
-    openedAt: new Date().toISOString()
+    openedAt: new Date().toISOString(),
+    entryCommission
   };
 
   positions.set(symbol, position);
@@ -112,6 +154,7 @@ export function openPosition(data: {
   return {
     ok: true,
     balance,
+    availableBalance: getAvailableBalance(),
     position
   };
 }
@@ -136,12 +179,10 @@ export function closePosition(
       ? (exitPrice - position.entryPrice) * position.quantity
       : (position.entryPrice - exitPrice) * position.quantity;
 
-  const entryCommission = position.notional * COMMISSION_RATE;
   const exitNotional = exitPrice * position.quantity;
   const exitCommission = exitNotional * COMMISSION_RATE;
-  const totalCommission = entryCommission + exitCommission;
-
-  const realizedPnL = grossPnL - totalCommission;
+  const realizedPnL = grossPnL - exitCommission;
+  const totalCommission = position.entryCommission + exitCommission;
 
   const closedTrade: ClosedTrade = {
     symbol: position.symbol,
@@ -152,7 +193,10 @@ export function closePosition(
     notional: position.notional,
     realizedPnL,
     closedAt: new Date().toISOString(),
-    reason
+    reason,
+    entryCommission: position.entryCommission,
+    exitCommission,
+    totalCommission
   };
 
   balance += realizedPnL;
@@ -162,6 +206,7 @@ export function closePosition(
   return {
     ok: true,
     balance,
+    availableBalance: getAvailableBalance(),
     lastClosedTrade: closedTrade
   };
 }
