@@ -1,3 +1,5 @@
+// trade_bot_tbank/src/services/positionState.ts
+
 export interface VirtualPosition {
   symbol: string;
   side: 'long' | 'short';
@@ -25,10 +27,16 @@ export interface ClosedTrade {
   totalCommission: number;
 }
 
-const STARTING_BALANCE = 50000;
-const COMMISSION_RATE = 0.0005;
-const MAX_OPEN_POSITIONS = 3;
+// ============================================================================
+// ЭКСПОРТИРУЕМЫЕ КОНСТАНТЫ
+// ============================================================================
+export const STARTING_BALANCE = 50000;
+export const COMMISSION_RATE = 0.0005;
+export const MAX_OPEN_POSITIONS = 3;
 
+// ============================================================================
+// ВНУТРЕННЕЕ СОСТОЯНИЕ
+// ============================================================================
 let balance = STARTING_BALANCE;
 const positions = new Map<string, VirtualPosition>();
 const lastClosedTrades = new Map<string, ClosedTrade>();
