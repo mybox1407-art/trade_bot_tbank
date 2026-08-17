@@ -365,7 +365,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   pendingSignals.set(symbol, pending);
 
   if (AUTO_BOT_CONFIG.logSignals) {
-    const logData = {
+    const logData: Record<string, unknown> = {
       timestamp: formatTime(nowMs()),
       symbol,
       side,
@@ -430,7 +430,7 @@ async function tryExecutePendingSignal(symbol: Symbol) {
       const balanceAfter = getBalance();
 
       if (AUTO_BOT_CONFIG.logTrades) {
-        const logData = {
+        const logData: Record<string, unknown> = {
           timestamp: formatTime(nowMs()),
           symbol: pending.symbol,
           side: pending.side,
@@ -514,7 +514,7 @@ export async function runPositionMonitorCycle() {
             const closedTrade = result.lastClosedTrade;
 
             if (AUTO_BOT_CONFIG.logTrades && closedTrade) {
-              const logData = {
+              const logData: Record<string, unknown> = {
                 timestamp: formatTime(nowMs()),
                 symbol: pos.symbol,
                 side: pos.side,
