@@ -71,6 +71,7 @@ export interface HtfFilterOptions {
 export const DEFAULT_HTF_FILTER: HtfFilterOptions = { enabled: false, minAdx1h: 18 };
 
 export interface StrategySignal {
+  [key: string]: any;  // <-- ДОБАВЛЕНО: индексная сигнатура
   price: number;
   buy: boolean;
   sell: boolean;
