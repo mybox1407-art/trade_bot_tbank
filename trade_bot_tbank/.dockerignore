@@ -2,4 +2,5 @@ node_modules
 dist
 signal_log.csv
 trade_log.csv
+data
 .git
