@@ -48,7 +48,7 @@ function quotationToNumber(value?: TinkoffQuotation): number {
 }
 
 function mapInterval(timeframe: string): string {
-  const intervals: Record<string, string> = {
+  const map: Record<string, string> = {
     '1m': 'CANDLE_INTERVAL_1_MIN',
     '2m': 'CANDLE_INTERVAL_2_MIN',
     '3m': 'CANDLE_INTERVAL_3_MIN',
@@ -64,7 +64,7 @@ function mapInterval(timeframe: string): string {
     '1M': 'CANDLE_INTERVAL_MONTH'
   };
 
-  return intervals[timeframe] ?? 'CANDLE_INTERVAL_15_MIN';
+  return map[timeframe] ?? 'CANDLE_INTERVAL_15_MIN';
 }
 
 async function resolveInstrumentId(symbol: string): Promise<string> {
