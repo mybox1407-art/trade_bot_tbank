@@ -381,7 +381,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       positionSize: pending.positionSize,
       initialR: (signal.initialR ?? 0).toFixed(4),
       action: 'signal_generated'
-    });
+    } as Record<string, string | number | boolean | null>);
   }
 
   log('info', `SIGNAL GENERATED: ${symbol} ${side.toUpperCase()}`, {
@@ -442,8 +442,8 @@ async function tryExecutePendingSignal(symbol: Symbol) {
           initialR: (pending.initialR ?? 0).toFixed(4),
           balanceBefore,
           balanceAfter,
-          availableBalance: result.availableBalance
-        });
+          availableBalance: result.availableBalance ?? 0
+        } as Record<string, string | number | boolean | null>);
       }
 
       log('info', `POSITION OPENED: ${symbol} ${pending.side.toUpperCase()}`, {
@@ -525,7 +525,7 @@ export async function runPositionMonitorCycle() {
                 balanceBefore,
                 balanceAfter,
                 totalCommission: closedTrade.totalCommission
-              });
+              } as Record<string, string | number | boolean | null>);
             }
 
             log('info', `POSITION CLOSED: ${pos.symbol} ${pos.side.toUpperCase()} @ ${currentPrice} (${reason.toUpperCase()})`, {
