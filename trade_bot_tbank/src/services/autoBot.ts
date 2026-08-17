@@ -287,8 +287,20 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   if (!signal.buy && !signal.sell) {
     log('info', `${symbol}: no signal`, {
       regime: signal.regime,
-      reject: signal.indicators?.reject,
-      lastRsi: signal.indicators?.lastRsi
+      reject: signal.indicators?.reject ?? 'conditions_not_met',
+      lastRsi: signal.indicators?.lastRsi,
+      breakoutUp: signal.indicators?.breakoutUp,
+      breakoutDown: signal.indicators?.breakoutDown,
+      htfEnabled: signal.indicators?.htfEnabled,
+      htfBias: signal.indicators?.htfBias,
+      sideWouldBe: signal.indicators?.sideWouldBe,
+      stopPct: signal.indicators?.stopPct,
+      price: signal.price,
+      bbUpper: signal.indicators?.bbUpper,
+      bbLower: signal.indicators?.bbLower,
+      candleBody: signal.indicators?.candleBody,
+      minBody: signal.indicators?.minBody,
+      volumeSpike: signal.indicators?.volumeSpike
     });
     return;
   }
