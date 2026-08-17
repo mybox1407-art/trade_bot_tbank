@@ -379,7 +379,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       tp2: signal.takeProfit2Price,
       quantity: signal.quantity,
       positionSize: pending.positionSize,
-      initialR: signal.initialR?.toFixed(4) ?? '0',
+      initialR: (signal.initialR ?? 0).toFixed(4),
       action: 'signal_generated'
     });
   }
@@ -439,7 +439,7 @@ async function tryExecutePendingSignal(symbol: Symbol) {
           quantity: pending.quantity,
           positionSize: pending.positionSize,
           regime: pending.regime,
-          initialR: pending.initialR?.toFixed(4) ?? '0',
+          initialR: (pending.initialR ?? 0).toFixed(4),
           balanceBefore,
           balanceAfter,
           availableBalance: result.availableBalance
