@@ -20,37 +20,20 @@ import axios from 'axios';
 // КОНФИГУРАЦИЯ АВТОНОМНОГО БОТА
 // ============================================================================
 export const AUTO_BOT_CONFIG = {
-  // Тикеры для торговли (MOEX, класс TQBR)
   symbols: ['TATN', 'GAZP', 'NVTK'] as const,
   timeframe: '15m' as const,
   candlesLimit: 250,
-
-  // Режимный цикл: каждые 15 минут
   regimeCheckIntervalMs: 15 * 60 * 1000,
-
-  // Мониторинг позиций: каждые 15 секунд
   positionMonitorIntervalMs: 15 * 1000,
-
-  // Риск-менеджмент
-  maxPositions: MAX_OPEN_POSITIONS,           // 3
-  positionSizeFraction: 0.30,                 // 30% баланса на сделку
-  startingBalance: STARTING_BALANCE,          // 50000
-
-  // Фильтр режима рынка: какие состояния разрешают вход
+  maxPositions: MAX_OPEN_POSITIONS,
+  positionSizeFraction: 0.30,
+  startingBalance: STARTING_BALANCE,
   allowedMarketStates: ['resonant', 'transition'] as const,
-
-  // HTF-фильтр (1h) — включен по умолчанию
   htfFilterEnabled: true,
   htfMinAdx1h: 18,
-
-  // Тайм-аут входа: если сигнал не исполнился N баров — отменяем
   entryTimeoutBars: 4,
-
-  // Логирование
   logSignals: true,
   logTrades: true,
-
-  // Telegram
   telegramEnabled: true,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || ''
@@ -58,9 +41,6 @@ export const AUTO_BOT_CONFIG = {
 
 type Symbol = typeof AUTO_BOT_CONFIG.symbols[number];
 
-// ============================================================================
-// СОСТОЯНИЕ БОТА
-// ============================================================================
 interface PendingSignal {
   symbol: Symbol;
   side: 'long' | 'short';
@@ -80,9 +60,6 @@ const pendingSignals = new Map<Symbol, PendingSignal>();
 let isRegimeCheckRunning = false;
 let isPositionMonitorRunning = false;
 
-// ============================================================================
-// УТИЛИТЫ
-// ============================================================================
 function sleep(ms: number) {
   return new Promise(res => setTimeout(res, ms));
 }
@@ -105,9 +82,6 @@ function log(level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string
   else console.log(line);
 }
 
-// ============================================================================
-// TELEGRAM
-// ============================================================================
 async function sendTelegramMessage(message: string) {
   if (!AUTO_BOT_CONFIG.telegramEnabled) return;
   if (!AUTO_BOT_CONFIG.telegramBotToken || !AUTO_BOT_CONFIG.telegramChatId) {
@@ -220,9 +194,6 @@ PNL: ${pnlSign}${formatMoney(realizedPnL)} руб (${pnlSign}${pnlPercent}%)
 `.trim();
 }
 
-// ============================================================================
-// 1. РЕЖИМНЫЙ ЦИКЛ (каждые 15 мин)
-// ============================================================================
 export async function runRegimeCheckCycle() {
   if (isRegimeCheckRunning) {
     log('warn', 'Regime check already running, skipping');
@@ -365,7 +336,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   pendingSignals.set(symbol, pending);
 
   if (AUTO_BOT_CONFIG.logSignals) {
-    const logData: Record<string, unknown> = {
+    logSignalCheck({
       timestamp: formatTime(nowMs()),
       symbol,
       side,
@@ -381,9 +352,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       positionSize: pending.positionSize,
       initialR: (signal.initialR ?? 0).toFixed(4),
       action: 'signal_generated'
-    };
-    
-    logSignalCheck(logData);
+    } as any);
   }
 
   log('info', `SIGNAL GENERATED: ${symbol} ${side.toUpperCase()}`, {
@@ -430,7 +399,7 @@ async function tryExecutePendingSignal(symbol: Symbol) {
       const balanceAfter = getBalance();
 
       if (AUTO_BOT_CONFIG.logTrades) {
-        const logData: Record<string, unknown> = {
+        logTrade({
           timestamp: formatTime(nowMs()),
           symbol: pending.symbol,
           side: pending.side,
@@ -445,9 +414,7 @@ async function tryExecutePendingSignal(symbol: Symbol) {
           balanceBefore,
           balanceAfter,
           availableBalance: result.availableBalance ?? 0
-        };
-        
-        logTrade(logData);
+        } as any);
       }
 
       log('info', `POSITION OPENED: ${symbol} ${pending.side.toUpperCase()}`, {
@@ -456,7 +423,6 @@ async function tryExecutePendingSignal(symbol: Symbol) {
         balance: result.balance
       });
 
-      // Telegram
       const tgMessage = formatOpenPositionMessage(
         pending.symbol,
         pending.side,
@@ -479,9 +445,6 @@ async function tryExecutePendingSignal(symbol: Symbol) {
   }
 }
 
-// ============================================================================
-// 2. МОНИТОРИНГ ПОЗИЦИЙ (каждые 15 сек)
-// ============================================================================
 export async function runPositionMonitorCycle() {
   if (isPositionMonitorRunning) return;
   isPositionMonitorRunning = true;
@@ -514,7 +477,7 @@ export async function runPositionMonitorCycle() {
             const closedTrade = result.lastClosedTrade;
 
             if (AUTO_BOT_CONFIG.logTrades && closedTrade) {
-              const logData: Record<string, unknown> = {
+              logTrade({
                 timestamp: formatTime(nowMs()),
                 symbol: pos.symbol,
                 side: pos.side,
@@ -529,9 +492,7 @@ export async function runPositionMonitorCycle() {
                 balanceBefore,
                 balanceAfter,
                 totalCommission: closedTrade.totalCommission
-              };
-              
-              logTrade(logData);
+              } as any);
             }
 
             log('info', `POSITION CLOSED: ${pos.symbol} ${pos.side.toUpperCase()} @ ${currentPrice} (${reason.toUpperCase()})`, {
@@ -539,7 +500,6 @@ export async function runPositionMonitorCycle() {
               balance: result.balance
             });
 
-            // Telegram
             if (closedTrade) {
               const tgMessage = formatClosePositionMessage(
                 pos.symbol,
@@ -566,16 +526,12 @@ export async function runPositionMonitorCycle() {
   }
 }
 
-// ============================================================================
-// 3. ЗАПУСК/ОСТАНОВКА БОТА
-// ============================================================================
 let regimeInterval: NodeJS.Timeout | null = null;
 let monitorInterval: NodeJS.Timeout | null = null;
 
 export async function startAutoBot() {
   log('info', 'Starting auto-bot...', { config: AUTO_BOT_CONFIG });
 
-  // Тестовое сообщение в Telegram при старте
   if (AUTO_BOT_CONFIG.telegramEnabled) {
     await sendTelegramTestMessage();
   }
@@ -601,9 +557,6 @@ export function stopAutoBot() {
   log('info', 'Auto-bot stopped');
 }
 
-// ============================================================================
-// 4. HTTP ЭНДПОИНТЫ ДЛЯ УПРАВЛЕНИЯ
-// ============================================================================
 export function getAutoBotStatus() {
   return {
     running: !!regimeInterval,
