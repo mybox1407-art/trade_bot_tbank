@@ -71,7 +71,7 @@ export interface HtfFilterOptions {
 export const DEFAULT_HTF_FILTER: HtfFilterOptions = { enabled: false, minAdx1h: 18 };
 
 export interface StrategySignal {
-  [key: string]: any;  // <-- ДОБАВЛЕНО: индексная сигнатура
+  [key: string]: any;
   price: number;
   buy: boolean;
   sell: boolean;
@@ -452,15 +452,13 @@ export function analyzeMarket(
   if (!isTradingHour(lastTs)) {
     return {
       ...emptySignal(price, regime),
-      indicators: { ready: true, skipped: true, regime }
+      indicators: { ready: true, skipped: true, regime, reject: 'not_trading_hour' }
     };
   }
 
-  // Pullback отключены
   let longSignal = false;
   let shortSignal = false;
 
-  // --- Breakout module (единственный источник сигналов) ---
   let breakoutUp = false;
   let breakoutDown = false;
   let breakoutSide: 'long' | 'short' | 'none' = 'none';
@@ -478,7 +476,6 @@ export function analyzeMarket(
     if (breakoutDown) breakoutSide = 'short';
   }
 
-  // --- HTF filter ---
   const sideWouldBe: 'long' | 'short' | 'none' = breakoutSide;
 
   if (htf.enabled && sideWouldBe !== 'none') {
@@ -518,7 +515,6 @@ export function analyzeMarket(
     }
   }
 
-  // --- Dispatch ---
   let side: 'long' | 'short' | 'none' = 'none';
   let entryPrice = price;
   let tp1R = BREAKOUT_TP1_R;
@@ -532,6 +528,11 @@ export function analyzeMarket(
   }
 
   if (side === 'none') {
+    const candleBody = Math.abs(lastCandle.close - lastCandle.open);
+    const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
+    const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
+    const volumeSpike = getVolumeSpike(volumes, ind.avgVol20 as number);
+
     return {
       ...emptySignal(price, regime),
       indicators: {
@@ -542,7 +543,15 @@ export function analyzeMarket(
         breakoutDown,
         lastRsi,
         regime,
-        htfEnabled: htf.enabled
+        htfEnabled: htf.enabled,
+        price,
+        bbUpper: lastBb.upper,
+        bbLower: lastBb.lower,
+        atrBuffer,
+        candleBody,
+        minBody,
+        volumeSpike,
+        reject: 'no_breakout_conditions'
       }
     };
   }
@@ -554,7 +563,7 @@ export function analyzeMarket(
   if (initialR <= 0 || stopPct < MIN_STOP_DISTANCE_RATE || stopPct > MAX_STOP_DISTANCE_RATE) {
     return {
       ...emptySignal(price, regime),
-      indicators: { ready: true, reject: 'stop_distance', stopPct }
+      indicators: { ready: true, reject: 'stop_distance', stopPct, initialR }
     };
   }
 
@@ -567,7 +576,7 @@ export function analyzeMarket(
   if (sized.quantity == null) {
     return {
       ...emptySignal(price, regime),
-      indicators: { ready: true, reject: 'size' }
+      indicators: { ready: true, reject: 'size_calculation' }
     };
   }
 
