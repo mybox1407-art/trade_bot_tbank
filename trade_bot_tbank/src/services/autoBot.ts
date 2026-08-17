@@ -14,6 +14,7 @@ import {
   STARTING_BALANCE
 } from './positionState';
 import { logSignalCheck, logTrade } from './logger';
+import axios from 'axios';
 
 // ============================================================================
 // КОНФИГУРАЦИЯ АВТОНОМНОГО БОТА
@@ -37,9 +38,6 @@ export const AUTO_BOT_CONFIG = {
 
   // Фильтр режима рынка: какие состояния разрешают вход
   allowedMarketStates: ['resonant', 'transition'] as const,
-  // Для breakout-стратегии нужен regime 'breakout_watch' в strategy.ts
-  // но marketState.ts даёт 'resonant'/'transition'/'chaotic'.
-  // Будем требовать: marketState.state !== 'chaotic' И sideBias совпадает с сигналом.
 
   // HTF-фильтр (1h) — включен по умолчанию
   htfFilterEnabled: true,
@@ -50,7 +48,12 @@ export const AUTO_BOT_CONFIG = {
 
   // Логирование
   logSignals: true,
-  logTrades: true
+  logTrades: true,
+
+  // Telegram
+  telegramEnabled: true,
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || ''
 } as const;
 
 type Symbol = typeof AUTO_BOT_CONFIG.symbols[number];
@@ -69,8 +72,8 @@ interface PendingSignal {
   positionSize: number;
   regime: string;
   initialR: number;
-  signalTime: number;           // timestamp свечи, на которой пришел сигнал
-  barsWaited: number;           // сколько баров ждем исполнения
+  signalTime: number;
+  barsWaited: number;
 }
 
 const pendingSignals = new Map<Symbol, PendingSignal>();
@@ -92,10 +95,112 @@ function formatTime(ts: number) {
   return new Date(ts).toISOString();
 }
 
+function formatMoney(value: number) {
+  return value.toFixed(2);
+}
+
 function log(level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) {
   const line = `[${formatTime(nowMs())}] [AUTO-BOT] [${level.toUpperCase()}] ${msg}`;
   if (meta) console.log(line, meta);
   else console.log(line);
+}
+
+// ============================================================================
+// TELEGRAM
+// ============================================================================
+async function sendTelegramMessage(message: string) {
+  if (!AUTO_BOT_CONFIG.telegramEnabled) return;
+  if (!AUTO_BOT_CONFIG.telegramBotToken || !AUTO_BOT_CONFIG.telegramChatId) {
+    log('warn', 'Telegram not configured: missing token or chatId');
+    return;
+  }
+
+  try {
+    const url = `https://api.telegram.org/bot${AUTO_BOT_CONFIG.telegramBotToken}/sendMessage`;
+    await axios.post(url, {
+      chat_id: AUTO_BOT_CONFIG.telegramChatId,
+      text: message,
+      parse_mode: 'Markdown'
+    });
+  } catch (err) {
+    log('error', 'Telegram send failed', {
+      error: err instanceof Error ? err.message : String(err)
+    });
+  }
+}
+
+function formatOpenPositionMessage(
+  symbol: string,
+  side: 'long' | 'short',
+  entryPrice: number,
+  quantity: number,
+  positionSize: number,
+  stopLoss: number,
+  takeProfit: number,
+  balanceBefore: number,
+  balanceAfter: number,
+  regime: string,
+  initialR: number
+) {
+  const sideEmoji = side === 'long' ? '📈' : '📉';
+  const sideText = side === 'long' ? 'LONG' : 'SHORT';
+
+  return `
+${sideEmoji} *ОТКРЫТИЕ ПОЗИЦИИ* ${sideText}
+
+🏷 *Тикер:* ${symbol}
+💰 *Цена входа:* ${formatMoney(entryPrice)} ₽
+📊 *Количество:* ${quantity} шт
+💵 *Объём позиции:* ${formatMoney(positionSize)} ₽
+🛑 *Stop Loss:* ${formatMoney(stopLoss)} ₽
+✅ *Take Profit:* ${formatMoney(takeProfit)} ₽
+📏 *R (риск):* ${formatMoney(initialR)} ₽
+
+💼 *Баланс до:* ${formatMoney(balanceBefore)} ₽
+💼 *Баланс после:* ${formatMoney(balanceAfter)} ₽
+📊 *Свободно:* ${formatMoney(getAvailableBalance())} ₽
+
+📈 *Режим рынка:* ${regime}
+
+⏰ *Время:* ${formatTime(nowMs())}
+`.trim();
+}
+
+function formatClosePositionMessage(
+  symbol: string,
+  side: 'long' | 'short',
+  entryPrice: number,
+  exitPrice: number,
+  quantity: number,
+  realizedPnL: number,
+  reason: 'take_profit' | 'stop_loss' | 'manual',
+  balanceBefore: number,
+  balanceAfter: number,
+  totalCommission: number
+) {
+  const sideEmoji = side === 'long' ? '📈' : '📉';
+  const sideText = side === 'long' ? 'LONG' : 'SHORT';
+  const pnlEmoji = realizedPnL >= 0 ? '✅' : '❌';
+  const pnlSign = realizedPnL >= 0 ? '+' : '';
+  const reasonEmoji = reason === 'take_profit' ? '🎯' : reason === 'stop_loss' ? '🛑' : '👐';
+  const reasonText = reason === 'take_profit' ? 'Take Profit' : reason === 'stop_loss' ? 'Stop Loss' : 'Manual';
+
+  return `
+${reasonEmoji} *ЗАКРЫТИЕ ПОЗИЦИИ* ${sideText}
+
+🏷 *Тикер:* ${symbol}
+💰 *Цена входа:* ${formatMoney(entryPrice)} ₽
+💸 *Цена выхода:* ${formatMoney(exitPrice)} ₽
+📊 *Количество:* ${quantity} шт
+${pnlEmoji} *PNL:* ${pnlSign}${formatMoney(realizedPnL)} ₽
+💸 *Комиссии:* ${formatMoney(totalCommission)} ₽
+
+💼 *Баланс до:* ${formatMoney(balanceBefore)} ₽
+💼 *Баланс после:* ${formatMoney(balanceAfter)} ₽
+📈 *Изменение:* ${pnlSign}${formatMoney(realizedPnL)} ₽ (${((realizedPnL / balanceBefore) * 100).toFixed(2)}%)
+
+⏰ *Время:* ${formatTime(nowMs())}
+`.trim();
 }
 
 // ============================================================================
@@ -114,29 +219,27 @@ export async function runRegimeCheckCycle() {
     const openPositions = getAllPositions();
     const openSymbols = new Set(openPositions.map(p => p.symbol));
     const availableBalance = getAvailableBalance();
+    const totalBalance = getBalance();
 
     log('info', 'Portfolio state', {
-      balance: getBalance(),
+      balance: totalBalance,
       availableBalance,
       openPositions: openPositions.length,
       openSymbols: [...openSymbols],
       maxPositions: AUTO_BOT_CONFIG.maxPositions
     });
 
-    // Если уже 3 позиции — новых не открываем, только мониторим
     if (openPositions.length >= AUTO_BOT_CONFIG.maxPositions) {
       log('info', 'Max positions reached, skipping signal search');
       return;
     }
 
-    // Проверяем каждый тикер
     for (const symbol of AUTO_BOT_CONFIG.symbols) {
       if (openSymbols.has(symbol)) {
         log('info', `Skipping ${symbol}: position already open`);
         continue;
       }
 
-      // Проверяем, есть ли уже ожидающий сигнал по этому тикеру
       if (pendingSignals.has(symbol)) {
         const pending = pendingSignals.get(symbol)!;
         pending.barsWaited += 1;
@@ -153,7 +256,6 @@ export async function runRegimeCheckCycle() {
         await processSymbol(symbol, availableBalance);
       } catch (err) {
         log('error', `Error processing ${symbol}`, { error: err instanceof Error ? err.message : String(err) });
-        // Небольшая пауза перед следующим тикером, чтобы не спамить API
         await sleep(500);
       }
     }
@@ -167,14 +269,12 @@ export async function runRegimeCheckCycle() {
 async function processSymbol(symbol: Symbol, availableBalance: number) {
   log('info', `Processing ${symbol}...`);
 
-  // 1. Получаем свечи
   const candles = await getCandles(symbol, AUTO_BOT_CONFIG.timeframe, AUTO_BOT_CONFIG.candlesLimit);
   if (candles.length < 220) {
     log('warn', `${symbol}: not enough candles (${candles.length}/220)`);
     return;
   }
 
-  // 2. Проверяем режим рынка (marketState.ts — resonant/transition/chaotic)
   const marketState = detectMarketState(candles);
   if (!marketState.ready) {
     log('warn', `${symbol}: market state not ready`);
@@ -189,13 +289,11 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     noiseScore: marketState.noiseScore.toFixed(4)
   });
 
-  // Фильтр: не торгуем в chaotic
   if (marketState.state === 'chaotic') {
     log('info', `${symbol}: state=chaotic, skipping`);
     return;
   }
 
-  // 3. Получаем торговый сигнал (strategy.ts — только breakout)
   const signal = analyzeMarket(candles, availableBalance, {
     enabled: AUTO_BOT_CONFIG.htfFilterEnabled,
     minAdx1h: AUTO_BOT_CONFIG.htfMinAdx1h
@@ -216,26 +314,22 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     return;
   }
 
-  // 4. Проверяем согласованность с marketState.sideBias
   if (marketState.sideBias !== 'neutral' && marketState.sideBias !== side) {
     log('info', `${symbol}: signal ${side} conflicts with market bias ${marketState.sideBias}, skipping`);
     return;
   }
 
-  // 5. Проверяем когерентность (computeCoherenceScore)
   const coherence = computeCoherenceScore(candles, side);
-  if (coherence < 0.4) { // порог можно вынести в конфиг
+  if (coherence < 0.4) {
     log('info', `${symbol}: low coherence ${coherence.toFixed(4)} for ${side}, skipping`);
     return;
   }
 
-  // 6. Валидация стопа/тейков
   if (!signal.stopLossPrice || !signal.takeProfit1Price || !signal.takeProfit2Price || !signal.quantity) {
     log('warn', `${symbol}: incomplete signal data`, signal);
     return;
   }
 
-  // 7. Сохраняем pending-сигнал (исполним на следующем мониторинге или сразу)
   const pending: PendingSignal = {
     symbol,
     side,
@@ -283,44 +377,38 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     R: signal.initialR?.toFixed(4)
   });
 
-  // Пытаемся открыть сразу по текущей цене (market-like)
   await tryExecutePendingSignal(symbol);
 }
 
-// Попытка исполнить pending-сигнал по текущей рыночной цене
 async function tryExecutePendingSignal(symbol: Symbol) {
   const pending = pendingSignals.get(symbol);
   if (!pending) return;
 
   try {
     const currentPrice = await getCurrentPrice(symbol);
+    const balanceBefore = getBalance();
 
-    // Для лонга: входим, если цена <= entryPrice + small slippage
-    // Для шорта: цена >= entryPrice - slippage
-    // Упрощение: входим по текущей цене, пересчитываем стоп/тейпы относительно текущей
-    // Но стратегия уже дала точные уровни — лучше открыть по signal.price через лимитку.
-    // Здесь используем market-подход: открываем по текущей цене, если она близко к сигнальной.
-
-    const slippageTolerance = 0.001; // 0.1%
+    const slippageTolerance = 0.001;
     const priceDiff = Math.abs(currentPrice - pending.entryPrice) / pending.entryPrice;
 
     if (priceDiff > slippageTolerance) {
-      log('info', `${symbol}: price moved too far (${(priceDiff * 100).toFixed(2)}%), waiting for next bar`);
+      log('info', `${symbol}: price moved too far (${(priceDiff * 100).toFixed(2)}%), waiting`);
       return;
     }
 
-    // Открываем позицию через positionState.openPosition
     const result = openPosition({
       symbol: pending.symbol,
       side: pending.side,
-      entryPrice: currentPrice, // исполняем по текущей цене
-      takeProfitPrice: pending.takeProfit1Price, // используем TP1 как основной тейк (частичное закрытие не реализовано в positionState)
+      entryPrice: currentPrice,
+      takeProfitPrice: pending.takeProfit1Price,
       stopLossPrice: pending.stopLossPrice,
       quantity: pending.quantity
     });
 
     if (result.ok) {
       pendingSignals.delete(symbol);
+
+      const balanceAfter = getBalance();
 
       if (AUTO_BOT_CONFIG.logTrades) {
         logTrade({
@@ -335,7 +423,8 @@ async function tryExecutePendingSignal(symbol: Symbol) {
           positionSize: pending.positionSize,
           regime: pending.regime,
           initialR: pending.initialR?.toFixed(4) ?? '0',
-          balance: result.balance,
+          balanceBefore,
+          balanceAfter,
           availableBalance: result.availableBalance
         });
       }
@@ -345,6 +434,22 @@ async function tryExecutePendingSignal(symbol: Symbol) {
         quantity: pending.quantity,
         balance: result.balance
       });
+
+      // Telegram
+      const tgMessage = formatOpenPositionMessage(
+        pending.symbol,
+        pending.side,
+        currentPrice,
+        pending.quantity,
+        pending.positionSize,
+        pending.stopLossPrice,
+        pending.takeProfit1Price,
+        balanceBefore,
+        balanceAfter,
+        pending.regime,
+        pending.initialR
+      );
+      await sendTelegramMessage(tgMessage);
     } else {
       log('warn', `Failed to open position for ${symbol}`, { message: result.message });
     }
@@ -368,7 +473,6 @@ export async function runPositionMonitorCycle() {
       try {
         const currentPrice = await getCurrentPrice(pos.symbol);
 
-        // Проверяем TP/SL
         const hitTakeProfit =
           pos.side === 'long'
             ? currentPrice >= pos.takeProfitPrice
@@ -379,15 +483,56 @@ export async function runPositionMonitorCycle() {
             ? currentPrice <= pos.stopLossPrice
             : currentPrice >= pos.stopLossPrice;
 
-        if (hitTakeProfit) {
-          const result = closePosition(pos.symbol, currentPrice, 'take_profit');
-          logTradeClose(pos, currentPrice, 'take_profit', result);
-        } else if (hitStopLoss) {
-          const result = closePosition(pos.symbol, currentPrice, 'stop_loss');
-          logTradeClose(pos, currentPrice, 'stop_loss', result);
-        } else {
-          // Ходл — можно логировать каждые N циклов, чтобы не спамить
-          // log('debug', `HOLD ${pos.symbol} ${pos.side} @ ${currentPrice}`);
+        if (hitTakeProfit || hitStopLoss) {
+          const balanceBefore = getBalance();
+          const reason = hitTakeProfit ? 'take_profit' : 'stop_loss';
+          const result = closePosition(pos.symbol, currentPrice, reason);
+
+          if (result.ok) {
+            const balanceAfter = getBalance();
+            const closedTrade = result.lastClosedTrade;
+
+            if (AUTO_BOT_CONFIG.logTrades && closedTrade) {
+              logTrade({
+                timestamp: formatTime(nowMs()),
+                symbol: pos.symbol,
+                side: pos.side,
+                action: 'close',
+                entryPrice: pos.entryPrice,
+                exitPrice: currentPrice,
+                stopLoss: pos.stopLossPrice,
+                takeProfit: pos.takeProfitPrice,
+                quantity: pos.quantity,
+                realizedPnL: closedTrade.realizedPnL,
+                reason,
+                balanceBefore,
+                balanceAfter,
+                totalCommission: closedTrade.totalCommission
+              });
+            }
+
+            log('info', `POSITION CLOSED: ${pos.symbol} ${pos.side.toUpperCase()} @ ${currentPrice} (${reason.toUpperCase()})`, {
+              pnl: closedTrade?.realizedPnL?.toFixed(2),
+              balance: result.balance
+            });
+
+            // Telegram
+            if (closedTrade) {
+              const tgMessage = formatClosePositionMessage(
+                pos.symbol,
+                pos.side,
+                pos.entryPrice,
+                currentPrice,
+                pos.quantity,
+                closedTrade.realizedPnL,
+                reason,
+                balanceBefore,
+                balanceAfter,
+                closedTrade.totalCommission
+              );
+              await sendTelegramMessage(tgMessage);
+            }
+          }
         }
       } catch (err) {
         log('error', `Monitor error for ${pos.symbol}`, { error: err instanceof Error ? err.message : String(err) });
@@ -396,31 +541,6 @@ export async function runPositionMonitorCycle() {
   } finally {
     isPositionMonitorRunning = false;
   }
-}
-
-function logTradeClose(pos: any, exitPrice: number, reason: 'take_profit' | 'stop_loss', result: any) {
-  if (AUTO_BOT_CONFIG.logTrades) {
-    logTrade({
-      timestamp: formatTime(nowMs()),
-      symbol: pos.symbol,
-      side: pos.side,
-      action: 'close',
-      entryPrice: pos.entryPrice,
-      exitPrice,
-      stopLoss: pos.stopLossPrice,
-      takeProfit: pos.takeProfitPrice,
-      quantity: pos.quantity,
-      realizedPnL: result.lastClosedTrade?.realizedPnL ?? 0,
-      reason,
-      balance: result.balance,
-      totalCommission: result.lastClosedTrade?.totalCommission ?? 0
-    });
-  }
-
-  log('info', `POSITION CLOSED: ${pos.symbol} ${pos.side.toUpperCase()} @ ${exitPrice} (${reason.toUpperCase()})`, {
-    pnl: result.lastClosedTrade?.realizedPnL?.toFixed(2),
-    balance: result.balance
-  });
 }
 
 // ============================================================================
@@ -432,15 +552,12 @@ let monitorInterval: NodeJS.Timeout | null = null;
 export function startAutoBot() {
   log('info', 'Starting auto-bot...', { config: AUTO_BOT_CONFIG });
 
-  // Сразу запускаем один цикл режима
   runRegimeCheckCycle().catch(err => log('error', 'Initial regime check failed', { error: err.message }));
 
-  // Режимный цикл каждые 15 мин
   regimeInterval = setInterval(() => {
     runRegimeCheckCycle().catch(err => log('error', 'Regime cycle error', { error: err.message }));
   }, AUTO_BOT_CONFIG.regimeCheckIntervalMs);
 
-  // Мониторинг позиций каждые 15 сек
   monitorInterval = setInterval(() => {
     runPositionMonitorCycle().catch(err => log('error', 'Monitor cycle error', { error: err.message }));
   }, AUTO_BOT_CONFIG.positionMonitorIntervalMs);
@@ -457,7 +574,7 @@ export function stopAutoBot() {
 }
 
 // ============================================================================
-// 4. HTTP ЭНДПОИНТЫ ДЛЯ УПРАВЛЕНИЯ (опционально, для админки)
+// 4. HTTP ЭНДПОИНТЫ ДЛЯ УПРАВЛЕНИЯ
 // ============================================================================
 export function getAutoBotStatus() {
   return {
@@ -472,7 +589,7 @@ export function getAutoBotStatus() {
       takeProfitPrice: p.takeProfitPrice,
       stopLossPrice: p.stopLossPrice,
       openedAt: p.openedAt,
-      unrealizedPnL: 0 // можно добавить расчет по текущей цене
+      unrealizedPnL: 0
     })),
     pendingSignals: Array.from(pendingSignals.entries()).map(([sym, s]) => ({
       symbol: sym,
