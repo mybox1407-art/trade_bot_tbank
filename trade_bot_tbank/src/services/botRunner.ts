@@ -42,7 +42,7 @@ export async function runBotOnce(symbol: string, timeframe = '15m') {
       positionSize: result.positionSize,
       initialR: (result.initialR ?? 0).toFixed(4),
       action: 'signal_generated'
-    } as Record<string, string | number | boolean | null>);
+    } as any);
   }
 
   return {
