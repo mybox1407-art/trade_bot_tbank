@@ -16,9 +16,6 @@ import {
 import { logSignalCheck, logTrade } from './logger';
 import axios from 'axios';
 
-// ============================================================================
-// КОНФИГУРАЦИЯ АВТОНОМНОГО БОТА
-// ============================================================================
 export const AUTO_BOT_CONFIG = {
   symbols: ['TATN', 'GAZP', 'NVTK'] as const,
   timeframe: '15m' as const,
@@ -352,7 +349,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       positionSize: pending.positionSize,
       initialR: (signal.initialR ?? 0).toFixed(4),
       action: 'signal_generated'
-    } as any);
+    });
   }
 
   log('info', `SIGNAL GENERATED: ${symbol} ${side.toUpperCase()}`, {
@@ -414,7 +411,7 @@ async function tryExecutePendingSignal(symbol: Symbol) {
           balanceBefore,
           balanceAfter,
           availableBalance: result.availableBalance ?? 0
-        } as any);
+        });
       }
 
       log('info', `POSITION OPENED: ${symbol} ${pending.side.toUpperCase()}`, {
@@ -492,7 +489,7 @@ export async function runPositionMonitorCycle() {
                 balanceBefore,
                 balanceAfter,
                 totalCommission: closedTrade.totalCommission
-              } as any);
+              });
             }
 
             log('info', `POSITION CLOSED: ${pos.symbol} ${pos.side.toUpperCase()} @ ${currentPrice} (${reason.toUpperCase()})`, {
