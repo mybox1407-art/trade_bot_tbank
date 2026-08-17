@@ -365,7 +365,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   pendingSignals.set(symbol, pending);
 
   if (AUTO_BOT_CONFIG.logSignals) {
-    logSignalCheck({
+    const logData = {
       timestamp: formatTime(nowMs()),
       symbol,
       side,
@@ -381,7 +381,9 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       positionSize: pending.positionSize,
       initialR: (signal.initialR ?? 0).toFixed(4),
       action: 'signal_generated'
-    });
+    };
+    
+    logSignalCheck(logData);
   }
 
   log('info', `SIGNAL GENERATED: ${symbol} ${side.toUpperCase()}`, {
@@ -428,7 +430,7 @@ async function tryExecutePendingSignal(symbol: Symbol) {
       const balanceAfter = getBalance();
 
       if (AUTO_BOT_CONFIG.logTrades) {
-        logTrade({
+        const logData = {
           timestamp: formatTime(nowMs()),
           symbol: pending.symbol,
           side: pending.side,
@@ -443,7 +445,9 @@ async function tryExecutePendingSignal(symbol: Symbol) {
           balanceBefore,
           balanceAfter,
           availableBalance: result.availableBalance ?? 0
-        });
+        };
+        
+        logTrade(logData);
       }
 
       log('info', `POSITION OPENED: ${symbol} ${pending.side.toUpperCase()}`, {
@@ -510,7 +514,7 @@ export async function runPositionMonitorCycle() {
             const closedTrade = result.lastClosedTrade;
 
             if (AUTO_BOT_CONFIG.logTrades && closedTrade) {
-              logTrade({
+              const logData = {
                 timestamp: formatTime(nowMs()),
                 symbol: pos.symbol,
                 side: pos.side,
@@ -525,7 +529,9 @@ export async function runPositionMonitorCycle() {
                 balanceBefore,
                 balanceAfter,
                 totalCommission: closedTrade.totalCommission
-              });
+              };
+              
+              logTrade(logData);
             }
 
             log('info', `POSITION CLOSED: ${pos.symbol} ${pos.side.toUpperCase()} @ ${currentPrice} (${reason.toUpperCase()})`, {
