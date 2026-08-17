@@ -8,7 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function writeRow(fileName: string, row: Record<string, unknown>) {
+function writeRow(fileName: string, row: { [key: string]: any }) {
   const logPath = path.join(DATA_DIR, fileName);
   const headers = Object.keys(row).join(',');
   const values = Object.values(row).map(v => {
@@ -27,10 +27,10 @@ function writeRow(fileName: string, row: Record<string, unknown>) {
   fs.appendFileSync(logPath, values + '\n');
 }
 
-export function logSignalCheck(row: Record<string, unknown>) {
+export function logSignalCheck(row: { [key: string]: any }) {
   writeRow('signal_log.csv', row);
 }
 
-export function logTrade(row: Record<string, unknown>) {
+export function logTrade(row: { [key: string]: any }) {
   writeRow('trades.csv', row);
 }
