@@ -119,14 +119,34 @@ async function sendTelegramMessage(message: string) {
     const url = `https://api.telegram.org/bot${AUTO_BOT_CONFIG.telegramBotToken}/sendMessage`;
     await axios.post(url, {
       chat_id: AUTO_BOT_CONFIG.telegramChatId,
-      text: message,
-      parse_mode: 'Markdown'
+      text: message
     });
   } catch (err) {
     log('error', 'Telegram send failed', {
       error: err instanceof Error ? err.message : String(err)
     });
   }
+}
+
+export async function sendTelegramTestMessage() {
+  const message = `
+[TEST] Автономный торговый бот MOEX
+
+Статус: OK
+Время: ${formatTime(nowMs())}
+Баланс: ${formatMoney(getBalance())} руб
+Свободно: ${formatMoney(getAvailableBalance())} руб
+Открыто позиций: ${getAllPositions().length}
+
+Тикеры: TATN, GAZP, NVTK
+Режим: 15m свечи, проверка каждые 15 мин
+Мониторинг: каждые 15 сек
+
+Telegram подключён и работает.
+`.trim();
+
+  await sendTelegramMessage(message);
+  log('info', 'Telegram test message sent');
 }
 
 function formatOpenPositionMessage(
@@ -142,27 +162,25 @@ function formatOpenPositionMessage(
   regime: string,
   initialR: number
 ) {
-  const sideEmoji = side === 'long' ? '📈' : '📉';
   const sideText = side === 'long' ? 'LONG' : 'SHORT';
 
   return `
-${sideEmoji} *ОТКРЫТИЕ ПОЗИЦИИ* ${sideText}
+[ОТКРЫТИЕ ПОЗИЦИИ] ${sideText}
 
-🏷 *Тикер:* ${symbol}
-💰 *Цена входа:* ${formatMoney(entryPrice)} ₽
-📊 *Количество:* ${quantity} шт
-💵 *Объём позиции:* ${formatMoney(positionSize)} ₽
-🛑 *Stop Loss:* ${formatMoney(stopLoss)} ₽
-✅ *Take Profit:* ${formatMoney(takeProfit)} ₽
-📏 *R (риск):* ${formatMoney(initialR)} ₽
+Тикер: ${symbol}
+Цена входа: ${formatMoney(entryPrice)} руб
+Количество: ${quantity} шт
+Объём позиции: ${formatMoney(positionSize)} руб
+Stop Loss: ${formatMoney(stopLoss)} руб
+Take Profit: ${formatMoney(takeProfit)} руб
+Риск (R): ${formatMoney(initialR)} руб
 
-💼 *Баланс до:* ${formatMoney(balanceBefore)} ₽
-💼 *Баланс после:* ${formatMoney(balanceAfter)} ₽
-📊 *Свободно:* ${formatMoney(getAvailableBalance())} ₽
+Баланс до: ${formatMoney(balanceBefore)} руб
+Баланс после: ${formatMoney(balanceAfter)} руб
+Свободно: ${formatMoney(getAvailableBalance())} руб
 
-📈 *Режим рынка:* ${regime}
-
-⏰ *Время:* ${formatTime(nowMs())}
+Режим рынка: ${regime}
+Время: ${formatTime(nowMs())}
 `.trim();
 }
 
@@ -178,28 +196,27 @@ function formatClosePositionMessage(
   balanceAfter: number,
   totalCommission: number
 ) {
-  const sideEmoji = side === 'long' ? '📈' : '📉';
   const sideText = side === 'long' ? 'LONG' : 'SHORT';
-  const pnlEmoji = realizedPnL >= 0 ? '✅' : '❌';
   const pnlSign = realizedPnL >= 0 ? '+' : '';
-  const reasonEmoji = reason === 'take_profit' ? '🎯' : reason === 'stop_loss' ? '🛑' : '👐';
-  const reasonText = reason === 'take_profit' ? 'Take Profit' : reason === 'stop_loss' ? 'Stop Loss' : 'Manual';
+  const reasonText = reason === 'take_profit' ? 'TAKE PROFIT' : reason === 'stop_loss' ? 'STOP LOSS' : 'MANUAL';
+  const pnlPercent = ((realizedPnL / balanceBefore) * 100).toFixed(2);
 
   return `
-${reasonEmoji} *ЗАКРЫТИЕ ПОЗИЦИИ* ${sideText}
+[ЗАКРЫТИЕ ПОЗИЦИИ] ${sideText}
 
-🏷 *Тикер:* ${symbol}
-💰 *Цена входа:* ${formatMoney(entryPrice)} ₽
-💸 *Цена выхода:* ${formatMoney(exitPrice)} ₽
-📊 *Количество:* ${quantity} шт
-${pnlEmoji} *PNL:* ${pnlSign}${formatMoney(realizedPnL)} ₽
-💸 *Комиссии:* ${formatMoney(totalCommission)} ₽
+Тикер: ${symbol}
+Цена входа: ${formatMoney(entryPrice)} руб
+Цена выхода: ${formatMoney(exitPrice)} руб
+Количество: ${quantity} шт
+PNL: ${pnlSign}${formatMoney(realizedPnL)} руб (${pnlSign}${pnlPercent}%)
+Комиссии: ${formatMoney(totalCommission)} руб
 
-💼 *Баланс до:* ${formatMoney(balanceBefore)} ₽
-💼 *Баланс после:* ${formatMoney(balanceAfter)} ₽
-📈 *Изменение:* ${pnlSign}${formatMoney(realizedPnL)} ₽ (${((realizedPnL / balanceBefore) * 100).toFixed(2)}%)
+Баланс до: ${formatMoney(balanceBefore)} руб
+Баланс после: ${formatMoney(balanceAfter)} руб
+Изменение: ${pnlSign}${formatMoney(realizedPnL)} руб
 
-⏰ *Время:* ${formatTime(nowMs())}
+Причина: ${reasonText}
+Время: ${formatTime(nowMs())}
 `.trim();
 }
 
@@ -549,8 +566,13 @@ export async function runPositionMonitorCycle() {
 let regimeInterval: NodeJS.Timeout | null = null;
 let monitorInterval: NodeJS.Timeout | null = null;
 
-export function startAutoBot() {
+export async function startAutoBot() {
   log('info', 'Starting auto-bot...', { config: AUTO_BOT_CONFIG });
+
+  // Тестовое сообщение в Telegram при старте
+  if (AUTO_BOT_CONFIG.telegramEnabled) {
+    await sendTelegramTestMessage();
+  }
 
   runRegimeCheckCycle().catch(err => log('error', 'Initial regime check failed', { error: err.message }));
 
