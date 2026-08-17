@@ -9,5 +9,5 @@ app.listen(port, '0.0.0.0', () => {
   console.log(`Server started on port ${port}`);
 
   // Автозапуск бота при старте сервера (можно убрать, управлять через /auto/start)
-  // startAutoBot();
+  startAutoBot();
 });
