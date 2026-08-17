@@ -8,6 +8,9 @@ docker compose up -d --build
 docker network connect n8n-docker_default trade_bot_tbank
 npm install
 
+docker logs -f trade_bot_tbank
+
+---------------------------------------------------
 
 tmux new -s backtest_moex
 tmux kill-session -t backtest_moex
