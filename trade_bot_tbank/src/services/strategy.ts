@@ -459,10 +459,10 @@ export function analyzeMarket(
   const lastTs = signalTime;  // ← было: last(candles).time
 
   // ============================================================================
-  // ИЗМЕНЕНИЕ 3: Проверка свежести данных
+  // ИЗМЕНЕНИЕ 3: Проверка свежести данных (ИСПРАВЛЕНО)
   // ============================================================================
-  const lastCandleTime = lastTs;
-  const ageMs = Date.now() - lastCandleTime;
+  const lastAvailableCandleTime = candles[candles.length - 1].time;  // ← последняя свеча (может быть незакрытая)
+  const ageMs = Date.now() - lastAvailableCandleTime;
   const ageMinutes = ageMs / 60_000;
 
   if (ageMinutes > 20) {
@@ -471,7 +471,7 @@ export function analyzeMarket(
       indicators: {
         ready: true,
         reject: 'stale_data',
-        lastCandleTime: new Date(lastCandleTime).toISOString(),
+        lastCandleTime: new Date(lastAvailableCandleTime).toISOString(),
         ageMinutes,
       }
     };
