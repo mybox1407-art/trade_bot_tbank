@@ -35,7 +35,7 @@ const MAX_DAY_EXT = 3.5;
 const BOUNCE_LOOKBACK = 10;
 const MAX_BOUNCE_ATR = 1.1;
 
-const BREAKOUT_ATR_BUFFER_K = 0.2;
+const BREAKOUT_ATR_BUFFER_K = 0.1;  // ← ИЗМЕНЕНО: было 0.2
 const BREAKOUT_BODY_ATR_MIN = 0.4;  // ← ИЗМЕНЕНО: было 0.5
 const BREAKOUT_ATR_STOP_MULT = 1.5;
 
