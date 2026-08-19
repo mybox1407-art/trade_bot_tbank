@@ -2,7 +2,7 @@
 
 import { getCandles, getCurrentPrice } from './exchange';
 import { detectMarketState, computeCoherenceScore } from './marketState';
-import { analyzeMarket, detectMarketRegime, Candle } from './strategy';
+import { analyzeMarket, detectMarketRegime, Candle, buildHtfBiasSeries } from './strategy';  // ← ИЗМЕНЕНО: добавлен buildHtfBiasSeries
 import {
   getPosition,
   getAllPositions,
@@ -254,13 +254,23 @@ export async function runRegimeCheckCycle() {
 async function processSymbol(symbol: Symbol, availableBalance: number) {
   log('info', `Processing ${symbol}...`);
 
-  const candles = await getCandles(symbol, AUTO_BOT_CONFIG.timeframe, AUTO_BOT_CONFIG.candlesLimit);
-  if (candles.length < 220) {
-    log('warn', `${symbol}: not enough candles (${candles.length}/220)`);
+  const candles15 = await getCandles(symbol, AUTO_BOT_CONFIG.timeframe, AUTO_BOT_CONFIG.candlesLimit);
+  if (candles15.length < 220) {
+    log('warn', `${symbol}: not enough 15m candles (${candles15.length}/220)`);
     return;
   }
 
-  const marketState = detectMarketState(candles);
+  // ============================================================================
+  // ИЗМЕНЕНИЕ: Получение 1H свечей для HTF
+  // ============================================================================
+  const candles1h = await getCandles(symbol, '1h', 300);
+  if (candles1h.length < 100) {
+    log('warn', `${symbol}: not enough 1h candles for HTF (${candles1h.length}/100)`);
+  }
+
+  const htfSeries = buildHtfBiasSeries(candles1h, AUTO_BOT_CONFIG.htfMinAdx1h);
+
+  const marketState = detectMarketState(candles15);
   if (!marketState.ready) {
     log('warn', `${symbol}: market state not ready`);
     return;
@@ -279,9 +289,10 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     return;
   }
 
-  const signal = analyzeMarket(candles, availableBalance, {
+  const signal = analyzeMarket(candles15, availableBalance, {
     enabled: AUTO_BOT_CONFIG.htfFilterEnabled,
-    minAdx1h: AUTO_BOT_CONFIG.htfMinAdx1h
+    minAdx1h: AUTO_BOT_CONFIG.htfMinAdx1h,
+    precomputedHtf: htfSeries  // ← ИЗМЕНЕНО: передача HTF-серии
   });
 
   if (!signal.buy && !signal.sell) {
@@ -300,7 +311,8 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       bbLower: signal.indicators?.bbLower,
       candleBody: signal.indicators?.candleBody,
       minBody: signal.indicators?.minBody,
-      volumeSpike: signal.indicators?.volumeSpike
+      volumeSpike: signal.indicators?.volumeSpike,
+      rejectReasons: signal.indicators?.rejectReasons  // ← ДОБАВЛЕНО: детализация причин
     });
     return;
   }
@@ -316,7 +328,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     return;
   }
 
-  const coherence = computeCoherenceScore(candles, side);
+  const coherence = computeCoherenceScore(candles15, side);
   if (coherence < 0.4) {
     log('info', `${symbol}: low coherence ${coherence.toFixed(4)} for ${side}, skipping`);
     return;
