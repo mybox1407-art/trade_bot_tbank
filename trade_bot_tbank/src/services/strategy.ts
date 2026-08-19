@@ -36,7 +36,7 @@ const BOUNCE_LOOKBACK = 10;
 const MAX_BOUNCE_ATR = 1.1;
 
 const BREAKOUT_ATR_BUFFER_K = 0.2;
-const BREAKOUT_BODY_ATR_MIN = 0.5;
+const BREAKOUT_BODY_ATR_MIN = 0.4;  // ← ИЗМЕНЕНО: было 0.5
 const BREAKOUT_ATR_STOP_MULT = 1.5;
 
 // ============================================================================
@@ -240,7 +240,7 @@ export function aggregateTo1h(candles15: Candle[]) {
 }
 
 export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18) {
-  if (hours.length < 210) return [];
+  if (hours.length < 100) return [];  // ← ИЗМЕНЕНО: было 210
 
   const closes = hours.map(h => h.close);
   const highs = hours.map(h => h.high);
@@ -442,14 +442,40 @@ export function analyzeMarket(
     return emptySignal(closes[closes.length - 1] ?? 0);
   }
 
-  const price = last(closes);
+  // ============================================================================
+  // ИЗМЕНЕНИЕ 2: Закрытая свеча для сигнала
+  // ============================================================================
+  const signalIndex = candles.length - 2;  // ← предыдущая закрытая свеча
+  const signalCandle = candles[signalIndex];
+  const signalTime = signalCandle.time;
+
+  const price = closes[signalIndex];  // ← было: last(closes)
   const regime = regimeInfo.regime;
   const ind = regimeInfo.indicators;
-  const lastAtr = last(atr);
-  const lastRsi = last(rsi);
-  const lastCandle = last(candles);
-  const lastBb = last(bb);
-  const lastTs = last(candles).time;
+  const lastAtr = atr[atr.length - 2];  // ← было: last(atr)
+  const lastRsi = rsi[rsi.length - 2];  // ← было: last(rsi)
+  const lastCandle = signalCandle;  // ← было: last(candles)
+  const lastBb = bb[bb.length - 2];  // ← было: last(bb)
+  const lastTs = signalTime;  // ← было: last(candles).time
+
+  // ============================================================================
+  // ИЗМЕНЕНИЕ 3: Проверка свежести данных
+  // ============================================================================
+  const lastCandleTime = lastTs;
+  const ageMs = Date.now() - lastCandleTime;
+  const ageMinutes = ageMs / 60_000;
+
+  if (ageMinutes > 20) {
+    return {
+      ...emptySignal(price, regime),
+      indicators: {
+        ready: true,
+        reject: 'stale_data',
+        lastCandleTime: new Date(lastCandleTime).toISOString(),
+        ageMinutes,
+      }
+    };
+  }
 
   if (!isTradingHour(lastTs)) {
     return {
@@ -493,7 +519,8 @@ export function analyzeMarket(
           reject: 'htf_warmup',
           breakoutUp,
           breakoutDown,
-          sideWouldBe
+          sideWouldBe,
+          htfSeriesLength: series.length,  // ← ДОБАВЛЕНО для диагностики
         }
       };
     }
@@ -529,11 +556,25 @@ export function analyzeMarket(
     side = 'short';
   }
 
+  // ============================================================================
+  // ИЗМЕНЕНИЕ 4: Детализация reject-причин
+  // ============================================================================
   if (side === 'none') {
     const candleBody = Math.abs(lastCandle.close - lastCandle.open);
     const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
     const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
     const volumeSpike = getVolumeSpike(volumes, ind.avgVol20 as number);
+
+    const rejectReasons: string[] = [];
+
+    if (regime !== 'breakout_watch') rejectReasons.push('regime_not_breakout_watch');
+    if (breakoutUp === false && breakoutDown === false) {
+      if (price <= lastBb.upper + atrBuffer) rejectReasons.push('price_up_not_reached');
+      if (price >= lastBb.lower - atrBuffer) rejectReasons.push('price_down_not_reached');
+      if (candleBody < minBody) rejectReasons.push('body_too_small');
+      if (lastRsi <= 55 && lastRsi >= 45) rejectReasons.push('rsi_neutral');
+      if (!volumeSpike) rejectReasons.push('volume_missing');
+    }
 
     return {
       ...emptySignal(price, regime),
@@ -553,7 +594,8 @@ export function analyzeMarket(
         candleBody,
         minBody,
         volumeSpike,
-        reject: 'no_breakout_conditions'
+        reject: 'no_breakout_conditions',
+        rejectReasons,  // ← ДОБАВЛЕНО
       }
     };
   }
