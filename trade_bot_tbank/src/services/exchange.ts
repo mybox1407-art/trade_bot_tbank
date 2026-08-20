@@ -140,22 +140,14 @@ export async function getCandles(
 
   const to = new Date();
 
-  let lookbackDays = 1;
-  if (timeframe === '1m') lookbackDays = 1;
-  else if (timeframe === '2m') lookbackDays = 1;
-  else if (timeframe === '3m') lookbackDays = 1;
-  else if (timeframe === '5m') lookbackDays = 7;
-  else if (timeframe === '10m') lookbackDays = 7;
-  else if (timeframe === '15m') lookbackDays = 21;
-  else if (timeframe === '30m') lookbackDays = 21;
-  else if (timeframe === '1h') lookbackDays = 90;
-  else if (timeframe === '2h') lookbackDays = 90;
-  else if (timeframe === '4h') lookbackDays = 90;
-  else if (timeframe === '1d') lookbackDays = 365;
-  else if (timeframe === '1w') lookbackDays = 365 * 5;
-  else if (timeframe === '1M') lookbackDays = 365 * 10;
+  // CHANGED: окно вычисляется из limit, а не фиксированными 21/90 днями
+  const intervalMs = timeframe === '15m' ? 15 * 60_000 :
+                     timeframe === '1h'  ? 60 * 60_000 :
+                     60 * 60_000; // fallback
 
-  const from = new Date(to.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  const neededMs = limit * intervalMs;
+  // Запас ×3 на ночи/выходные/праздники, чтобы гарантированно набрать limit баров
+  const from = new Date(to.getTime() - neededMs * 3);
 
   const { data } = await api.post(
     '/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
