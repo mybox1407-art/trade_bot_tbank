@@ -9,6 +9,10 @@
 // 3) Торговое окно: вне 10:01–23:45 МСК (пн–пт) цикл завершается ДО запросов к API,
 //    планировщик спит до открытия сессии (cap maxSleepMs как страховка).
 // 4) telegramBotToken замаскирован в стартовом логе и в getAutoBotStatus().
+//
+// === Изменения 21.08.2026 ===
+// 5) Расширенное логирование volume-метрик (median, ratio, threshold, sampleSize)
+//    для диагностики breakout-фильтра.
 
 import { getCandles, getCurrentPrice } from './exchange';
 import { detectMarketState, computeCoherenceScore } from './marketState';
@@ -30,14 +34,14 @@ export const AUTO_BOT_CONFIG = {
   symbols: ['TATN', 'GAZP', 'NVTK'] as const,
   timeframe: '15m' as const,
   candlesLimit: 250,
-  htfCandlesLimit: 300,                          // NEW: лимит для 1h (был захардкожен 300)
-  regimeCheckIntervalMs: 15 * 60 * 1000,         // оставлено для справки; планировщик привязан к закрытию бара
-  barCloseDelaySec: 10,                          // NEW: пауза после закрытия бара перед циклом
-  dropFormingCandle: true,                       // NEW: отбрасывать незакрытую свечу
-  tradingHoursEnabled: true,                     // NEW: не дёргать API вне торгового окна
-  tradingWindows: [[10 * 60 + 1, 23 * 60 + 45]] as const, // NEW: 10:01–23:45 МСК
-  maxSleepMs: 6 * 60 * 60 * 1000,                // NEW: макс. сон вне окна (страховка планировщика)
-  logWhenMarketClosed: false,                    // NEW: логировать ли пропущенные ночные циклы
+  htfCandlesLimit: 300,
+  regimeCheckIntervalMs: 15 * 60 * 1000,
+  barCloseDelaySec: 10,
+  dropFormingCandle: true,
+  tradingHoursEnabled: true,
+  tradingWindows: [[10 * 60 + 1, 23 * 60 + 45]] as const,
+  maxSleepMs: 6 * 60 * 60 * 1000,
+  logWhenMarketClosed: false,
   positionMonitorIntervalMs: 15 * 1000,
   maxPositions: MAX_OPEN_POSITIONS,
   positionSizeFraction: 0.30,
@@ -97,7 +101,7 @@ function log(level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string
 }
 
 // ============================================================================
-// NEW: маскировка секретов в логах и статусе
+// Маскировка секретов в логах и статусе
 // ============================================================================
 function maskSecret(value: string): string {
   if (!value) return value;
@@ -110,7 +114,7 @@ function maskedConfig() {
 }
 
 // ============================================================================
-// NEW: привязка цикла к закрытию бара и торговому окну (МСК = UTC+3, без DST)
+// Привязка цикла к закрытию бара и торговому окну (МСК = UTC+3, без DST)
 // ============================================================================
 const MSK_OFFSET_MIN = 180;
 
@@ -130,7 +134,7 @@ function msUntilNextBarClose(now: number, barMs: number, delayMs: number): numbe
 function getMarketTimeParts(now: number): { weekday: number; minutes: number } {
   const shifted = new Date(now + MSK_OFFSET_MIN * 60_000);
   return {
-    weekday: shifted.getUTCDay(), // 0 = воскресенье, 6 = суббота
+    weekday: shifted.getUTCDay(),
     minutes: shifted.getUTCHours() * 60 + shifted.getUTCMinutes()
   };
 }
@@ -142,7 +146,7 @@ function isTradingWindowOpen(now: number): boolean {
 }
 
 function nextTradingWindowOpenMs(now: number): number | null {
-  const startMin = AUTO_BOT_CONFIG.tradingWindows[0][0]; // используем начало первого окна
+  const startMin = AUTO_BOT_CONFIG.tradingWindows[0][0];
   for (let i = 0; i < 9; i++) {
     const mskNow = now + MSK_OFFSET_MIN * 60_000;
     const mskMidnight = Math.floor(mskNow / 86_400_000) * 86_400_000;
@@ -164,7 +168,6 @@ function computeRegimeDelayMs(): number {
   if (!AUTO_BOT_CONFIG.tradingHoursEnabled) return barDelay;
   if (isTradingWindowOpen(now)) return barDelay;
 
-  // Вне окна: спим до открытия сессии (+ задержка), но не дольше maxSleepMs
   const nextOpen = nextTradingWindowOpenMs(now);
   if (nextOpen == null) return barDelay;
   const sleepMs = Math.min(nextOpen + delayMs - now, AUTO_BOT_CONFIG.maxSleepMs);
@@ -172,13 +175,13 @@ function computeRegimeDelayMs(): number {
 }
 
 // ============================================================================
-// NEW: отбрасывание формирующейся свечи + жёсткий лимит длины серии
+// Отбрасывание формирующейся свечи + жёсткий лимит длины серии
 // ============================================================================
 function candleOpenTimeMs(candle: Candle): number | null {
   const rec = candle as unknown as Record<string, unknown>;
   const t = rec.time ?? rec.datetime ?? rec.timestamp;
   if (t == null) return null;
-  if (typeof t === 'number') return t > 1e12 ? t : t * 1000; // мс или секунды
+  if (typeof t === 'number') return t > 1e12 ? t : t * 1000;
   if (t instanceof Date) return t.getTime();
   const parsed = Date.parse(String(t));
   return Number.isNaN(parsed) ? null : parsed;
@@ -189,7 +192,7 @@ function trimCandles(candles: Candle[], limit: number, intervalMs: number): Cand
   if (AUTO_BOT_CONFIG.dropFormingCandle && out.length > 0) {
     const lastOpen = candleOpenTimeMs(out[out.length - 1]);
     if (lastOpen != null && lastOpen + intervalMs > nowMs()) {
-      out = out.slice(0, -1); // последний бар ещё формируется
+      out = out.slice(0, -1);
     }
   }
   if (out.length > limit) out = out.slice(-limit);
@@ -308,6 +311,21 @@ PNL: ${pnlSign}${formatMoney(realizedPnL)} руб (${pnlSign}${pnlPercent}%)
 `.trim();
 }
 
+// ============================================================================
+// Хелпер: сборка volume-объекта для логирования
+// ============================================================================
+function getVolumeLogMeta(indicators: Record<string, unknown> | undefined) {
+  if (!indicators) return {};
+  return {
+    volumeSpike: indicators.volumeSpike,
+    volumeCurrent: indicators.volumeCurrent,
+    volumeMedian: indicators.volumeMedian,
+    volumeRatio: indicators.volumeRatio,
+    volumeThreshold: indicators.volumeThreshold,
+    volumeSampleSize: indicators.volumeSampleSize,
+  };
+}
+
 export async function runRegimeCheckCycle() {
   if (isRegimeCheckRunning) {
     log('warn', 'Regime check already running, skipping');
@@ -316,7 +334,7 @@ export async function runRegimeCheckCycle() {
   isRegimeCheckRunning = true;
 
   try {
-    // NEW: торговое окно проверяется ДО любых запросов к API
+    // Торговое окно проверяется ДО любых запросов к API
     if (AUTO_BOT_CONFIG.tradingHoursEnabled && !isTradingWindowOpen(nowMs())) {
       if (AUTO_BOT_CONFIG.logWhenMarketClosed) {
         log('info', 'Outside trading window, cycle skipped (no API calls)');
@@ -379,7 +397,6 @@ export async function runRegimeCheckCycle() {
 async function processSymbol(symbol: Symbol, availableBalance: number) {
   log('info', `Processing ${symbol}...`);
 
-  // CHANGED: trimCandles — отбрасываем формирующуюся свечу и жёстко режем до лимита
   const candles15raw = await getCandles(symbol, AUTO_BOT_CONFIG.timeframe, AUTO_BOT_CONFIG.candlesLimit);
   const candles15 = trimCandles(candles15raw, AUTO_BOT_CONFIG.candlesLimit, timeframeToMs(AUTO_BOT_CONFIG.timeframe));
   if (candles15.length < 220) {
@@ -421,23 +438,24 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   });
 
   if (!signal.buy && !signal.sell) {
+    const ind = signal.indicators ?? {};
     log('info', `${symbol}: no signal`, {
       regime: signal.regime,
-      reject: signal.indicators?.reject ?? 'conditions_not_met',
-      lastRsi: signal.indicators?.lastRsi,
-      breakoutUp: signal.indicators?.breakoutUp,
-      breakoutDown: signal.indicators?.breakoutDown,
-      htfEnabled: signal.indicators?.htfEnabled,
-      htfBias: signal.indicators?.htfBias,
-      sideWouldBe: signal.indicators?.sideWouldBe,
-      stopPct: signal.indicators?.stopPct,
+      reject: ind.reject ?? 'conditions_not_met',
+      lastRsi: ind.lastRsi,
+      breakoutUp: ind.breakoutUp,
+      breakoutDown: ind.breakoutDown,
+      htfEnabled: ind.htfEnabled,
+      htfBias: ind.htfBias,
+      sideWouldBe: ind.sideWouldBe,
+      stopPct: ind.stopPct,
       price: signal.price,
-      bbUpper: signal.indicators?.bbUpper,
-      bbLower: signal.indicators?.bbLower,
-      candleBody: signal.indicators?.candleBody,
-      minBody: signal.indicators?.minBody,
-      volumeSpike: signal.indicators?.volumeSpike,
-      rejectReasons: signal.indicators?.rejectReasons
+      bbUpper: ind.bbUpper,
+      bbLower: ind.bbLower,
+      candleBody: ind.candleBody,
+      minBody: ind.minBody,
+      ...getVolumeLogMeta(ind),
+      rejectReasons: ind.rejectReasons
     });
     return;
   }
@@ -508,7 +526,8 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     tp2: signal.takeProfit2Price,
     qty: signal.quantity,
     size: pending.positionSize,
-    R: signal.initialR?.toFixed(4)
+    R: signal.initialR?.toFixed(4),
+    ...getVolumeLogMeta(signal.indicators)
   });
 
   await tryExecutePendingSignal(symbol);
@@ -672,7 +691,6 @@ export async function runPositionMonitorCycle() {
   }
 }
 
-// CHANGED: setInterval заменён на самоперепланирующийся setTimeout
 let regimeTimer: NodeJS.Timeout | null = null;
 let monitorInterval: NodeJS.Timeout | null = null;
 
@@ -687,7 +705,7 @@ function scheduleNextRegimeCycle() {
 }
 
 export async function startAutoBot() {
-  log('info', 'Starting auto-bot...', { config: maskedConfig() }); // CHANGED: токен замаскирован
+  log('info', 'Starting auto-bot...', { config: maskedConfig() });
 
   if (AUTO_BOT_CONFIG.telegramEnabled) {
     await sendTelegramTestMessage();
@@ -695,7 +713,7 @@ export async function startAutoBot() {
 
   runRegimeCheckCycle().catch(err => log('error', 'Initial regime check failed', { error: err instanceof Error ? err.message : String(err) }));
 
-  scheduleNextRegimeCycle(); // CHANGED: было setInterval(..., regimeCheckIntervalMs)
+  scheduleNextRegimeCycle();
 
   monitorInterval = setInterval(() => {
     runPositionMonitorCycle().catch(err => log('error', 'Monitor cycle error', { error: err instanceof Error ? err.message : String(err) }));
@@ -705,7 +723,7 @@ export async function startAutoBot() {
 }
 
 export function stopAutoBot() {
-  if (regimeTimer) clearTimeout(regimeTimer);   // CHANGED: было clearInterval(regimeInterval)
+  if (regimeTimer) clearTimeout(regimeTimer);
   if (monitorInterval) clearInterval(monitorInterval);
   regimeTimer = null;
   monitorInterval = null;
@@ -715,7 +733,7 @@ export function stopAutoBot() {
 export function getAutoBotStatus() {
   return {
     running: !!regimeTimer,
-    config: maskedConfig(), // CHANGED: токен замаскирован
+    config: maskedConfig(),
     openPositions: getAllPositions().map(p => ({
       symbol: p.symbol,
       side: p.side,
