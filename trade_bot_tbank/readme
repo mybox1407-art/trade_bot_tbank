@@ -1,13 +1,14 @@
-cd trade_bot_tbank
-docker compose down
 cd ~
 rm -rf trade_bot_tbank
 git clone https://github.com/mybox1407-art/trade_bot_tbank.git
-cd trade_bot_tbank/trade_bot_tbank
-docker compose build
-docker network connect n8n-docker_default trade_bot_tbank
-npm install
+cd ~/trade_bot_tbank/trade_bot_tbank   # папка С compose-файлом
 
+docker compose build
+docker compose up -d --force-recreate   # down не нужен — recreate заменит контейнер
+docker network connect n8n-docker_default trade_bot_tbank 2>/dev/null || true
+
+docker compose ps
+docker exec trade_bot_tbank grep -c upperTrigger /app/dist/services/strategy.js
 docker logs -f trade_bot_tbank
 
 ---------------------------------------------------
