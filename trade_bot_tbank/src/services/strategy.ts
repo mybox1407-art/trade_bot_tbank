@@ -35,9 +35,15 @@ const MAX_DAY_EXT = 3.5;
 const BOUNCE_LOOKBACK = 10;
 const MAX_BOUNCE_ATR = 1.1;
 
-const BREAKOUT_ATR_BUFFER_K = 0.1;  // ← ИЗМЕНЕНО: было 0.2
-const BREAKOUT_BODY_ATR_MIN = 0.4;  // ← ИЗМЕНЕНО: было 0.5
+const BREAKOUT_ATR_BUFFER_K = 0.1;
+const BREAKOUT_BODY_ATR_MIN = 0.4;
 const BREAKOUT_ATR_STOP_MULT = 1.5;
+
+// ============================================================================
+// VOLUME SETTINGS
+// ============================================================================
+const VOLUME_LOOKBACK = 20;
+const VOLUME_SPIKE_MULTIPLIER = 1.1;
 
 // ============================================================================
 // ТИПЫ
@@ -104,6 +110,59 @@ function prev<T>(arr: T[]) {
 
 function mean(values: number[]) {
   return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+}
+
+function median(values: number[]): number {
+  const sorted = values
+    .filter(v => Number.isFinite(v) && v > 0)
+    .sort((a, b) => a - b);
+
+  if (!sorted.length) return 0;
+
+  const mid = Math.floor(sorted.length / 2);
+
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+interface VolumeCheck {
+  ok: boolean;
+  signalVolume: number;
+  medianVolume: number;
+  threshold: number;
+  ratio: number | null;
+  sampleSize: number;
+}
+
+function checkSignalVolume(
+  volumes: number[],
+  signalIndex: number,
+  lookback = VOLUME_LOOKBACK,
+  multiplier = VOLUME_SPIKE_MULTIPLIER,
+): VolumeCheck {
+  const signalVolume = volumes[signalIndex] ?? 0;
+
+  const baselineVolumes = volumes
+    .slice(Math.max(0, signalIndex - lookback), signalIndex)
+    .filter(v => Number.isFinite(v) && v > 0);
+
+  const medianVolume = median(baselineVolumes);
+  const threshold = medianVolume * multiplier;
+  const ratio = medianVolume > 0 ? signalVolume / medianVolume : null;
+
+  return {
+    ok:
+      Number.isFinite(signalVolume) &&
+      signalVolume > 0 &&
+      medianVolume > 0 &&
+      signalVolume >= threshold,
+    signalVolume,
+    medianVolume,
+    threshold,
+    ratio,
+    sampleSize: baselineVolumes.length,
+  };
 }
 
 export function isTradingHour(ts: number) {
@@ -202,11 +261,6 @@ function calcPositionSize(params: {
   return { quantity, positionSize: quantity * price };
 }
 
-function getVolumeSpike(volumes: number[], avgVol: number) {
-  const v = volumes[volumes.length - 1] ?? 0;
-  return v >= avgVol * 1.1;
-}
-
 // ============================================================================
 // HTF (1H bias)
 // ============================================================================
@@ -240,7 +294,7 @@ export function aggregateTo1h(candles15: Candle[]) {
 }
 
 export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18) {
-  if (hours.length < 100) return [];  // ← ИЗМЕНЕНО: было 210
+  if (hours.length < 100) return [];
 
   const closes = hours.map(h => h.close);
   const highs = hours.map(h => h.high);
@@ -343,7 +397,11 @@ export function detectMarketRegime(candles: Candle[]) {
   const lastEma50 = last(ema50);
   const lastEma200 = last(ema200);
   const lastBb = last(bb);
-  const avgVol20 = mean(volumes.slice(-20));
+
+  // Для режима используем медиану по последним 20 закрытым свечам (исключая текущую формирующуюся)
+  const regimeSignalIndex = candles.length - 2;
+  const regimeVolumeCheck = checkSignalVolume(volumes, regimeSignalIndex);
+  const avgVol20 = regimeVolumeCheck.medianVolume; // используем медиану как baseline
 
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
@@ -356,7 +414,7 @@ export function detectMarketRegime(candles: Candle[]) {
   const trendUp = !highVolatility && lastClose > lastEma200 && stackUp && adxOk;
   const trendDown = !highVolatility && lastClose < lastEma200 && stackDown && adxOk;
   const range = lastAdx.adx < MIN_ADX_RANGE && bbWidth < 0.08;
-  const breakoutWatch = compression && lastAdx.adx >= 15 && lastAdx.adx <= 28 && getVolumeSpike(volumes, avgVol20) && !highVolatility;
+  const breakoutWatch = compression && lastAdx.adx >= 15 && lastAdx.adx <= 28 && regimeVolumeCheck.ok && !highVolatility;
 
   let regime: MarketRegime = 'unknown';
   if (highVolatility) regime = 'high_volatility';
@@ -378,7 +436,9 @@ export function detectMarketRegime(candles: Candle[]) {
       ema50: lastEma50,
       ema200: lastEma200,
       bbWidth,
-      avgVol20
+      avgVol20, // теперь это медиана
+      volumeMedian: regimeVolumeCheck.medianVolume,
+      volumeRatio: regimeVolumeCheck.ratio,
     }
   };
 }
@@ -443,25 +503,25 @@ export function analyzeMarket(
   }
 
   // ============================================================================
-  // ИЗМЕНЕНИЕ 2: Закрытая свеча для сигнала
+  // Закрытая свеча для сигнала
   // ============================================================================
-  const signalIndex = candles.length - 2;  // ← предыдущая закрытая свеча
+  const signalIndex = candles.length - 2;  // предыдущая закрытая свеча
   const signalCandle = candles[signalIndex];
   const signalTime = signalCandle.time;
 
-  const price = closes[signalIndex];  // ← было: last(closes)
+  const price = closes[signalIndex];
   const regime = regimeInfo.regime;
   const ind = regimeInfo.indicators;
-  const lastAtr = atr[atr.length - 2];  // ← было: last(atr)
-  const lastRsi = rsi[rsi.length - 2];  // ← было: last(rsi)
-  const lastCandle = signalCandle;  // ← было: last(candles)
-  const lastBb = bb[bb.length - 2];  // ← было: last(bb)
-  const lastTs = signalTime;  // ← было: last(candles).time
+  const lastAtr = atr[atr.length - 2];
+  const lastRsi = rsi[rsi.length - 2];
+  const lastCandle = signalCandle;
+  const lastBb = bb[bb.length - 2];
+  const lastTs = signalTime;
 
   // ============================================================================
-  // ИЗМЕНЕНИЕ 3: Проверка свежести данных (ИСПРАВЛЕНО)
+  // Проверка свежести данных
   // ============================================================================
-  const lastAvailableCandleTime = candles[candles.length - 1].time;  // ← последняя свеча (может быть незакрытая)
+  const lastAvailableCandleTime = candles[candles.length - 1].time;
   const ageMs = Date.now() - lastAvailableCandleTime;
   const ageMinutes = ageMs / 60_000;
 
@@ -484,6 +544,12 @@ export function analyzeMarket(
     };
   }
 
+  // ============================================================================
+  // Volume check для сигнальной свечи (используем ту же закрытую свечу, что и цену/RSI/BB/тело)
+  // ============================================================================
+  const volumeCheck = checkSignalVolume(volumes, signalIndex);
+  const volumeSpike = volumeCheck.ok;
+
   let longSignal = false;
   let shortSignal = false;
 
@@ -495,7 +561,6 @@ export function analyzeMarket(
     const candleBody = Math.abs(lastCandle.close - lastCandle.open);
     const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
     const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
-    const volumeSpike = getVolumeSpike(volumes, ind.avgVol20 as number);
 
     breakoutUp = price > lastBb.upper + atrBuffer && candleBody >= minBody && lastRsi > 55 && volumeSpike;
     breakoutDown = price < lastBb.lower - atrBuffer && candleBody >= minBody && lastRsi < 45 && volumeSpike;
@@ -520,7 +585,12 @@ export function analyzeMarket(
           breakoutUp,
           breakoutDown,
           sideWouldBe,
-          htfSeriesLength: series.length,  // ← ДОБАВЛЕНО для диагностики
+          htfSeriesLength: series.length,
+          volumeSpike,
+          volumeCurrent: volumeCheck.signalVolume,
+          volumeMedian: volumeCheck.medianVolume,
+          volumeRatio: volumeCheck.ratio,
+          volumeThreshold: volumeCheck.threshold,
         }
       };
     }
@@ -538,7 +608,12 @@ export function analyzeMarket(
           htfAdx: st.adx,
           sideWouldBe,
           htfEma20: st.ema20,
-          htfEma200: st.ema200
+          htfEma200: st.ema200,
+          volumeSpike,
+          volumeCurrent: volumeCheck.signalVolume,
+          volumeMedian: volumeCheck.medianVolume,
+          volumeRatio: volumeCheck.ratio,
+          volumeThreshold: volumeCheck.threshold,
         }
       };
     }
@@ -557,13 +632,12 @@ export function analyzeMarket(
   }
 
   // ============================================================================
-  // ИЗМЕНЕНИЕ 4: Детализация reject-причин
+  // Детализация reject-причин
   // ============================================================================
   if (side === 'none') {
     const candleBody = Math.abs(lastCandle.close - lastCandle.open);
     const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
     const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
-    const volumeSpike = getVolumeSpike(volumes, ind.avgVol20 as number);
 
     const rejectReasons: string[] = [];
 
@@ -573,7 +647,7 @@ export function analyzeMarket(
       if (price >= lastBb.lower - atrBuffer) rejectReasons.push('price_down_not_reached');
       if (candleBody < minBody) rejectReasons.push('body_too_small');
       if (lastRsi <= 55 && lastRsi >= 45) rejectReasons.push('rsi_neutral');
-      if (!volumeSpike) rejectReasons.push('volume_missing');
+      if (!volumeSpike) rejectReasons.push('volume_below_median_threshold');
     }
 
     return {
@@ -594,8 +668,13 @@ export function analyzeMarket(
         candleBody,
         minBody,
         volumeSpike,
+        volumeCurrent: volumeCheck.signalVolume,
+        volumeMedian: volumeCheck.medianVolume,
+        volumeRatio: volumeCheck.ratio,
+        volumeThreshold: volumeCheck.threshold,
+        volumeSampleSize: volumeCheck.sampleSize,
         reject: 'no_breakout_conditions',
-        rejectReasons,  // ← ДОБАВЛЕНО
+        rejectReasons,
       }
     };
   }
@@ -648,7 +727,13 @@ export function analyzeMarket(
       tp2: takeProfit2Price,
       breakoutUp,
       breakoutDown,
-      htfEnabled: htf.enabled
+      htfEnabled: htf.enabled,
+      volumeSpike,
+      volumeCurrent: volumeCheck.signalVolume,
+      volumeMedian: volumeCheck.medianVolume,
+      volumeRatio: volumeCheck.ratio,
+      volumeThreshold: volumeCheck.threshold,
+      volumeSampleSize: volumeCheck.sampleSize,
     }
   };
 }
