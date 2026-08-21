@@ -126,6 +126,29 @@ function median(values: number[]): number {
     : sorted[mid];
 }
 
+/**
+ * Определяет длительность бара по последним свечам.
+ * Берётся МИНИМАЛЬНАЯ положительная дельта — межсессионные гэпы отбрасываются.
+ */
+function inferBarMs(candles: Candle[]): number {
+  const deltas: number[] = [];
+  for (let i = Math.max(1, candles.length - 12); i < candles.length; i++) {
+    const d = candles[i].time - candles[i - 1].time;
+    if (Number.isFinite(d) && d > 0) deltas.push(d);
+  }
+  return deltas.length ? Math.min(...deltas) : 15 * 60_000;
+}
+
+/**
+ * Доступ к значению индикатора по индексу свечи.
+ * Индикаторные массивы короче массива свечей — вычисляем смещение.
+ */
+function indicatorAt<T>(arr: T[], candleIndex: number, candleCount: number): T | undefined {
+  const offset = candleCount - arr.length;
+  const i = candleIndex - offset;
+  return i >= 0 && i < arr.length ? arr[i] : undefined;
+}
+
 interface VolumeCheck {
   ok: boolean;
   signalVolume: number;
@@ -227,7 +250,7 @@ function getStructureStop(params: {
 
   let stop = recentHigh + pad;
   if (stop - price < minDist) stop = price + minDist;
-  if (stop - price > maxDist) stop = price - maxDist;
+  if (stop - price > maxDist) stop = price + maxDist;
   if (stop <= price) stop = price + minDist;
   return stop;
 }
@@ -365,11 +388,24 @@ export function getHtfBiasAt(series: HtfBarState[], ts15: number) {
 // ============================================================================
 // РЕЖИМ РЫНКА
 // ============================================================================
-export function detectMarketRegime(candles: Candle[]) {
-  const closes = candles.map(c => c.close);
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const volumes = candles.map(c => c.volume);
+/**
+ * Определяет режим рынка ПО СОСТОЯНИЮ на свечу с индексом asOfIndex.
+ * Если asOfIndex не передан — по последней свече массива (старое поведение).
+ *
+ * ВАЖНО: для breakout-стратегии сюда передаётся индекс SETUP-свечи
+ * (предшествующей сигнальной), чтобы импульсная свеча пробоя не меняла
+ * режим в trend_* и не блокировала собственный вход.
+ */
+export function detectMarketRegime(candles: Candle[], asOfIndex?: number) {
+  const end = asOfIndex === undefined
+    ? candles.length
+    : Math.max(0, Math.min(asOfIndex + 1, candles.length));
+  const view = candles.slice(0, end);
+
+  const closes = view.map(c => c.close);
+  const highs = view.map(c => c.high);
+  const lows = view.map(c => c.low);
+  const volumes = view.map(c => c.volume);
 
   const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
   const adx = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
@@ -398,10 +434,10 @@ export function detectMarketRegime(candles: Candle[]) {
   const lastEma200 = last(ema200);
   const lastBb = last(bb);
 
-  // Для режима используем медиану по последним 20 закрытым свечам (исключая текущую формирующуюся)
-  const regimeSignalIndex = candles.length - 2;
+  // Базовая линия объёма — справочно, для indicators
+  const regimeSignalIndex = view.length - 2;
   const regimeVolumeCheck = checkSignalVolume(volumes, regimeSignalIndex);
-  const avgVol20 = regimeVolumeCheck.medianVolume; // используем медиану как baseline
+  const avgVol20 = regimeVolumeCheck.medianVolume;
 
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
@@ -414,7 +450,9 @@ export function detectMarketRegime(candles: Candle[]) {
   const trendUp = !highVolatility && lastClose > lastEma200 && stackUp && adxOk;
   const trendDown = !highVolatility && lastClose < lastEma200 && stackDown && adxOk;
   const range = lastAdx.adx < MIN_ADX_RANGE && bbWidth < 0.08;
-  const breakoutWatch = compression && lastAdx.adx >= 15 && lastAdx.adx <= 28 && regimeVolumeCheck.ok && !highVolatility;
+  // Объёмный всплеск здесь НЕ требуется: во время сжатия объём низкий.
+  // Всплеск объёма обязателен на сигнальной свече (volumeSpike в analyzeMarket).
+  const breakoutWatch = compression && lastAdx.adx >= 15 && lastAdx.adx <= 28 && !highVolatility;
 
   let regime: MarketRegime = 'unknown';
   if (highVolatility) regime = 'high_volatility';
@@ -436,7 +474,7 @@ export function detectMarketRegime(candles: Candle[]) {
       ema50: lastEma50,
       ema200: lastEma200,
       bbWidth,
-      avgVol20, // теперь это медиана
+      avgVol20,
       volumeMedian: regimeVolumeCheck.medianVolume,
       volumeRatio: regimeVolumeCheck.ratio,
     }
@@ -471,13 +509,38 @@ export function analyzeMarket(
   balance: number = STARTING_BALANCE,
   htf: HtfFilterOptions = DEFAULT_HTF_FILTER
 ): StrategySignal {
+  const n = candles.length;
   const closes = candles.map(c => c.close);
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
-  const opens = candles.map(c => c.open);
   const volumes = candles.map(c => c.volume);
 
-  const regimeInfo = detectMarketRegime(candles);
+  if (n < 40) {
+    return emptySignal(closes[n - 1] ?? 0);
+  }
+
+  // ============================================================================
+  // Определение сигнальной свечи:
+  // если последняя свеча массива ещё формируется — сигнальная предпоследняя,
+  // если формирующая уже отброшена адаптером (dropFormingCandle) — последняя.
+  // Это убирает лаг в один бар и ложный not_trading_hour на открытии сессии.
+  // ============================================================================
+  const barMs = inferBarMs(candles);
+  const now = Date.now();
+  const lastCandleTime = candles[n - 1].time;
+  const lastIsForming = lastCandleTime + barMs > now;
+  const signalIndex = lastIsForming ? n - 2 : n - 1;
+  const setupIndex = signalIndex - 1;
+
+  if (setupIndex < 1) {
+    return emptySignal(closes[n - 1] ?? 0);
+  }
+
+  // ============================================================================
+  // Режим рынка — по SETUP-свече (до импульса), а не по сигнальной
+  // ============================================================================
+  const regimeInfo = detectMarketRegime(candles, setupIndex);
+
   const macd = MACD.calculate({
     values: closes,
     fastPeriod: 12,
@@ -496,33 +559,32 @@ export function analyzeMarket(
     macd.length < 2 ||
     rsi.length < 2 ||
     atr.length < 2 ||
-    bb.length < 2 ||
-    candles.length < 40
+    bb.length < 2
   ) {
-    return emptySignal(closes[closes.length - 1] ?? 0);
+    return emptySignal(closes[n - 1] ?? 0);
   }
 
-  // ============================================================================
-  // Закрытая свеча для сигнала
-  // ============================================================================
-  const signalIndex = candles.length - 2;  // предыдущая закрытая свеча
   const signalCandle = candles[signalIndex];
   const signalTime = signalCandle.time;
-
-  const price = closes[signalIndex];
+  const price = signalCandle.close;
   const regime = regimeInfo.regime;
-  const ind = regimeInfo.indicators;
-  const lastAtr = atr[atr.length - 2];
-  const lastRsi = rsi[rsi.length - 2];
+
+  // Значения индикаторов — строго на сигнальной свече
+  const lastAtr = indicatorAt(atr, signalIndex, n);
+  const lastRsi = indicatorAt(rsi, signalIndex, n);
+  const lastBb = indicatorAt(bb, signalIndex, n);
+
+  if (lastAtr === undefined || lastRsi === undefined || lastBb === undefined) {
+    return emptySignal(price, regime);
+  }
+
   const lastCandle = signalCandle;
-  const lastBb = bb[bb.length - 2];
-  const lastTs = signalTime;
 
   // ============================================================================
   // Проверка свежести данных
   // ============================================================================
-  const lastAvailableCandleTime = candles[candles.length - 1].time;
-  const ageMs = Date.now() - lastAvailableCandleTime;
+  const lastAvailableCandleTime = candles[n - 1].time;
+  const ageMs = now - lastAvailableCandleTime;
   const ageMinutes = ageMs / 60_000;
 
   if (ageMinutes > 20) {
@@ -537,18 +599,33 @@ export function analyzeMarket(
     };
   }
 
-  if (!isTradingHour(lastTs)) {
+  if (!isTradingHour(signalTime)) {
     return {
       ...emptySignal(price, regime),
-      indicators: { ready: true, skipped: true, regime, reject: 'not_trading_hour' }
+      indicators: {
+        ready: true,
+        skipped: true,
+        regime,
+        reject: 'not_trading_hour',
+        signalTimeUtc: new Date(signalTime).toISOString(),
+      }
     };
   }
 
   // ============================================================================
-  // Volume check для сигнальной свечи (используем ту же закрытую свечу, что и цену/RSI/BB/тело)
+  // Volume check для сигнальной свечи
   // ============================================================================
   const volumeCheck = checkSignalVolume(volumes, signalIndex);
   const volumeSpike = volumeCheck.ok;
+
+  // ============================================================================
+  // Параметры пробоя и точные триггеры (считаются один раз, логируются всегда)
+  // ============================================================================
+  const candleBody = Math.abs(lastCandle.close - lastCandle.open);
+  const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
+  const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
+  const upperTrigger = lastBb.upper + atrBuffer;
+  const lowerTrigger = lastBb.lower - atrBuffer;
 
   let longSignal = false;
   let shortSignal = false;
@@ -558,12 +635,8 @@ export function analyzeMarket(
   let breakoutSide: 'long' | 'short' | 'none' = 'none';
 
   if (regime === 'breakout_watch') {
-    const candleBody = Math.abs(lastCandle.close - lastCandle.open);
-    const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
-    const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
-
-    breakoutUp = price > lastBb.upper + atrBuffer && candleBody >= minBody && lastRsi > 55 && volumeSpike;
-    breakoutDown = price < lastBb.lower - atrBuffer && candleBody >= minBody && lastRsi < 45 && volumeSpike;
+    breakoutUp = price > upperTrigger && candleBody >= minBody && lastRsi > 55 && volumeSpike;
+    breakoutDown = price < lowerTrigger && candleBody >= minBody && lastRsi < 45 && volumeSpike;
 
     if (breakoutUp) breakoutSide = 'long';
     if (breakoutDown) breakoutSide = 'short';
@@ -574,7 +647,7 @@ export function analyzeMarket(
   if (htf.enabled && sideWouldBe !== 'none') {
     const minAdx = htf.minAdx1h ?? 18;
     const series = htf.precomputedHtf ?? buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
-    const st = getHtfBiasAt(series, lastTs);
+    const st = getHtfBiasAt(series, signalTime);
 
     if (!st) {
       return {
@@ -609,6 +682,8 @@ export function analyzeMarket(
           sideWouldBe,
           htfEma20: st.ema20,
           htfEma200: st.ema200,
+          upperTrigger,
+          lowerTrigger,
           volumeSpike,
           volumeCurrent: volumeCheck.signalVolume,
           volumeMedian: volumeCheck.medianVolume,
@@ -635,16 +710,12 @@ export function analyzeMarket(
   // Детализация reject-причин
   // ============================================================================
   if (side === 'none') {
-    const candleBody = Math.abs(lastCandle.close - lastCandle.open);
-    const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
-    const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
-
     const rejectReasons: string[] = [];
 
     if (regime !== 'breakout_watch') rejectReasons.push('regime_not_breakout_watch');
     if (breakoutUp === false && breakoutDown === false) {
-      if (price <= lastBb.upper + atrBuffer) rejectReasons.push('price_up_not_reached');
-      if (price >= lastBb.lower - atrBuffer) rejectReasons.push('price_down_not_reached');
+      if (price <= upperTrigger) rejectReasons.push('price_up_not_reached');
+      if (price >= lowerTrigger) rejectReasons.push('price_down_not_reached');
       if (candleBody < minBody) rejectReasons.push('body_too_small');
       if (lastRsi <= 55 && lastRsi >= 45) rejectReasons.push('rsi_neutral');
       if (!volumeSpike) rejectReasons.push('volume_below_median_threshold');
@@ -665,6 +736,10 @@ export function analyzeMarket(
         bbUpper: lastBb.upper,
         bbLower: lastBb.lower,
         atrBuffer,
+        upperTrigger,
+        lowerTrigger,
+        distanceToLongTrigger: upperTrigger - price,
+        distanceToShortTrigger: price - lowerTrigger,
         candleBody,
         minBody,
         volumeSpike,
@@ -673,6 +748,9 @@ export function analyzeMarket(
         volumeRatio: volumeCheck.ratio,
         volumeThreshold: volumeCheck.threshold,
         volumeSampleSize: volumeCheck.sampleSize,
+        signalTimeUtc: new Date(signalTime).toISOString(),
+        signalIndex,
+        lastIsForming,
         reject: 'no_breakout_conditions',
         rejectReasons,
       }
@@ -728,12 +806,15 @@ export function analyzeMarket(
       breakoutUp,
       breakoutDown,
       htfEnabled: htf.enabled,
+      upperTrigger,
+      lowerTrigger,
       volumeSpike,
       volumeCurrent: volumeCheck.signalVolume,
       volumeMedian: volumeCheck.medianVolume,
       volumeRatio: volumeCheck.ratio,
       volumeThreshold: volumeCheck.threshold,
       volumeSampleSize: volumeCheck.sampleSize,
+      signalTimeUtc: new Date(signalTime).toISOString(),
     }
   };
 }
