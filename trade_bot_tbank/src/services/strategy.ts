@@ -583,7 +583,7 @@ export function analyzeMarket(
   // ============================================================================
   // Проверка свежести данных
   // ============================================================================
-  const lastAvailableCandleTime = candles[n - 1].time;
+  const lastAvailableCandleTime = candles[n - 1].time + barMs;
   const ageMs = now - lastAvailableCandleTime;
   const ageMinutes = ageMs / 60_000;
 
