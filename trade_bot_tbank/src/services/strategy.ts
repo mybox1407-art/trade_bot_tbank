@@ -49,7 +49,7 @@ const VOLUME_SPIKE_MULTIPLIER = 1.1;
 // ТИПЫ
 // ============================================================================
 export interface Candle {
-  time: number;        // UTC milliseconds (нормализовано)
+  time: number;
   open: number;
   high: number;
   low: number;
@@ -61,7 +61,7 @@ export type MarketRegime = 'trend_up' | 'trend_down' | 'range' | 'breakout_watch
 export type HtfBias = 'up' | 'down' | 'neutral';
 
 export interface HtfBarState {
-  time: number;        // UTC milliseconds
+  time: number;
   bias: HtfBias;
   adx: number;
   ema20: number;
@@ -165,22 +165,13 @@ function checkSignalVolume(
   };
 }
 
-/**
- * Нормализует timestamp в миллисекунды.
- * MOEX и многие API отдают Unix-секунды (10 цифр). JS Date ожидает миллисекунды (13 цифр).
- */
-function toMs(ts: number): number {
-  return ts < 1e12 ? ts * 1000 : ts;
-}
-
-/** Проверка торгового окна в UTC (07:00–21:00) */
 export function isTradingHour(ts: number) {
-  const h = new Date(toMs(ts)).getUTCHours();
+  const h = new Date(ts).getUTCHours();
   return h >= TRADING_HOUR_UTC_FROM && h < TRADING_HOUR_UTC_TO;
 }
 
 function sessionStartTs(ts: number): number {
-  const d = new Date(toMs(ts));
+  const d = new Date(ts);
   return Date.UTC(
     d.getUTCFullYear(),
     d.getUTCMonth(),
@@ -236,7 +227,7 @@ function getStructureStop(params: {
 
   let stop = recentHigh + pad;
   if (stop - price < minDist) stop = price + minDist;
-  if (stop - price > maxDist) stop = price + maxDist;
+  if (stop - price > maxDist) stop = price - maxDist;
   if (stop <= price) stop = price + minDist;
   return stop;
 }
@@ -274,7 +265,7 @@ function calcPositionSize(params: {
 // HTF (1H bias)
 // ============================================================================
 export function hourBucketStart(ts: number) {
-  const d = new Date(toMs(ts));
+  const d = new Date(ts);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), 0, 0, 0);
 }
 
@@ -410,7 +401,7 @@ export function detectMarketRegime(candles: Candle[]) {
   // Для режима используем медиану по последним 20 закрытым свечам (исключая текущую формирующуюся)
   const regimeSignalIndex = candles.length - 2;
   const regimeVolumeCheck = checkSignalVolume(volumes, regimeSignalIndex);
-  const avgVol20 = regimeVolumeCheck.medianVolume;
+  const avgVol20 = regimeVolumeCheck.medianVolume; // используем медиану как baseline
 
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
@@ -445,7 +436,7 @@ export function detectMarketRegime(candles: Candle[]) {
       ema50: lastEma50,
       ema200: lastEma200,
       bbWidth,
-      avgVol20,
+      avgVol20, // теперь это медиана
       volumeMedian: regimeVolumeCheck.medianVolume,
       volumeRatio: regimeVolumeCheck.ratio,
     }
@@ -525,12 +516,13 @@ export function analyzeMarket(
   const lastRsi = rsi[rsi.length - 2];
   const lastCandle = signalCandle;
   const lastBb = bb[bb.length - 2];
+  const lastTs = signalTime;
 
   // ============================================================================
   // Проверка свежести данных
   // ============================================================================
   const lastAvailableCandleTime = candles[candles.length - 1].time;
-  const ageMs = Date.now() - toMs(lastAvailableCandleTime);
+  const ageMs = Date.now() - lastAvailableCandleTime;
   const ageMinutes = ageMs / 60_000;
 
   if (ageMinutes > 20) {
@@ -539,16 +531,13 @@ export function analyzeMarket(
       indicators: {
         ready: true,
         reject: 'stale_data',
-        lastCandleTime: new Date(toMs(lastAvailableCandleTime)).toISOString(),
+        lastCandleTime: new Date(lastAvailableCandleTime).toISOString(),
         ageMinutes,
       }
     };
   }
 
-  // ============================================================================
-  // Проверка торгового окна (ИСПРАВЛЕНО: нормализация timestamp)
-  // ============================================================================
-  if (!isTradingHour(signalTime)) {
+  if (!isTradingHour(lastTs)) {
     return {
       ...emptySignal(price, regime),
       indicators: { ready: true, skipped: true, regime, reject: 'not_trading_hour' }
@@ -556,7 +545,7 @@ export function analyzeMarket(
   }
 
   // ============================================================================
-  // Volume check для сигнальной свечи
+  // Volume check для сигнальной свечи (используем ту же закрытую свечу, что и цену/RSI/BB/тело)
   // ============================================================================
   const volumeCheck = checkSignalVolume(volumes, signalIndex);
   const volumeSpike = volumeCheck.ok;
@@ -585,7 +574,7 @@ export function analyzeMarket(
   if (htf.enabled && sideWouldBe !== 'none') {
     const minAdx = htf.minAdx1h ?? 18;
     const series = htf.precomputedHtf ?? buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
-    const st = getHtfBiasAt(series, signalTime);
+    const st = getHtfBiasAt(series, lastTs);
 
     if (!st) {
       return {
@@ -746,21 +735,5 @@ export function analyzeMarket(
       volumeThreshold: volumeCheck.threshold,
       volumeSampleSize: volumeCheck.sampleSize,
     }
-  };
-}
-
-/**
- * Нормализация «сырой» свечи от MOEX/биржи:
- * - time: секунды → миллисекунды
- * - остальные поля: приведение к number
- */
-export function normalizeCandle(raw: any): Candle {
-  return {
-    time: toMs(raw.time ?? raw.ts ?? raw.timestamp),
-    open: Number(raw.open ?? raw.o),
-    high: Number(raw.high ?? raw.h),
-    low: Number(raw.low ?? raw.l),
-    close: Number(raw.close ?? raw.c),
-    volume: Number(raw.volume ?? raw.v ?? raw.vol),
   };
 }
