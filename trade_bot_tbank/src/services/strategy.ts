@@ -57,7 +57,14 @@ export interface Candle {
   volume: number;
 }
 
-export type MarketRegime = 'trend_up' | 'trend_down' | 'range' | 'breakout_watch' | 'high_volatility' | 'unknown';
+export type MarketRegime =
+  | 'trend_up'
+  | 'trend_down'
+  | 'range'
+  | 'breakout_watch'
+  | 'high_volatility'
+  | 'unknown';
+
 export type HtfBias = 'up' | 'down' | 'neutral';
 
 export interface HtfBarState {
@@ -76,7 +83,10 @@ export interface HtfFilterOptions {
   precomputedHtf?: HtfBarState[];
 }
 
-export const DEFAULT_HTF_FILTER: HtfFilterOptions = { enabled: false, minAdx1h: 18 };
+export const DEFAULT_HTF_FILTER: HtfFilterOptions = {
+  enabled: false,
+  minAdx1h: 18
+};
 
 export interface StrategySignal {
   [key: string]: any;
@@ -109,7 +119,9 @@ function prev<T>(arr: T[]) {
 }
 
 function mean(values: number[]) {
-  return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+  return values.length
+    ? values.reduce((a, b) => a + b, 0) / values.length
+    : 0;
 }
 
 function median(values: number[]): number {
@@ -132,10 +144,12 @@ function median(values: number[]): number {
  */
 function inferBarMs(candles: Candle[]): number {
   const deltas: number[] = [];
+
   for (let i = Math.max(1, candles.length - 12); i < candles.length; i++) {
     const d = candles[i].time - candles[i - 1].time;
     if (Number.isFinite(d) && d > 0) deltas.push(d);
   }
+
   return deltas.length ? Math.min(...deltas) : 15 * 60_000;
 }
 
@@ -143,9 +157,14 @@ function inferBarMs(candles: Candle[]): number {
  * Доступ к значению индикатора по индексу свечи.
  * Индикаторные массивы короче массива свечей — вычисляем смещение.
  */
-function indicatorAt<T>(arr: T[], candleIndex: number, candleCount: number): T | undefined {
+function indicatorAt<T>(
+  arr: T[],
+  candleIndex: number,
+  candleCount: number
+): T | undefined {
   const offset = candleCount - arr.length;
   const i = candleIndex - offset;
+
   return i >= 0 && i < arr.length ? arr[i] : undefined;
 }
 
@@ -162,7 +181,7 @@ function checkSignalVolume(
   volumes: number[],
   signalIndex: number,
   lookback = VOLUME_LOOKBACK,
-  multiplier = VOLUME_SPIKE_MULTIPLIER,
+  multiplier = VOLUME_SPIKE_MULTIPLIER
 ): VolumeCheck {
   const signalVolume = volumes[signalIndex] ?? 0;
 
@@ -184,7 +203,7 @@ function checkSignalVolume(
     medianVolume,
     threshold,
     ratio,
-    sampleSize: baselineVolumes.length,
+    sampleSize: baselineVolumes.length
   };
 }
 
@@ -195,6 +214,7 @@ export function isTradingHour(ts: number) {
 
 function sessionStartTs(ts: number): number {
   const d = new Date(ts);
+
   return Date.UTC(
     d.getUTCFullYear(),
     d.getUTCMonth(),
@@ -206,7 +226,10 @@ function sessionStartTs(ts: number): number {
   );
 }
 
-function getSessionRange(candles: Candle[], ts: number): { high: number; low: number } | null {
+function getSessionRange(
+  candles: Candle[],
+  ts: number
+): { high: number; low: number } | null {
   const start = sessionStartTs(ts);
   let hi = -Infinity;
   let lo = Infinity;
@@ -214,14 +237,19 @@ function getSessionRange(candles: Candle[], ts: number): { high: number; low: nu
 
   for (let i = candles.length - 1; i >= 0; i--) {
     const c = candles[i];
+
     if (c.time < start) break;
     if (c.time > ts) continue;
+
     hi = Math.max(hi, c.high);
     lo = Math.min(lo, c.low);
     n += 1;
   }
 
-  if (n === 0 || !Number.isFinite(hi) || !Number.isFinite(lo)) return null;
+  if (n === 0 || !Number.isFinite(hi) || !Number.isFinite(lo)) {
+    return null;
+  }
+
   return { high: hi, low: lo };
 }
 
@@ -234,24 +262,35 @@ function getStructureStop(params: {
   atrStopMult: number;
 }) {
   const { side, highs, lows, price, lastAtr, atrStopMult } = params;
+
   const recentHigh = Math.max(...highs.slice(-STOP_STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STOP_STRUCTURE_LOOKBACK));
   const pad = lastAtr * STOP_SWING_PAD_ATR;
-  const minDist = Math.max(lastAtr * atrStopMult, price * MIN_STOP_DISTANCE_RATE);
-  const maxDist = Math.min(lastAtr * 1.8, price * MAX_STOP_DISTANCE_RATE);
+  const minDist = Math.max(
+    lastAtr * atrStopMult,
+    price * MIN_STOP_DISTANCE_RATE
+  );
+  const maxDist = Math.min(
+    lastAtr * 1.8,
+    price * MAX_STOP_DISTANCE_RATE
+  );
 
   if (side === 'long') {
     let stop = recentLow - pad;
+
     if (price - stop < minDist) stop = price - minDist;
     if (price - stop > maxDist) stop = price - maxDist;
     if (stop >= price) stop = price - minDist;
+
     return stop;
   }
 
   let stop = recentHigh + pad;
+
   if (stop - price < minDist) stop = price + minDist;
   if (stop - price > maxDist) stop = price + maxDist;
   if (stop <= price) stop = price + minDist;
+
   return stop;
 }
 
@@ -263,25 +302,34 @@ function calcPositionSize(params: {
 }) {
   const { price, stopLossPrice, riskCapital, balance } = params;
   const stopDist = Math.abs(price - stopLossPrice);
+
   if (stopDist <= 0 || price <= 0) {
-    return { quantity: null as number | null, positionSize: null as number | null };
+    return {
+      quantity: null as number | null,
+      positionSize: null as number | null
+    };
   }
 
   const commPerShare = price * ROUND_TRIP_COMMISSION_RATE;
   const riskPerShare = stopDist + commPerShare;
+
   if (commPerShare / riskPerShare > MAX_COMMISSION_SHARE_OF_RISK) {
     return { quantity: null, positionSize: null };
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
   const maxQty = Math.floor((balance * MAX_POSITION_FRAC) / price);
+
   quantity = Math.min(quantity, maxQty);
 
   if (quantity < MIN_QUANTITY) {
     return { quantity: null, positionSize: null };
   }
 
-  return { quantity, positionSize: quantity * price };
+  return {
+    quantity,
+    positionSize: quantity * price
+  };
 }
 
 // ============================================================================
@@ -289,14 +337,25 @@ function calcPositionSize(params: {
 // ============================================================================
 export function hourBucketStart(ts: number) {
   const d = new Date(ts);
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), 0, 0, 0);
+
+  return Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate(),
+    d.getUTCHours(),
+    0,
+    0,
+    0
+  );
 }
 
 export function aggregateTo1h(candles15: Candle[]) {
   const map = new Map<number, Candle>();
+
   for (const c of candles15) {
     const key = hourBucketStart(c.time);
     const prevBar = map.get(key);
+
     if (!prevBar) {
       map.set(key, {
         time: key,
@@ -313,10 +372,14 @@ export function aggregateTo1h(candles15: Candle[]) {
       prevBar.volume += c.volume;
     }
   }
+
   return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
-export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18) {
+export function buildHtfBiasSeries(
+  hours: Candle[],
+  minAdx1h = 18
+) {
   if (hours.length < 100) return [];
 
   const closes = hours.map(h => h.close);
@@ -326,7 +389,12 @@ export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18) {
   const ema20Arr = EMA.calculate({ period: 20, values: closes });
   const ema50Arr = EMA.calculate({ period: 50, values: closes });
   const ema200Arr = EMA.calculate({ period: 200, values: closes });
-  const adxArr = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const adxArr = ADX.calculate({
+    period: 14,
+    high: highs,
+    low: lows,
+    close: closes
+  });
 
   const n = hours.length;
   const offE20 = n - ema20Arr.length;
@@ -335,12 +403,16 @@ export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18) {
   const offAdx = n - adxArr.length;
 
   const out: HtfBarState[] = [];
+
   for (let i = 0; i < n; i++) {
     const i20 = i - offE20;
     const i50 = i - offE50;
     const i200 = i - offE200;
     const iAdx = i - offAdx;
-    if (i20 < 0 || i50 < 0 || i200 < 0 || iAdx < 0) continue;
+
+    if (i20 < 0 || i50 < 0 || i200 < 0 || iAdx < 0) {
+      continue;
+    }
 
     const ema20 = ema20Arr[i20];
     const ema50 = ema50Arr[i50];
@@ -350,8 +422,12 @@ export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18) {
     const adxOk = minAdx1h <= 0 || adxVal >= minAdx1h;
 
     let bias: HtfBias = 'neutral';
-    if (adxOk && close > ema200 && ema20 > ema50) bias = 'up';
-    else if (adxOk && close < ema200 && ema20 < ema50) bias = 'down';
+
+    if (adxOk && close > ema200 && ema20 > ema50) {
+      bias = 'up';
+    } else if (adxOk && close < ema200 && ema20 < ema50) {
+      bias = 'down';
+    }
 
     out.push({
       time: hours[i].time,
@@ -363,11 +439,16 @@ export function buildHtfBiasSeries(hours: Candle[], minAdx1h = 18) {
       close
     });
   }
+
   return out;
 }
 
-export function getHtfBiasAt(series: HtfBarState[], ts15: number) {
+export function getHtfBiasAt(
+  series: HtfBarState[],
+  ts15: number
+) {
   if (!series.length) return null;
+
   let lo = 0;
   let hi = series.length - 1;
   let best: HtfBarState | null = null;
@@ -375,6 +456,7 @@ export function getHtfBiasAt(series: HtfBarState[], ts15: number) {
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
     const closeTs = series[mid].time + 3_600_000;
+
     if (closeTs <= ts15) {
       best = series[mid];
       lo = mid + 1;
@@ -382,7 +464,27 @@ export function getHtfBiasAt(series: HtfBarState[], ts15: number) {
       hi = mid - 1;
     }
   }
+
   return best;
+}
+
+/**
+ * HTF допускает сделку, если старший таймфрейм:
+ * - совпадает с направлением входа;
+ * - нейтрален.
+ *
+ * Блокировка остаётся только при явно противоположном направлении:
+ * Long при HTF down и Short при HTF up.
+ */
+function isHtfDirectionAllowed(
+  side: 'long' | 'short',
+  htfBias: HtfBias
+): boolean {
+  if (side === 'long') {
+    return htfBias !== 'down';
+  }
+
+  return htfBias !== 'up';
 }
 
 // ============================================================================
@@ -396,10 +498,14 @@ export function getHtfBiasAt(series: HtfBarState[], ts15: number) {
  * (предшествующей сигнальной), чтобы импульсная свеча пробоя не меняла
  * режим в trend_* и не блокировала собственный вход.
  */
-export function detectMarketRegime(candles: Candle[], asOfIndex?: number) {
+export function detectMarketRegime(
+  candles: Candle[],
+  asOfIndex?: number
+) {
   const end = asOfIndex === undefined
     ? candles.length
     : Math.max(0, Math.min(asOfIndex + 1, candles.length));
+
   const view = candles.slice(0, end);
 
   const closes = view.map(c => c.close);
@@ -407,12 +513,29 @@ export function detectMarketRegime(candles: Candle[], asOfIndex?: number) {
   const lows = view.map(c => c.low);
   const volumes = view.map(c => c.volume);
 
-  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
-  const adx = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const atr = ATR.calculate({
+    period: 14,
+    high: highs,
+    low: lows,
+    close: closes
+  });
+
+  const adx = ADX.calculate({
+    period: 14,
+    high: highs,
+    low: lows,
+    close: closes
+  });
+
   const ema20 = EMA.calculate({ period: 20, values: closes });
   const ema50 = EMA.calculate({ period: 50, values: closes });
   const ema200 = EMA.calculate({ period: 200, values: closes });
-  const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
+
+  const bb = BollingerBands.calculate({
+    period: 20,
+    values: closes,
+    stdDev: 2
+  });
 
   if (
     atr.length < 2 ||
@@ -422,7 +545,11 @@ export function detectMarketRegime(candles: Candle[], asOfIndex?: number) {
     ema200.length < 1 ||
     bb.length < 1
   ) {
-    return { regime: 'unknown' as MarketRegime, ready: false, indicators: null };
+    return {
+      regime: 'unknown' as MarketRegime,
+      ready: false,
+      indicators: null
+    };
   }
 
   const lastClose = last(closes);
@@ -434,7 +561,6 @@ export function detectMarketRegime(candles: Candle[], asOfIndex?: number) {
   const lastEma200 = last(ema200);
   const lastBb = last(bb);
 
-  // Базовая линия объёма — справочно, для indicators
   const regimeSignalIndex = view.length - 2;
   const regimeVolumeCheck = checkSignalVolume(volumes, regimeSignalIndex);
   const avgVol20 = regimeVolumeCheck.medianVolume;
@@ -442,19 +568,45 @@ export function detectMarketRegime(candles: Candle[], asOfIndex?: number) {
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
   const adxRising = lastAdx.adx > prevAdx.adx;
-  const adxOk = lastAdx.adx >= MIN_ADX_TREND && (adxRising || lastAdx.adx >= 26);
-  const stackUp = lastEma20 > lastEma50 && lastEma50 > lastEma200;
-  const stackDown = lastEma20 < lastEma50 && lastEma50 < lastEma200;
+  const adxOk =
+    lastAdx.adx >= MIN_ADX_TREND &&
+    (adxRising || lastAdx.adx >= 26);
+
+  const stackUp =
+    lastEma20 > lastEma50 &&
+    lastEma50 > lastEma200;
+
+  const stackDown =
+    lastEma20 < lastEma50 &&
+    lastEma50 < lastEma200;
+
   const highVolatility = atrPct > 0.028 || bbWidth > 0.13;
   const compression = bbWidth <= BB_SQUEEZE_THRESHOLD;
-  const trendUp = !highVolatility && lastClose > lastEma200 && stackUp && adxOk;
-  const trendDown = !highVolatility && lastClose < lastEma200 && stackDown && adxOk;
-  const range = lastAdx.adx < MIN_ADX_RANGE && bbWidth < 0.08;
-  // Объёмный всплеск здесь НЕ требуется: во время сжатия объём низкий.
-  // Всплеск объёма обязателен на сигнальной свече (volumeSpike в analyzeMarket).
-  const breakoutWatch = compression && lastAdx.adx >= 15 && lastAdx.adx <= 28 && !highVolatility;
+
+  const trendUp =
+    !highVolatility &&
+    lastClose > lastEma200 &&
+    stackUp &&
+    adxOk;
+
+  const trendDown =
+    !highVolatility &&
+    lastClose < lastEma200 &&
+    stackDown &&
+    adxOk;
+
+  const range =
+    lastAdx.adx < MIN_ADX_RANGE &&
+    bbWidth < 0.08;
+
+  const breakoutWatch =
+    compression &&
+    lastAdx.adx >= 15 &&
+    lastAdx.adx <= 28 &&
+    !highVolatility;
 
   let regime: MarketRegime = 'unknown';
+
   if (highVolatility) regime = 'high_volatility';
   else if (trendUp) regime = 'trend_up';
   else if (trendDown) regime = 'trend_down';
@@ -476,12 +628,15 @@ export function detectMarketRegime(candles: Candle[], asOfIndex?: number) {
       bbWidth,
       avgVol20,
       volumeMedian: regimeVolumeCheck.medianVolume,
-      volumeRatio: regimeVolumeCheck.ratio,
+      volumeRatio: regimeVolumeCheck.ratio
     }
   };
 }
 
-function emptySignal(price: number, regime: MarketRegime = 'unknown'): StrategySignal {
+function emptySignal(
+  price: number,
+  regime: MarketRegime = 'unknown'
+): StrategySignal {
   return {
     price,
     buy: false,
@@ -519,15 +674,10 @@ export function analyzeMarket(
     return emptySignal(closes[n - 1] ?? 0);
   }
 
-  // ============================================================================
-  // Определение сигнальной свечи:
-  // если последняя свеча массива ещё формируется — сигнальная предпоследняя,
-  // если формирующая уже отброшена адаптером (dropFormingCandle) — последняя.
-  // Это убирает лаг в один бар и ложный not_trading_hour на открытии сессии.
-  // ============================================================================
   const barMs = inferBarMs(candles);
   const now = Date.now();
   const lastCandleTime = candles[n - 1].time;
+
   const lastIsForming = lastCandleTime + barMs > now;
   const signalIndex = lastIsForming ? n - 2 : n - 1;
   const setupIndex = signalIndex - 1;
@@ -536,9 +686,6 @@ export function analyzeMarket(
     return emptySignal(closes[n - 1] ?? 0);
   }
 
-  // ============================================================================
-  // Режим рынка — по SETUP-свече (до импульса), а не по сигнальной
-  // ============================================================================
   const regimeInfo = detectMarketRegime(candles, setupIndex);
 
   const macd = MACD.calculate({
@@ -549,9 +696,21 @@ export function analyzeMarket(
     SimpleMAOscillator: false,
     SimpleMASignal: false
   });
+
   const rsi = RSI.calculate({ period: 14, values: closes });
-  const atr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
-  const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
+
+  const atr = ATR.calculate({
+    period: 14,
+    high: highs,
+    low: lows,
+    close: closes
+  });
+
+  const bb = BollingerBands.calculate({
+    period: 20,
+    values: closes,
+    stdDev: 2
+  });
 
   if (
     !regimeInfo.ready ||
@@ -569,20 +728,20 @@ export function analyzeMarket(
   const price = signalCandle.close;
   const regime = regimeInfo.regime;
 
-  // Значения индикаторов — строго на сигнальной свече
   const lastAtr = indicatorAt(atr, signalIndex, n);
   const lastRsi = indicatorAt(rsi, signalIndex, n);
   const lastBb = indicatorAt(bb, signalIndex, n);
 
-  if (lastAtr === undefined || lastRsi === undefined || lastBb === undefined) {
+  if (
+    lastAtr === undefined ||
+    lastRsi === undefined ||
+    lastBb === undefined
+  ) {
     return emptySignal(price, regime);
   }
 
   const lastCandle = signalCandle;
 
-  // ============================================================================
-  // Проверка свежести данных
-  // ============================================================================
   const lastAvailableCandleTime = candles[n - 1].time + barMs;
   const ageMs = now - lastAvailableCandleTime;
   const ageMinutes = ageMs / 60_000;
@@ -594,7 +753,7 @@ export function analyzeMarket(
         ready: true,
         reject: 'stale_data',
         lastCandleTime: new Date(lastAvailableCandleTime).toISOString(),
-        ageMinutes,
+        ageMinutes
       }
     };
   }
@@ -607,20 +766,14 @@ export function analyzeMarket(
         skipped: true,
         regime,
         reject: 'not_trading_hour',
-        signalTimeUtc: new Date(signalTime).toISOString(),
+        signalTimeUtc: new Date(signalTime).toISOString()
       }
     };
   }
 
-  // ============================================================================
-  // Volume check для сигнальной свечи
-  // ============================================================================
   const volumeCheck = checkSignalVolume(volumes, signalIndex);
   const volumeSpike = volumeCheck.ok;
 
-  // ============================================================================
-  // Параметры пробоя и точные триггеры (считаются один раз, логируются всегда)
-  // ============================================================================
   const candleBody = Math.abs(lastCandle.close - lastCandle.open);
   const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
   const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
@@ -635,8 +788,17 @@ export function analyzeMarket(
   let breakoutSide: 'long' | 'short' | 'none' = 'none';
 
   if (regime === 'breakout_watch') {
-    breakoutUp = price > upperTrigger && candleBody >= minBody && lastRsi > 55 && volumeSpike;
-    breakoutDown = price < lowerTrigger && candleBody >= minBody && lastRsi < 45 && volumeSpike;
+    breakoutUp =
+      price > upperTrigger &&
+      candleBody >= minBody &&
+      lastRsi > 55 &&
+      volumeSpike;
+
+    breakoutDown =
+      price < lowerTrigger &&
+      candleBody >= minBody &&
+      lastRsi < 45 &&
+      volumeSpike;
 
     if (breakoutUp) breakoutSide = 'long';
     if (breakoutDown) breakoutSide = 'short';
@@ -644,9 +806,18 @@ export function analyzeMarket(
 
   const sideWouldBe: 'long' | 'short' | 'none' = breakoutSide;
 
+  // ============================================================================
+  // HTF-фильтр:
+  // - Long допускается при 1h bias up или neutral;
+  // - Short допускается при 1h bias down или neutral;
+  // - Блокировка — только при явно противоположном тренде 1h.
+  // ============================================================================
   if (htf.enabled && sideWouldBe !== 'none') {
     const minAdx = htf.minAdx1h ?? 18;
-    const series = htf.precomputedHtf ?? buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
+    const series =
+      htf.precomputedHtf ??
+      buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
+
     const st = getHtfBiasAt(series, signalTime);
 
     if (!st) {
@@ -663,15 +834,14 @@ export function analyzeMarket(
           volumeCurrent: volumeCheck.signalVolume,
           volumeMedian: volumeCheck.medianVolume,
           volumeRatio: volumeCheck.ratio,
-          volumeThreshold: volumeCheck.threshold,
+          volumeThreshold: volumeCheck.threshold
         }
       };
     }
 
-    if (breakoutUp && st.bias !== 'up') breakoutUp = false;
-    if (breakoutDown && st.bias !== 'down') breakoutDown = false;
+    const htfAllowed = isHtfDirectionAllowed(sideWouldBe, st.bias);
 
-    if (!breakoutUp && !breakoutDown) {
+    if (!htfAllowed) {
       return {
         ...emptySignal(price, regime),
         indicators: {
@@ -680,7 +850,10 @@ export function analyzeMarket(
           htfBias: st.bias,
           htfAdx: st.adx,
           sideWouldBe,
+          htfAllowed,
+          htfDecision: 'blocked_opposite_bias',
           htfEma20: st.ema20,
+          htfEma50: st.ema50,
           htfEma200: st.ema200,
           upperTrigger,
           lowerTrigger,
@@ -688,17 +861,17 @@ export function analyzeMarket(
           volumeCurrent: volumeCheck.signalVolume,
           volumeMedian: volumeCheck.medianVolume,
           volumeRatio: volumeCheck.ratio,
-          volumeThreshold: volumeCheck.threshold,
+          volumeThreshold: volumeCheck.threshold
         }
       };
     }
   }
 
   let side: 'long' | 'short' | 'none' = 'none';
-  let entryPrice = price;
-  let tp1R = BREAKOUT_TP1_R;
-  let tp2R = BREAKOUT_TP2_R;
-  let atrStopMult = BREAKOUT_ATR_STOP_MULT;
+  const entryPrice = price;
+  const tp1R = BREAKOUT_TP1_R;
+  const tp2R = BREAKOUT_TP2_R;
+  const atrStopMult = BREAKOUT_ATR_STOP_MULT;
 
   if (breakoutUp) {
     side = 'long';
@@ -706,19 +879,33 @@ export function analyzeMarket(
     side = 'short';
   }
 
-  // ============================================================================
-  // Детализация reject-причин
-  // ============================================================================
   if (side === 'none') {
     const rejectReasons: string[] = [];
 
-    if (regime !== 'breakout_watch') rejectReasons.push('regime_not_breakout_watch');
+    if (regime !== 'breakout_watch') {
+      rejectReasons.push('regime_not_breakout_watch');
+    }
+
     if (breakoutUp === false && breakoutDown === false) {
-      if (price <= upperTrigger) rejectReasons.push('price_up_not_reached');
-      if (price >= lowerTrigger) rejectReasons.push('price_down_not_reached');
-      if (candleBody < minBody) rejectReasons.push('body_too_small');
-      if (lastRsi <= 55 && lastRsi >= 45) rejectReasons.push('rsi_neutral');
-      if (!volumeSpike) rejectReasons.push('volume_below_median_threshold');
+      if (price <= upperTrigger) {
+        rejectReasons.push('price_up_not_reached');
+      }
+
+      if (price >= lowerTrigger) {
+        rejectReasons.push('price_down_not_reached');
+      }
+
+      if (candleBody < minBody) {
+        rejectReasons.push('body_too_small');
+      }
+
+      if (lastRsi <= 55 && lastRsi >= 45) {
+        rejectReasons.push('rsi_neutral');
+      }
+
+      if (!volumeSpike) {
+        rejectReasons.push('volume_below_median_threshold');
+      }
     }
 
     return {
@@ -752,32 +939,65 @@ export function analyzeMarket(
         signalIndex,
         lastIsForming,
         reject: 'no_breakout_conditions',
-        rejectReasons,
+        rejectReasons
       }
     };
   }
 
-  const stopLossPrice = getStructureStop({ side, highs, lows, price: entryPrice, lastAtr, atrStopMult });
+  const stopLossPrice = getStructureStop({
+    side,
+    highs,
+    lows,
+    price: entryPrice,
+    lastAtr,
+    atrStopMult
+  });
+
   const initialR = Math.abs(entryPrice - stopLossPrice);
   const stopPct = initialR / entryPrice;
 
-  if (initialR <= 0 || stopPct < MIN_STOP_DISTANCE_RATE || stopPct > MAX_STOP_DISTANCE_RATE) {
+  if (
+    initialR <= 0 ||
+    stopPct < MIN_STOP_DISTANCE_RATE ||
+    stopPct > MAX_STOP_DISTANCE_RATE
+  ) {
     return {
       ...emptySignal(price, regime),
-      indicators: { ready: true, reject: 'stop_distance', stopPct, initialR }
+      indicators: {
+        ready: true,
+        reject: 'stop_distance',
+        stopPct,
+        initialR
+      }
     };
   }
 
-  const takeProfit1Price = side === 'long' ? entryPrice + tp1R * initialR : entryPrice - tp1R * initialR;
-  const takeProfit2Price = side === 'long' ? entryPrice + tp2R * initialR : entryPrice - tp2R * initialR;
+  const takeProfit1Price =
+    side === 'long'
+      ? entryPrice + tp1R * initialR
+      : entryPrice - tp1R * initialR;
+
+  const takeProfit2Price =
+    side === 'long'
+      ? entryPrice + tp2R * initialR
+      : entryPrice - tp2R * initialR;
 
   const riskCapital = balance * MAX_RISK_PER_TRADE;
-  const sized = calcPositionSize({ price: entryPrice, stopLossPrice, riskCapital, balance });
+
+  const sized = calcPositionSize({
+    price: entryPrice,
+    stopLossPrice,
+    riskCapital,
+    balance
+  });
 
   if (sized.quantity == null) {
     return {
       ...emptySignal(price, regime),
-      indicators: { ready: true, reject: 'size_calculation' }
+      indicators: {
+        ready: true,
+        reject: 'size_calculation'
+      }
     };
   }
 
@@ -814,7 +1034,7 @@ export function analyzeMarket(
       volumeRatio: volumeCheck.ratio,
       volumeThreshold: volumeCheck.threshold,
       volumeSampleSize: volumeCheck.sampleSize,
-      signalTimeUtc: new Date(signalTime).toISOString(),
+      signalTimeUtc: new Date(signalTime).toISOString()
     }
   };
 }
