@@ -20,7 +20,7 @@ const MAX_POSITION_FRAC = 0.3;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 const MIN_ADX_TREND = 20;
 const MIN_ADX_RANGE = 18;
-const BB_SQUEEZE_THRESHOLD = 0.05;
+const BB_SQUEEZE_THRESHOLD = 0.06; // Увеличено с 0.05 для более частого breakout_watch
 const STOP_STRUCTURE_LOOKBACK = 8;
 const STOP_SWING_PAD_ATR = 0.18;
 const MAX_EXTENSION_FROM_EMA20 = 0.01;
@@ -62,6 +62,7 @@ export type MarketRegime =
   | 'trend_down'
   | 'range'
   | 'breakout_watch'
+  | 'trend_breakout' // Новый режим для пробоя в направлении тренда
   | 'high_volatility'
   | 'unknown';
 
@@ -605,9 +606,21 @@ export function detectMarketRegime(
     lastAdx.adx <= 28 &&
     !highVolatility;
 
+  // Новый режим: пробой в направлении тренда
+  const trendBreakoutUp =
+    trendUp &&
+    lastClose > lastBb.upper &&
+    adxOk;
+
+  const trendBreakoutDown =
+    trendDown &&
+    lastClose < lastBb.lower &&
+    adxOk;
+
   let regime: MarketRegime = 'unknown';
 
   if (highVolatility) regime = 'high_volatility';
+  else if (trendBreakoutUp || trendBreakoutDown) regime = 'trend_breakout';
   else if (trendUp) regime = 'trend_up';
   else if (trendDown) regime = 'trend_down';
   else if (breakoutWatch) regime = 'breakout_watch';
@@ -657,7 +670,7 @@ function emptySignal(
 }
 
 // ============================================================================
-// ВХОД — ТОЛЬКО BREAKOUT
+// ВХОД — BREAKOUT + TREND CONTINUATION
 // ============================================================================
 export function analyzeMarket(
   candles: Candle[],
@@ -787,6 +800,7 @@ export function analyzeMarket(
   let breakoutDown = false;
   let breakoutSide: 'long' | 'short' | 'none' = 'none';
 
+  // Breakout из breakout_watch
   if (regime === 'breakout_watch') {
     breakoutUp =
       price > upperTrigger &&
@@ -802,6 +816,48 @@ export function analyzeMarket(
 
     if (breakoutUp) breakoutSide = 'long';
     if (breakoutDown) breakoutSide = 'short';
+  }
+
+  // Breakout из trend_breakout (пробой в направлении тренда)
+  if (regime === 'trend_breakout') {
+    const lastClose = regimeInfo.indicators?.lastClose as number ?? price;
+    const lastEma200 = regimeInfo.indicators?.ema200 as number ?? 0;
+
+    if (lastClose > lastEma200) {
+      // uptrend
+      breakoutUp =
+        price > upperTrigger &&
+        candleBody >= minBody &&
+        lastRsi > 50 &&
+        volumeSpike;
+      if (breakoutUp) breakoutSide = 'long';
+    } else {
+      // downtrend
+      breakoutDown =
+        price < lowerTrigger &&
+        candleBody >= minBody &&
+        lastRsi < 50 &&
+        volumeSpike;
+      if (breakoutDown) breakoutSide = 'short';
+    }
+  }
+
+  // Short continuation в trend_down (новое улучшение)
+  let continuationShort = false;
+  if (regime === 'trend_down' && breakoutSide === 'none') {
+    const lastEma20 = regimeInfo.indicators?.ema20 as number ?? 0;
+    const lastEma50 = regimeInfo.indicators?.ema50 as number ?? 0;
+
+    continuationShort =
+      price < lastEma20 &&
+      price < lastEma50 &&
+      lastRsi < 48 &&
+      volumeSpike;
+
+    if (continuationShort) {
+      breakoutSide = 'short';
+      breakoutDown = true;
+    }
   }
 
   const sideWouldBe: 'long' | 'short' | 'none' = breakoutSide;
@@ -869,9 +925,18 @@ export function analyzeMarket(
 
   let side: 'long' | 'short' | 'none' = 'none';
   const entryPrice = price;
-  const tp1R = BREAKOUT_TP1_R;
-  const tp2R = BREAKOUT_TP2_R;
-  const atrStopMult = BREAKOUT_ATR_STOP_MULT;
+  
+  // Выбор TP/R в зависимости от типа сигнала
+  let tp1R = BREAKOUT_TP1_R;
+  let tp2R = BREAKOUT_TP2_R;
+  let atrStopMult = BREAKOUT_ATR_STOP_MULT;
+
+  if (continuationShort) {
+    // Для continuation используем более консервативные TP
+    tp1R = TREND_TP1_R;
+    tp2R = TREND_TP2_R;
+    atrStopMult = 1.2; // Чуть tighter stop
+  }
 
   if (breakoutUp) {
     side = 'long';
@@ -882,11 +947,11 @@ export function analyzeMarket(
   if (side === 'none') {
     const rejectReasons: string[] = [];
 
-    if (regime !== 'breakout_watch') {
-      rejectReasons.push('regime_not_breakout_watch');
+    if (regime !== 'breakout_watch' && regime !== 'trend_breakout' && regime !== 'trend_down') {
+      rejectReasons.push('regime_not_trading');
     }
 
-    if (breakoutUp === false && breakoutDown === false) {
+    if (breakoutUp === false && breakoutDown === false && !continuationShort) {
       if (price <= upperTrigger) {
         rejectReasons.push('price_up_not_reached');
       }
@@ -916,6 +981,7 @@ export function analyzeMarket(
         shortSignal,
         breakoutUp,
         breakoutDown,
+        continuationShort,
         lastRsi,
         regime,
         htfEnabled: htf.enabled,
@@ -1025,6 +1091,7 @@ export function analyzeMarket(
       tp2: takeProfit2Price,
       breakoutUp,
       breakoutDown,
+      continuationShort,
       htfEnabled: htf.enabled,
       upperTrigger,
       lowerTrigger,
