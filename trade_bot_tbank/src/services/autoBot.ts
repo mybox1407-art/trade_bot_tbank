@@ -13,6 +13,11 @@
 // === Изменения 21.08.2026 ===
 // 5) Расширенное логирование volume-метрик (median, ratio, threshold, sampleSize)
 //    для диагностики breakout-фильтра.
+//
+// === Изменения 24.08.2026 ===
+// 6) Увеличен barCloseDelaySec (10 → 20) для лучшей ликвидности.
+// 7) Добавлено логирование htfSeriesLength для диагностики HTF.
+// 8) Динамический slippageTolerance на основе ATR.
 
 import { getCandles, getCurrentPrice } from './exchange';
 import { detectMarketState, computeCoherenceScore } from './marketState';
@@ -36,10 +41,10 @@ export const AUTO_BOT_CONFIG = {
   candlesLimit: 250,
   htfCandlesLimit: 300,
   regimeCheckIntervalMs: 15 * 60 * 1000,
-  barCloseDelaySec: 10,
+  barCloseDelaySec: 20, // Увеличено с 10 для лучшей ликвидности
   dropFormingCandle: true,
   tradingHoursEnabled: true,
-  tradingWindows: [[10 * 60 + 1, 23 * 60 + 45]] as const,
+  tradingWindows: [[10 * 60 + 1, 23 * 60 + 59]] as const, // Расширено до 23:59
   maxSleepMs: 6 * 60 * 60 * 1000,
   logWhenMarketClosed: false,
   positionMonitorIntervalMs: 15 * 1000,
@@ -445,8 +450,10 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       lastRsi: ind.lastRsi,
       breakoutUp: ind.breakoutUp,
       breakoutDown: ind.breakoutDown,
+      continuationShort: ind.continuationShort,
       htfEnabled: ind.htfEnabled,
       htfBias: ind.htfBias,
+      htfSeriesLength: htfSeries.length, // Новое: диагностика HTF
       sideWouldBe: ind.sideWouldBe,
       stopPct: ind.stopPct,
       price: signal.price,
@@ -530,10 +537,10 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     ...getVolumeLogMeta(signal.indicators)
   });
 
-  await tryExecutePendingSignal(symbol);
+  await tryExecutePendingSignal(symbol, signal);
 }
 
-async function tryExecutePendingSignal(symbol: Symbol) {
+async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
   const pending = pendingSignals.get(symbol);
   if (!pending) return;
 
@@ -541,11 +548,21 @@ async function tryExecutePendingSignal(symbol: Symbol) {
     const currentPrice = await getCurrentPrice(symbol);
     const balanceBefore = getBalance();
 
-    const slippageTolerance = 0.001;
+    // Динамический slippage на основе ATR (новое улучшение)
+    const baseTolerance = 0.001;
+    const lastAtr = signal.indicators?.lastAtr as number ?? 0;
+    const atrTolerance = lastAtr > 0 ? lastAtr / pending.entryPrice : 0;
+    const slippageTolerance = baseTolerance + 0.5 * atrTolerance;
+
     const priceDiff = Math.abs(currentPrice - pending.entryPrice) / pending.entryPrice;
 
     if (priceDiff > slippageTolerance) {
-      log('info', `${symbol}: price moved too far (${(priceDiff * 100).toFixed(2)}%), waiting`);
+      log('info', `${symbol}: price moved too far (${(priceDiff * 100).toFixed(2)}%), waiting`, {
+        baseTolerance,
+        atrTolerance,
+        slippageTolerance,
+        priceDiff
+      });
       return;
     }
 
