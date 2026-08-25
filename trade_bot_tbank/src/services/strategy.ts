@@ -37,8 +37,24 @@ const MAX_DAY_EXT = 3.5;
 const BOUNCE_LOOKBACK = 10;
 const MAX_BOUNCE_ATR = 1.1;
 
+// ============================================================================
+// BREAKOUT SETTINGS
+// ============================================================================
 const BREAKOUT_ATR_BUFFER_K = 0.1;
 const BREAKOUT_BODY_ATR_MIN = 0.4;
+
+/**
+ * Максимальный допустимый размер тела breakout-свечи.
+ *
+ * Если сигнал появляется на свече с телом больше 1.8 ATR, движение может быть
+ * уже кульминационным: на 15m значительная часть импульса уже произошла,
+ * поэтому вход на её закрытии часто оказывается запоздалым.
+ *
+ * Работает только для breakout_watch и trend_breakout.
+ * Не применяется к continuationShort.
+ */
+const MAX_BREAKOUT_BODY_ATR = 1.8;
+
 const BREAKOUT_ATR_STOP_MULT = 1.5;
 
 // ============================================================================
@@ -50,46 +66,15 @@ const VOLUME_SPIKE_MULTIPLIER = 1.1;
 // ============================================================================
 // MINIMAL CONTINUATION-SHORT FILTERS
 // ============================================================================
-
-/**
- * Continuation-short разрешается только после реального пробоя вниз:
- * close сигнальной свечи должен быть ниже low предыдущих N свечей.
- */
 const CONTINUATION_BREAKDOWN_LOOKBACK = 6;
-
-/**
- * Небольшой ATR-буфер против пробоя на один тик / ложного касания уровня.
- */
 const CONTINUATION_BREAKDOWN_ATR_BUFFER = 0.05;
-
-/**
- * Сколько предыдущих свечей смотреть на сильный встречный импульс.
- * Фильтр применяется только к continuationShort.
- */
 const SHORT_REVERSAL_LOOKBACK = 3;
-
-/**
- * Если в предыдущих свечах есть зелёная свеча с телом >= 1.2 ATR,
- * новый short не открываем: старый trend_down может уже быть сломан.
- */
 const SHORT_REVERSAL_BODY_ATR = 1.2;
 
 // ============================================================================
 // MINIMAL BREAKOUT-WATCH SHORT FILTER
 // ============================================================================
-
-/**
- * Для short из breakout_watch недостаточно пройти нижнюю Bollinger Band.
- * Сигнальная свеча также обязана закрыться ниже low предыдущих 6 свечей.
- *
- * Это не требует ретеста и не меняет long-сигналы. Цель — отсеять ложные
- * пробои нижней BB, когда фактическая краткосрочная поддержка не сломана.
- */
 const BREAKOUT_BREAKDOWN_LOOKBACK = 6;
-
-/**
- * Мягкий буфер под локальным low — защищает от входов после пробоя на 1 тик.
- */
 const BREAKOUT_BREAKDOWN_ATR_BUFFER = 0.05;
 
 // ============================================================================
@@ -553,13 +538,6 @@ function isHtfDirectionAllowed(
 // ============================================================================
 // РЕЖИМ РЫНКА
 // ============================================================================
-/**
- * Определяет режим рынка по состоянию на свечу с индексом asOfIndex.
- * Если asOfIndex не передан — используется последняя свеча.
- *
- * Для breakout-стратегии передаётся индекс setup-свечи, предшествующей
- * сигнальной: пробойная свеча не должна сама менять режим и блокировать вход.
- */
 export function detectMarketRegime(
   candles: Candle[],
   asOfIndex?: number
@@ -870,17 +848,19 @@ export function analyzeMarket(
   const volumeSpike = volumeCheck.ok;
 
   const candleBody = Math.abs(lastCandle.close - lastCandle.open);
+  const candleBodyAtrRatio = candleBody / lastAtr;
 
   const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
   const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
+  const maxBody = lastAtr * MAX_BREAKOUT_BODY_ATR;
+
+  const breakoutBodyWithinRange =
+    candleBody >= minBody &&
+    candleBody <= maxBody;
 
   const upperTrigger = lastBb.upper + atrBuffer;
   const lowerTrigger = lastBb.lower - atrBuffer;
 
-  // --------------------------------------------------------------------------
-  // Мягкое подтверждение short-breakout из breakout_watch:
-  // закрытие должно быть ниже low предыдущих 6 свечей с небольшим ATR-буфером.
-  // --------------------------------------------------------------------------
   const breakoutPreviousLows = lows.slice(
     Math.max(0, signalIndex - BREAKOUT_BREAKDOWN_LOOKBACK),
     signalIndex
@@ -914,13 +894,13 @@ export function analyzeMarket(
   if (regime === 'breakout_watch') {
     breakoutUp =
       price > upperTrigger &&
-      candleBody >= minBody &&
+      breakoutBodyWithinRange &&
       lastRsi > 55 &&
       volumeSpike;
 
     breakoutDown =
       price < lowerTrigger &&
-      candleBody >= minBody &&
+      breakoutBodyWithinRange &&
       lastRsi < 45 &&
       volumeSpike &&
       breakoutConfirmedDown;
@@ -942,7 +922,7 @@ export function analyzeMarket(
     if (lastClose > lastEma200) {
       breakoutUp =
         price > upperTrigger &&
-        candleBody >= minBody &&
+        breakoutBodyWithinRange &&
         lastRsi > 50 &&
         volumeSpike;
 
@@ -952,7 +932,7 @@ export function analyzeMarket(
     } else {
       breakoutDown =
         price < lowerTrigger &&
-        candleBody >= minBody &&
+        breakoutBodyWithinRange &&
         lastRsi < 50 &&
         volumeSpike;
 
@@ -964,10 +944,6 @@ export function analyzeMarket(
 
   // --------------------------------------------------------------------------
   // Short continuation в trend_down
-  //
-  // Два фильтра:
-  // 1) confirmedBreakdown — close ниже low предыдущих 6 свечей.
-  // 2) !recentBullishImpulse — не шортим после сильного bullish impulse.
   // --------------------------------------------------------------------------
   let continuationShort = false;
 
@@ -1016,9 +992,10 @@ export function analyzeMarket(
     recentBullishImpulseCount = bullishImpulses.length;
 
     maxRecentBullishBody = recentCandles.reduce((maxBody, c) => {
-      const greenBody = c.close > c.open
-        ? c.close - c.open
-        : 0;
+      const greenBody =
+        c.close > c.open
+          ? c.close - c.open
+          : 0;
 
       return Math.max(maxBody, greenBody);
     }, 0);
@@ -1068,6 +1045,13 @@ export function analyzeMarket(
           volumeRatio: volumeCheck.ratio,
           volumeThreshold: volumeCheck.threshold,
 
+          candleBody,
+          lastAtr,
+          candleBodyAtrRatio,
+          minBody,
+          maxBody,
+          breakoutBodyWithinRange,
+
           breakoutPreviousLocalLow,
           breakoutBreakdownThreshold,
           breakoutConfirmedDown,
@@ -1105,6 +1089,13 @@ export function analyzeMarket(
           volumeMedian: volumeCheck.medianVolume,
           volumeRatio: volumeCheck.ratio,
           volumeThreshold: volumeCheck.threshold,
+
+          candleBody,
+          lastAtr,
+          candleBodyAtrRatio,
+          minBody,
+          maxBody,
+          breakoutBodyWithinRange,
 
           breakoutPreviousLocalLow,
           breakoutBreakdownThreshold,
@@ -1169,6 +1160,13 @@ export function analyzeMarket(
       rejectReasons.push('breakout_short_no_confirmed_local_low');
     }
 
+    if (
+      (regime === 'breakout_watch' || regime === 'trend_breakout') &&
+      candleBody > maxBody
+    ) {
+      rejectReasons.push('breakout_body_too_large');
+    }
+
     if (breakoutUp === false && breakoutDown === false && !continuationShort) {
       if (price <= upperTrigger) {
         rejectReasons.push('price_up_not_reached');
@@ -1211,8 +1209,15 @@ export function analyzeMarket(
         lowerTrigger,
         distanceToLongTrigger: upperTrigger - price,
         distanceToShortTrigger: price - lowerTrigger,
+
         candleBody,
+        lastAtr,
+        candleBodyAtrRatio,
         minBody,
+        maxBody,
+        maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
+        breakoutBodyWithinRange,
+
         volumeSpike,
         volumeCurrent: volumeCheck.signalVolume,
         volumeMedian: volumeCheck.medianVolume,
@@ -1281,6 +1286,14 @@ export function analyzeMarket(
         stopPct,
         initialR,
 
+        candleBody,
+        lastAtr,
+        candleBodyAtrRatio,
+        minBody,
+        maxBody,
+        maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
+        breakoutBodyWithinRange,
+
         breakoutPreviousLocalLow,
         breakoutBreakdownThreshold,
         breakoutConfirmedDown,
@@ -1321,6 +1334,14 @@ export function analyzeMarket(
       indicators: {
         ready: true,
         reject: 'size_calculation',
+
+        candleBody,
+        lastAtr,
+        candleBodyAtrRatio,
+        minBody,
+        maxBody,
+        maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
+        breakoutBodyWithinRange,
 
         breakoutPreviousLocalLow,
         breakoutBreakdownThreshold,
@@ -1368,6 +1389,14 @@ export function analyzeMarket(
 
       upperTrigger,
       lowerTrigger,
+
+      candleBody,
+      lastAtr,
+      candleBodyAtrRatio,
+      minBody,
+      maxBody,
+      maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
+      breakoutBodyWithinRange,
 
       volumeSpike,
       volumeCurrent: volumeCheck.signalVolume,
