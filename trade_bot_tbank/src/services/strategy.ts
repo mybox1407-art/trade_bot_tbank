@@ -20,14 +20,16 @@ const MAX_POSITION_FRAC = 0.3;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 const MIN_ADX_TREND = 20;
 const MIN_ADX_RANGE = 18;
-const BB_SQUEEZE_THRESHOLD = 0.06; // Увеличено с 0.05 для более частого breakout_watch
+const BB_SQUEEZE_THRESHOLD = 0.06;
 const STOP_STRUCTURE_LOOKBACK = 8;
 const STOP_SWING_PAD_ATR = 0.18;
 const MAX_EXTENSION_FROM_EMA20 = 0.01;
-// MOEX: Основная 10:00-18:59 МСК (07:00-15:59 UTC) + Вечерняя 19:00-23:49 МСК (16:00-20:49 UTC)
-// Итого: 07:00-21:00 UTC (10:00-00:00 МСК)
+
+// MOEX: основная сессия 10:00–18:59 МСК (07:00–15:59 UTC)
+// + вечерняя 19:00–23:49 МСК (16:00–20:49 UTC).
 const TRADING_HOUR_UTC_FROM = 7;
 const TRADING_HOUR_UTC_TO = 21;
+
 export const MIN_QUANTITY = 2;
 const DEFAULT_TIME_FAIL_BARS = 4;
 
@@ -46,6 +48,37 @@ const VOLUME_LOOKBACK = 20;
 const VOLUME_SPIKE_MULTIPLIER = 1.1;
 
 // ============================================================================
+// MINIMAL CONTINUATION-SHORT FILTERS
+// ============================================================================
+
+/**
+ * Continuation-short разрешается только после реального пробоя вниз:
+ * close сигнальной свечи должен быть ниже low предыдущих N свечей.
+ *
+ * 6 минутных свечей — небольшой контекст. Это не требует ретеста и не должно
+ * существенно снизить частоту нормальных входов в нисходящий тренд.
+ */
+const CONTINUATION_BREAKDOWN_LOOKBACK = 6;
+
+/**
+ * Небольшой ATR-буфер против пробоя на 1 тик / ложного касания уровня.
+ * 0.05 ATR — мягкое условие, не слишком агрессивный фильтр.
+ */
+const CONTINUATION_BREAKDOWN_ATR_BUFFER = 0.05;
+
+/**
+ * Сколько предыдущих свечей смотреть на сильный встречный импульс.
+ * Фильтр применяется только к continuationShort.
+ */
+const SHORT_REVERSAL_LOOKBACK = 3;
+
+/**
+ * Если в предыдущих свечах есть зелёная свеча с телом >= 1.2 ATR,
+ * новый short не открываем: старый trend_down может уже быть сломан.
+ */
+const SHORT_REVERSAL_BODY_ATR = 1.2;
+
+// ============================================================================
 // ТИПЫ
 // ============================================================================
 export interface Candle {
@@ -62,7 +95,7 @@ export type MarketRegime =
   | 'trend_down'
   | 'range'
   | 'breakout_watch'
-  | 'trend_breakout' // Новый режим для пробоя в направлении тренда
+  | 'trend_breakout'
   | 'high_volatility'
   | 'unknown';
 
@@ -141,14 +174,17 @@ function median(values: number[]): number {
 
 /**
  * Определяет длительность бара по последним свечам.
- * Берётся МИНИМАЛЬНАЯ положительная дельта — межсессионные гэпы отбрасываются.
+ * Берётся минимальная положительная дельта — межсессионные гэпы отбрасываются.
  */
 function inferBarMs(candles: Candle[]): number {
   const deltas: number[] = [];
 
   for (let i = Math.max(1, candles.length - 12); i < candles.length; i++) {
     const d = candles[i].time - candles[i - 1].time;
-    if (Number.isFinite(d) && d > 0) deltas.push(d);
+
+    if (Number.isFinite(d) && d > 0) {
+      deltas.push(d);
+    }
   }
 
   return deltas.length ? Math.min(...deltas) : 15 * 60_000;
@@ -210,6 +246,7 @@ function checkSignalVolume(
 
 export function isTradingHour(ts: number) {
   const h = new Date(ts).getUTCHours();
+
   return h >= TRADING_HOUR_UTC_FROM && h < TRADING_HOUR_UTC_TO;
 }
 
@@ -266,11 +303,14 @@ function getStructureStop(params: {
 
   const recentHigh = Math.max(...highs.slice(-STOP_STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STOP_STRUCTURE_LOOKBACK));
+
   const pad = lastAtr * STOP_SWING_PAD_ATR;
+
   const minDist = Math.max(
     lastAtr * atrStopMult,
     price * MIN_STOP_DISTANCE_RATE
   );
+
   const maxDist = Math.min(
     lastAtr * 1.8,
     price * MAX_STOP_DISTANCE_RATE
@@ -315,7 +355,10 @@ function calcPositionSize(params: {
   const riskPerShare = stopDist + commPerShare;
 
   if (commPerShare / riskPerShare > MAX_COMMISSION_SHARE_OF_RISK) {
-    return { quantity: null, positionSize: null };
+    return {
+      quantity: null,
+      positionSize: null
+    };
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
@@ -324,7 +367,10 @@ function calcPositionSize(params: {
   quantity = Math.min(quantity, maxQty);
 
   if (quantity < MIN_QUANTITY) {
-    return { quantity: null, positionSize: null };
+    return {
+      quantity: null,
+      positionSize: null
+    };
   }
 
   return {
@@ -334,7 +380,7 @@ function calcPositionSize(params: {
 }
 
 // ============================================================================
-// HTF (1H bias)
+// HTF (1H BIAS)
 // ============================================================================
 export function hourBucketStart(ts: number) {
   const d = new Date(ts);
@@ -390,6 +436,7 @@ export function buildHtfBiasSeries(
   const ema20Arr = EMA.calculate({ period: 20, values: closes });
   const ema50Arr = EMA.calculate({ period: 50, values: closes });
   const ema200Arr = EMA.calculate({ period: 200, values: closes });
+
   const adxArr = ADX.calculate({
     period: 14,
     high: highs,
@@ -420,6 +467,7 @@ export function buildHtfBiasSeries(
     const ema200 = ema200Arr[i200];
     const adxVal = adxArr[iAdx].adx;
     const close = closes[i];
+
     const adxOk = minAdx1h <= 0 || adxVal >= minAdx1h;
 
     let bias: HtfBias = 'neutral';
@@ -492,12 +540,11 @@ function isHtfDirectionAllowed(
 // РЕЖИМ РЫНКА
 // ============================================================================
 /**
- * Определяет режим рынка ПО СОСТОЯНИЮ на свечу с индексом asOfIndex.
- * Если asOfIndex не передан — по последней свече массива (старое поведение).
+ * Определяет режим рынка по состоянию на свечу с индексом asOfIndex.
+ * Если asOfIndex не передан — используется последняя свеча.
  *
- * ВАЖНО: для breakout-стратегии сюда передаётся индекс SETUP-свечи
- * (предшествующей сигнальной), чтобы импульсная свеча пробоя не меняла
- * режим в trend_* и не блокировала собственный вход.
+ * Для breakout-стратегии передаётся индекс setup-свечи, предшествующей
+ * сигнальной: пробойная свеча не должна сама менять режим и блокировать вход.
  */
 export function detectMarketRegime(
   candles: Candle[],
@@ -528,9 +575,20 @@ export function detectMarketRegime(
     close: closes
   });
 
-  const ema20 = EMA.calculate({ period: 20, values: closes });
-  const ema50 = EMA.calculate({ period: 50, values: closes });
-  const ema200 = EMA.calculate({ period: 200, values: closes });
+  const ema20 = EMA.calculate({
+    period: 20,
+    values: closes
+  });
+
+  const ema50 = EMA.calculate({
+    period: 50,
+    values: closes
+  });
+
+  const ema200 = EMA.calculate({
+    period: 200,
+    values: closes
+  });
 
   const bb = BollingerBands.calculate({
     period: 20,
@@ -557,6 +615,7 @@ export function detectMarketRegime(
   const lastAtr = last(atr);
   const lastAdx = last(adx);
   const prevAdx = prev(adx);
+
   const lastEma20 = last(ema20);
   const lastEma50 = last(ema50);
   const lastEma200 = last(ema200);
@@ -564,11 +623,13 @@ export function detectMarketRegime(
 
   const regimeSignalIndex = view.length - 2;
   const regimeVolumeCheck = checkSignalVolume(volumes, regimeSignalIndex);
-  const avgVol20 = regimeVolumeCheck.medianVolume;
 
+  const avgVol20 = regimeVolumeCheck.medianVolume;
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
+
   const adxRising = lastAdx.adx > prevAdx.adx;
+
   const adxOk =
     lastAdx.adx >= MIN_ADX_TREND &&
     (adxRising || lastAdx.adx >= 26);
@@ -581,7 +642,10 @@ export function detectMarketRegime(
     lastEma20 < lastEma50 &&
     lastEma50 < lastEma200;
 
-  const highVolatility = atrPct > 0.028 || bbWidth > 0.13;
+  const highVolatility =
+    atrPct > 0.028 ||
+    bbWidth > 0.13;
+
   const compression = bbWidth <= BB_SQUEEZE_THRESHOLD;
 
   const trendUp =
@@ -606,7 +670,6 @@ export function detectMarketRegime(
     lastAdx.adx <= 28 &&
     !highVolatility;
 
-  // Новый режим: пробой в направлении тренда
   const trendBreakoutUp =
     trendUp &&
     lastClose > lastBb.upper &&
@@ -665,7 +728,9 @@ function emptySignal(
     regime,
     initialR: null,
     timeFailBars: DEFAULT_TIME_FAIL_BARS,
-    indicators: { ready: false }
+    indicators: {
+      ready: false
+    }
   };
 }
 
@@ -710,7 +775,10 @@ export function analyzeMarket(
     SimpleMASignal: false
   });
 
-  const rsi = RSI.calculate({ period: 14, values: closes });
+  const rsi = RSI.calculate({
+    period: 14,
+    values: closes
+  });
 
   const atr = ATR.calculate({
     period: 14,
@@ -788,8 +856,10 @@ export function analyzeMarket(
   const volumeSpike = volumeCheck.ok;
 
   const candleBody = Math.abs(lastCandle.close - lastCandle.open);
+
   const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
   const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
+
   const upperTrigger = lastBb.upper + atrBuffer;
   const lowerTrigger = lastBb.lower - atrBuffer;
 
@@ -800,7 +870,9 @@ export function analyzeMarket(
   let breakoutDown = false;
   let breakoutSide: 'long' | 'short' | 'none' = 'none';
 
+  // --------------------------------------------------------------------------
   // Breakout из breakout_watch
+  // --------------------------------------------------------------------------
   if (regime === 'breakout_watch') {
     breakoutUp =
       price > upperTrigger &&
@@ -818,41 +890,104 @@ export function analyzeMarket(
     if (breakoutDown) breakoutSide = 'short';
   }
 
-  // Breakout из trend_breakout (пробой в направлении тренда)
+  // --------------------------------------------------------------------------
+  // Breakout из trend_breakout: пробой только в направлении режима
+  // --------------------------------------------------------------------------
   if (regime === 'trend_breakout') {
-    const lastClose = regimeInfo.indicators?.lastClose as number ?? price;
-    const lastEma200 = regimeInfo.indicators?.ema200 as number ?? 0;
+    const lastClose =
+      (regimeInfo.indicators?.lastClose as number | undefined) ?? price;
+
+    const lastEma200 =
+      (regimeInfo.indicators?.ema200 as number | undefined) ?? 0;
 
     if (lastClose > lastEma200) {
-      // uptrend
       breakoutUp =
         price > upperTrigger &&
         candleBody >= minBody &&
         lastRsi > 50 &&
         volumeSpike;
-      if (breakoutUp) breakoutSide = 'long';
+
+      if (breakoutUp) {
+        breakoutSide = 'long';
+      }
     } else {
-      // downtrend
       breakoutDown =
         price < lowerTrigger &&
         candleBody >= minBody &&
         lastRsi < 50 &&
         volumeSpike;
-      if (breakoutDown) breakoutSide = 'short';
+
+      if (breakoutDown) {
+        breakoutSide = 'short';
+      }
     }
   }
 
-  // Short continuation в trend_down (новое улучшение)
+  // --------------------------------------------------------------------------
+  // Short continuation в trend_down
+  //
+  // ДВА ДОБАВЛЕННЫХ ФИЛЬТРА:
+  // 1) confirmedBreakdown — close ниже low предыдущих 6 свечей.
+  // 2) !recentBullishImpulse — не шортим сразу после сильного bullish impulse.
+  // --------------------------------------------------------------------------
   let continuationShort = false;
+
+  let previousLocalLow: number | null = null;
+  let confirmedBreakdown = false;
+  let recentBullishImpulse = false;
+  let recentBullishImpulseCount = 0;
+  let maxRecentBullishBody = 0;
+
   if (regime === 'trend_down' && breakoutSide === 'none') {
-    const lastEma20 = regimeInfo.indicators?.ema20 as number ?? 0;
-    const lastEma50 = regimeInfo.indicators?.ema50 as number ?? 0;
+    const lastEma20 =
+      (regimeInfo.indicators?.ema20 as number | undefined) ?? 0;
+
+    const lastEma50 =
+      (regimeInfo.indicators?.ema50 as number | undefined) ?? 0;
+
+    const previousLows = lows.slice(
+      Math.max(0, signalIndex - CONTINUATION_BREAKDOWN_LOOKBACK),
+      signalIndex
+    );
+
+    if (previousLows.length === CONTINUATION_BREAKDOWN_LOOKBACK) {
+      previousLocalLow = Math.min(...previousLows);
+
+      confirmedBreakdown =
+        price <
+        previousLocalLow - lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER;
+    }
+
+    const recentCandles = candles.slice(
+      Math.max(0, signalIndex - SHORT_REVERSAL_LOOKBACK),
+      signalIndex
+    );
+
+    const bullishImpulses = recentCandles.filter(c => {
+      const greenBody = c.close - c.open;
+
+      return (
+        c.close > c.open &&
+        greenBody >= lastAtr * SHORT_REVERSAL_BODY_ATR
+      );
+    });
+
+    recentBullishImpulse = bullishImpulses.length > 0;
+    recentBullishImpulseCount = bullishImpulses.length;
+
+    maxRecentBullishBody = recentCandles.reduce((maxBody, c) => {
+      const greenBody = c.close > c.open ? c.close - c.open : 0;
+
+      return Math.max(maxBody, greenBody);
+    }, 0);
 
     continuationShort =
       price < lastEma20 &&
       price < lastEma50 &&
       lastRsi < 48 &&
-      volumeSpike;
+      volumeSpike &&
+      confirmedBreakdown &&
+      !recentBullishImpulse;
 
     if (continuationShort) {
       breakoutSide = 'short';
@@ -863,13 +998,11 @@ export function analyzeMarket(
   const sideWouldBe: 'long' | 'short' | 'none' = breakoutSide;
 
   // ============================================================================
-  // HTF-фильтр:
-  // - Long допускается при 1h bias up или neutral;
-  // - Short допускается при 1h bias down или neutral;
-  // - Блокировка — только при явно противоположном тренде 1h.
+  // HTF-фильтр
   // ============================================================================
   if (htf.enabled && sideWouldBe !== 'none') {
     const minAdx = htf.minAdx1h ?? 18;
+
     const series =
       htf.precomputedHtf ??
       buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
@@ -884,13 +1017,20 @@ export function analyzeMarket(
           reject: 'htf_warmup',
           breakoutUp,
           breakoutDown,
+          continuationShort,
           sideWouldBe,
           htfSeriesLength: series.length,
           volumeSpike,
           volumeCurrent: volumeCheck.signalVolume,
           volumeMedian: volumeCheck.medianVolume,
           volumeRatio: volumeCheck.ratio,
-          volumeThreshold: volumeCheck.threshold
+          volumeThreshold: volumeCheck.threshold,
+          previousLocalLow,
+          confirmedBreakdown,
+          recentBullishImpulse,
+          recentBullishImpulseCount,
+          maxRecentBullishBody,
+          reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
         }
       };
     }
@@ -917,7 +1057,13 @@ export function analyzeMarket(
           volumeCurrent: volumeCheck.signalVolume,
           volumeMedian: volumeCheck.medianVolume,
           volumeRatio: volumeCheck.ratio,
-          volumeThreshold: volumeCheck.threshold
+          volumeThreshold: volumeCheck.threshold,
+          previousLocalLow,
+          confirmedBreakdown,
+          recentBullishImpulse,
+          recentBullishImpulseCount,
+          maxRecentBullishBody,
+          reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
         }
       };
     }
@@ -925,17 +1071,15 @@ export function analyzeMarket(
 
   let side: 'long' | 'short' | 'none' = 'none';
   const entryPrice = price;
-  
-  // Выбор TP/R в зависимости от типа сигнала
+
   let tp1R = BREAKOUT_TP1_R;
   let tp2R = BREAKOUT_TP2_R;
   let atrStopMult = BREAKOUT_ATR_STOP_MULT;
 
   if (continuationShort) {
-    // Для continuation используем более консервативные TP
     tp1R = TREND_TP1_R;
     tp2R = TREND_TP2_R;
-    atrStopMult = 1.2; // Чуть tighter stop
+    atrStopMult = 1.2;
   }
 
   if (breakoutUp) {
@@ -947,8 +1091,22 @@ export function analyzeMarket(
   if (side === 'none') {
     const rejectReasons: string[] = [];
 
-    if (regime !== 'breakout_watch' && regime !== 'trend_breakout' && regime !== 'trend_down') {
+    if (
+      regime !== 'breakout_watch' &&
+      regime !== 'trend_breakout' &&
+      regime !== 'trend_down'
+    ) {
       rejectReasons.push('regime_not_trading');
+    }
+
+    if (regime === 'trend_down') {
+      if (!confirmedBreakdown) {
+        rejectReasons.push('continuation_no_confirmed_breakdown');
+      }
+
+      if (recentBullishImpulse) {
+        rejectReasons.push('continuation_recent_bullish_impulse');
+      }
     }
 
     if (breakoutUp === false && breakoutDown === false && !continuationShort) {
@@ -1004,16 +1162,38 @@ export function analyzeMarket(
         signalTimeUtc: new Date(signalTime).toISOString(),
         signalIndex,
         lastIsForming,
+
+        // Диагностика двух новых фильтров continuationShort.
+        continuationBreakdownLookback: CONTINUATION_BREAKDOWN_LOOKBACK,
+        continuationBreakdownAtrBuffer: CONTINUATION_BREAKDOWN_ATR_BUFFER,
+        previousLocalLow,
+        breakdownThreshold:
+          previousLocalLow === null
+            ? null
+            : previousLocalLow - lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
+        confirmedBreakdown,
+
+        shortReversalLookback: SHORT_REVERSAL_LOOKBACK,
+        shortReversalBodyAtr: SHORT_REVERSAL_BODY_ATR,
+        reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR,
+        recentBullishImpulse,
+        recentBullishImpulseCount,
+        maxRecentBullishBody,
+
         reject: 'no_breakout_conditions',
         rejectReasons
       }
     };
   }
 
+  // Берём историю только до сигнальной свечи: без look-ahead из forming bar.
+  const signalHighs = highs.slice(0, signalIndex + 1);
+  const signalLows = lows.slice(0, signalIndex + 1);
+
   const stopLossPrice = getStructureStop({
     side,
-    highs,
-    lows,
+    highs: signalHighs,
+    lows: signalLows,
     price: entryPrice,
     lastAtr,
     atrStopMult
@@ -1033,7 +1213,15 @@ export function analyzeMarket(
         ready: true,
         reject: 'stop_distance',
         stopPct,
-        initialR
+        initialR,
+
+        continuationShort,
+        previousLocalLow,
+        confirmedBreakdown,
+        recentBullishImpulse,
+        recentBullishImpulseCount,
+        maxRecentBullishBody,
+        reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
       }
     };
   }
@@ -1062,7 +1250,15 @@ export function analyzeMarket(
       ...emptySignal(price, regime),
       indicators: {
         ready: true,
-        reject: 'size_calculation'
+        reject: 'size_calculation',
+
+        continuationShort,
+        previousLocalLow,
+        confirmedBreakdown,
+        recentBullishImpulse,
+        recentBullishImpulseCount,
+        maxRecentBullishBody,
+        reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
       }
     };
   }
@@ -1089,19 +1285,41 @@ export function analyzeMarket(
       stopPct,
       tp1: takeProfit1Price,
       tp2: takeProfit2Price,
+
       breakoutUp,
       breakoutDown,
       continuationShort,
+
       htfEnabled: htf.enabled,
+
       upperTrigger,
       lowerTrigger,
+
       volumeSpike,
       volumeCurrent: volumeCheck.signalVolume,
       volumeMedian: volumeCheck.medianVolume,
       volumeRatio: volumeCheck.ratio,
       volumeThreshold: volumeCheck.threshold,
       volumeSampleSize: volumeCheck.sampleSize,
-      signalTimeUtc: new Date(signalTime).toISOString()
+
+      signalTimeUtc: new Date(signalTime).toISOString(),
+
+      // Логи новых фильтров: должны быть сохранены и для разрешённого входа.
+      continuationBreakdownLookback: CONTINUATION_BREAKDOWN_LOOKBACK,
+      continuationBreakdownAtrBuffer: CONTINUATION_BREAKDOWN_ATR_BUFFER,
+      previousLocalLow,
+      breakdownThreshold:
+        previousLocalLow === null
+          ? null
+          : previousLocalLow - lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
+      confirmedBreakdown,
+
+      shortReversalLookback: SHORT_REVERSAL_LOOKBACK,
+      shortReversalBodyAtr: SHORT_REVERSAL_BODY_ATR,
+      reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR,
+      recentBullishImpulse,
+      recentBullishImpulseCount,
+      maxRecentBullishBody
     }
   };
 }
