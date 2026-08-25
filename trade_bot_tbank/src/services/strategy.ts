@@ -54,15 +54,11 @@ const VOLUME_SPIKE_MULTIPLIER = 1.1;
 /**
  * Continuation-short разрешается только после реального пробоя вниз:
  * close сигнальной свечи должен быть ниже low предыдущих N свечей.
- *
- * 6 минутных свечей — небольшой контекст. Это не требует ретеста и не должно
- * существенно снизить частоту нормальных входов в нисходящий тренд.
  */
 const CONTINUATION_BREAKDOWN_LOOKBACK = 6;
 
 /**
- * Небольшой ATR-буфер против пробоя на 1 тик / ложного касания уровня.
- * 0.05 ATR — мягкое условие, не слишком агрессивный фильтр.
+ * Небольшой ATR-буфер против пробоя на один тик / ложного касания уровня.
  */
 const CONTINUATION_BREAKDOWN_ATR_BUFFER = 0.05;
 
@@ -77,6 +73,24 @@ const SHORT_REVERSAL_LOOKBACK = 3;
  * новый short не открываем: старый trend_down может уже быть сломан.
  */
 const SHORT_REVERSAL_BODY_ATR = 1.2;
+
+// ============================================================================
+// MINIMAL BREAKOUT-WATCH SHORT FILTER
+// ============================================================================
+
+/**
+ * Для short из breakout_watch недостаточно пройти нижнюю Bollinger Band.
+ * Сигнальная свеча также обязана закрыться ниже low предыдущих 6 свечей.
+ *
+ * Это не требует ретеста и не меняет long-сигналы. Цель — отсеять ложные
+ * пробои нижней BB, когда фактическая краткосрочная поддержка не сломана.
+ */
+const BREAKOUT_BREAKDOWN_LOOKBACK = 6;
+
+/**
+ * Мягкий буфер под локальным low — защищает от входов после пробоя на 1 тик.
+ */
+const BREAKOUT_BREAKDOWN_ATR_BUFFER = 0.05;
 
 // ============================================================================
 // ТИПЫ
@@ -863,6 +877,30 @@ export function analyzeMarket(
   const upperTrigger = lastBb.upper + atrBuffer;
   const lowerTrigger = lastBb.lower - atrBuffer;
 
+  // --------------------------------------------------------------------------
+  // Мягкое подтверждение short-breakout из breakout_watch:
+  // закрытие должно быть ниже low предыдущих 6 свечей с небольшим ATR-буфером.
+  // --------------------------------------------------------------------------
+  const breakoutPreviousLows = lows.slice(
+    Math.max(0, signalIndex - BREAKOUT_BREAKDOWN_LOOKBACK),
+    signalIndex
+  );
+
+  const breakoutPreviousLocalLow =
+    breakoutPreviousLows.length === BREAKOUT_BREAKDOWN_LOOKBACK
+      ? Math.min(...breakoutPreviousLows)
+      : null;
+
+  const breakoutBreakdownThreshold =
+    breakoutPreviousLocalLow === null
+      ? null
+      : breakoutPreviousLocalLow -
+        lastAtr * BREAKOUT_BREAKDOWN_ATR_BUFFER;
+
+  const breakoutConfirmedDown =
+    breakoutBreakdownThreshold !== null &&
+    price < breakoutBreakdownThreshold;
+
   let longSignal = false;
   let shortSignal = false;
 
@@ -884,7 +922,8 @@ export function analyzeMarket(
       price < lowerTrigger &&
       candleBody >= minBody &&
       lastRsi < 45 &&
-      volumeSpike;
+      volumeSpike &&
+      breakoutConfirmedDown;
 
     if (breakoutUp) breakoutSide = 'long';
     if (breakoutDown) breakoutSide = 'short';
@@ -926,9 +965,9 @@ export function analyzeMarket(
   // --------------------------------------------------------------------------
   // Short continuation в trend_down
   //
-  // ДВА ДОБАВЛЕННЫХ ФИЛЬТРА:
+  // Два фильтра:
   // 1) confirmedBreakdown — close ниже low предыдущих 6 свечей.
-  // 2) !recentBullishImpulse — не шортим сразу после сильного bullish impulse.
+  // 2) !recentBullishImpulse — не шортим после сильного bullish impulse.
   // --------------------------------------------------------------------------
   let continuationShort = false;
 
@@ -955,7 +994,8 @@ export function analyzeMarket(
 
       confirmedBreakdown =
         price <
-        previousLocalLow - lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER;
+        previousLocalLow -
+          lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER;
     }
 
     const recentCandles = candles.slice(
@@ -976,7 +1016,9 @@ export function analyzeMarket(
     recentBullishImpulseCount = bullishImpulses.length;
 
     maxRecentBullishBody = recentCandles.reduce((maxBody, c) => {
-      const greenBody = c.close > c.open ? c.close - c.open : 0;
+      const greenBody = c.close > c.open
+        ? c.close - c.open
+        : 0;
 
       return Math.max(maxBody, greenBody);
     }, 0);
@@ -1025,6 +1067,11 @@ export function analyzeMarket(
           volumeMedian: volumeCheck.medianVolume,
           volumeRatio: volumeCheck.ratio,
           volumeThreshold: volumeCheck.threshold,
+
+          breakoutPreviousLocalLow,
+          breakoutBreakdownThreshold,
+          breakoutConfirmedDown,
+
           previousLocalLow,
           confirmedBreakdown,
           recentBullishImpulse,
@@ -1058,6 +1105,11 @@ export function analyzeMarket(
           volumeMedian: volumeCheck.medianVolume,
           volumeRatio: volumeCheck.ratio,
           volumeThreshold: volumeCheck.threshold,
+
+          breakoutPreviousLocalLow,
+          breakoutBreakdownThreshold,
+          breakoutConfirmedDown,
+
           previousLocalLow,
           confirmedBreakdown,
           recentBullishImpulse,
@@ -1107,6 +1159,14 @@ export function analyzeMarket(
       if (recentBullishImpulse) {
         rejectReasons.push('continuation_recent_bullish_impulse');
       }
+    }
+
+    if (
+      regime === 'breakout_watch' &&
+      price < lowerTrigger &&
+      !breakoutConfirmedDown
+    ) {
+      rejectReasons.push('breakout_short_no_confirmed_local_low');
     }
 
     if (breakoutUp === false && breakoutDown === false && !continuationShort) {
@@ -1163,14 +1223,20 @@ export function analyzeMarket(
         signalIndex,
         lastIsForming,
 
-        // Диагностика двух новых фильтров continuationShort.
+        breakoutBreakdownLookback: BREAKOUT_BREAKDOWN_LOOKBACK,
+        breakoutBreakdownAtrBuffer: BREAKOUT_BREAKDOWN_ATR_BUFFER,
+        breakoutPreviousLocalLow,
+        breakoutBreakdownThreshold,
+        breakoutConfirmedDown,
+
         continuationBreakdownLookback: CONTINUATION_BREAKDOWN_LOOKBACK,
         continuationBreakdownAtrBuffer: CONTINUATION_BREAKDOWN_ATR_BUFFER,
         previousLocalLow,
         breakdownThreshold:
           previousLocalLow === null
             ? null
-            : previousLocalLow - lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
+            : previousLocalLow -
+              lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
         confirmedBreakdown,
 
         shortReversalLookback: SHORT_REVERSAL_LOOKBACK,
@@ -1215,6 +1281,10 @@ export function analyzeMarket(
         stopPct,
         initialR,
 
+        breakoutPreviousLocalLow,
+        breakoutBreakdownThreshold,
+        breakoutConfirmedDown,
+
         continuationShort,
         previousLocalLow,
         confirmedBreakdown,
@@ -1251,6 +1321,10 @@ export function analyzeMarket(
       indicators: {
         ready: true,
         reject: 'size_calculation',
+
+        breakoutPreviousLocalLow,
+        breakoutBreakdownThreshold,
+        breakoutConfirmedDown,
 
         continuationShort,
         previousLocalLow,
@@ -1304,14 +1378,20 @@ export function analyzeMarket(
 
       signalTimeUtc: new Date(signalTime).toISOString(),
 
-      // Логи новых фильтров: должны быть сохранены и для разрешённого входа.
+      breakoutBreakdownLookback: BREAKOUT_BREAKDOWN_LOOKBACK,
+      breakoutBreakdownAtrBuffer: BREAKOUT_BREAKDOWN_ATR_BUFFER,
+      breakoutPreviousLocalLow,
+      breakoutBreakdownThreshold,
+      breakoutConfirmedDown,
+
       continuationBreakdownLookback: CONTINUATION_BREAKDOWN_LOOKBACK,
       continuationBreakdownAtrBuffer: CONTINUATION_BREAKDOWN_ATR_BUFFER,
       previousLocalLow,
       breakdownThreshold:
         previousLocalLow === null
           ? null
-          : previousLocalLow - lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
+          : previousLocalLow -
+            lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
       confirmedBreakdown,
 
       shortReversalLookback: SHORT_REVERSAL_LOOKBACK,
