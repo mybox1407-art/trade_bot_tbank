@@ -30,7 +30,7 @@ const api = axios.create({
     Authorization: `Bearer ${env.tinkoffToken}`,
     'Content-Type': 'application/json'
   },
-  timeout: 15000,
+  timeout: 15_000,
   httpsAgent
 });
 
@@ -40,41 +40,110 @@ const symbolAliases: Record<string, string> = {
   YNDX: 'YDEX'
 };
 
+// ============================================================================
+// TIMEFRAME CONFIGURATION
+// ============================================================================
+const TIMEFRAME_TO_INTERVAL: Record<string, string> = {
+  '1m': 'CANDLE_INTERVAL_1_MIN',
+  '2m': 'CANDLE_INTERVAL_2_MIN',
+  '3m': 'CANDLE_INTERVAL_3_MIN',
+  '5m': 'CANDLE_INTERVAL_5_MIN',
+  '10m': 'CANDLE_INTERVAL_10_MIN',
+  '15m': 'CANDLE_INTERVAL_15_MIN',
+  '30m': 'CANDLE_INTERVAL_30_MIN',
+  '1h': 'CANDLE_INTERVAL_HOUR',
+  '2h': 'CANDLE_INTERVAL_2_HOUR',
+  '4h': 'CANDLE_INTERVAL_4_HOUR',
+  '1d': 'CANDLE_INTERVAL_DAY',
+  '1w': 'CANDLE_INTERVAL_WEEK',
+  '1M': 'CANDLE_INTERVAL_MONTH'
+};
+
+const TIMEFRAME_TO_MS: Record<string, number> = {
+  '1m': 1 * 60_000,
+  '2m': 2 * 60_000,
+  '3m': 3 * 60_000,
+  '5m': 5 * 60_000,
+  '10m': 10 * 60_000,
+  '15m': 15 * 60_000,
+  '30m': 30 * 60_000,
+  '1h': 60 * 60_000,
+  '2h': 2 * 60 * 60_000,
+  '4h': 4 * 60 * 60_000,
+  '1d': 24 * 60 * 60_000,
+  '1w': 7 * 24 * 60 * 60_000,
+  '1M': 30 * 24 * 60 * 60_000
+};
+
 function quotationToNumber(value?: TinkoffQuotation): number {
   if (!value) return 0;
+
   const units = Number(value.units ?? 0);
   const nano = Number(value.nano ?? 0);
+
   return units + nano / 1e9;
 }
 
 function mapInterval(timeframe: string): string {
-  const map: Record<string, string> = {
-    '1m': 'CANDLE_INTERVAL_1_MIN',
-    '2m': 'CANDLE_INTERVAL_2_MIN',
-    '3m': 'CANDLE_INTERVAL_3_MIN',
-    '5m': 'CANDLE_INTERVAL_5_MIN',
-    '10m': 'CANDLE_INTERVAL_10_MIN',
-    '15m': 'CANDLE_INTERVAL_15_MIN',
-    '30m': 'CANDLE_INTERVAL_30_MIN',
-    '1h': 'CANDLE_INTERVAL_HOUR',
-    '2h': 'CANDLE_INTERVAL_2_HOUR',
-    '4h': 'CANDLE_INTERVAL_4_HOUR',
-    '1d': 'CANDLE_INTERVAL_DAY',
-    '1w': 'CANDLE_INTERVAL_WEEK',
-    '1M': 'CANDLE_INTERVAL_MONTH'
-  };
+  const interval = TIMEFRAME_TO_INTERVAL[timeframe];
 
-  return map[timeframe] ?? 'CANDLE_INTERVAL_15_MIN';
+  if (!interval) {
+    throw new Error(
+      `Unsupported candle interval: ${timeframe}`
+    );
+  }
+
+  return interval;
+}
+
+function getTimeframeMs(timeframe: string): number {
+  const intervalMs = TIMEFRAME_TO_MS[timeframe];
+
+  if (!intervalMs) {
+    throw new Error(
+      `Unsupported timeframe for candle history range: ${timeframe}`
+    );
+  }
+
+  return intervalMs;
+}
+
+/**
+ * Коэффициент запаса нужен потому, что MOEX не торгует ночью и в выходные.
+ *
+ * Для мелких интервалов используем ×5:
+ * - 300 × 5m = 25 торговых часов;
+ * - ×5 = 125 календарных часов;
+ * - этого обычно хватает, чтобы собрать 300 свечей после ночей и выходных.
+ *
+ * Для более крупных периодов хватает ×3.
+ */
+function getHistoryMultiplier(timeframe: string): number {
+  switch (timeframe) {
+    case '1m':
+    case '2m':
+    case '3m':
+    case '5m':
+      return 5;
+
+    default:
+      return 3;
+  }
 }
 
 async function resolveInstrumentId(symbol: string): Promise<string> {
   const raw = symbol.trim().toUpperCase();
   const normalized = symbolAliases[raw] ?? raw;
-  const classCode = process.env.MOEX_DEFAULT_CLASS_CODE || 'TQBR';
+
+  const classCode =
+    process.env.MOEX_DEFAULT_CLASS_CODE || 'TQBR';
+
   const cacheKey = `${normalized}_${classCode}`;
 
-  if (instrumentCache.has(cacheKey)) {
-    return instrumentCache.get(cacheKey)!;
+  const cached = instrumentCache.get(cacheKey);
+
+  if (cached) {
+    return cached;
   }
 
   const { data } = await api.post(
@@ -87,7 +156,9 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
   const instruments = data?.instruments ?? [];
 
   if (!instruments.length) {
-    throw new Error(`Инструмент ${normalized} не найден в T-Invest API`);
+    throw new Error(
+      `Инструмент ${normalized} не найден в T-Invest API`
+    );
   }
 
   const exactByTickerAndClass = instruments.find(
@@ -101,7 +172,10 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
       String(item.ticker ?? '').toUpperCase() === normalized
   );
 
-  const instrument = exactByTickerAndClass ?? exactByTicker ?? instruments[0];
+  const instrument =
+    exactByTickerAndClass ??
+    exactByTicker ??
+    instruments[0];
 
   const instrumentId =
     instrument?.instrumentUid ||
@@ -109,7 +183,9 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
     `${normalized}_${instrument?.classCode || classCode}`;
 
   if (!instrumentId) {
-    throw new Error(`Не удалось определить instrumentId для ${normalized}`);
+    throw new Error(
+      `Не удалось определить instrumentId для ${normalized}`
+    );
   }
 
   console.log(
@@ -136,54 +212,98 @@ export async function getCandles(
   limit = 250
 ): Promise<Candle[]> {
   const instrumentId = await resolveInstrumentId(symbol);
+
   const interval = mapInterval(timeframe);
+  const intervalMs = getTimeframeMs(timeframe);
 
   const to = new Date();
 
-  // CHANGED: окно вычисляется из limit, а не фиксированными 21/90 днями
-  const intervalMs = timeframe === '15m' ? 15 * 60_000 :
-                     timeframe === '1h'  ? 60 * 60_000 :
-                     60 * 60_000; // fallback
+  const historyMultiplier =
+    getHistoryMultiplier(timeframe);
 
   const neededMs = limit * intervalMs;
-  // Запас ×3 на ночи/выходные/праздники, чтобы гарантированно набрать limit баров
-  const from = new Date(to.getTime() - neededMs * 3);
 
-  const { data } = await api.post(
-    '/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
-    {
-      instrumentId,
-      from: from.toISOString(),
-      to: to.toISOString(),
-      interval
+  const from = new Date(
+    to.getTime() - neededMs * historyMultiplier
+  );
+
+  const rangeHours =
+    (to.getTime() - from.getTime()) / 3_600_000;
+
+  const requestPayload = {
+    instrumentId,
+    from: from.toISOString(),
+    to: to.toISOString(),
+    interval
+  };
+
+  console.log('[getCandles request]', {
+    symbol,
+    timeframe,
+    instrumentId,
+    interval,
+    limit,
+    intervalMs,
+    historyMultiplier,
+    from: requestPayload.from,
+    to: requestPayload.to,
+    rangeHours: rangeHours.toFixed(2)
+  });
+
+  try {
+    const { data } = await api.post(
+      '/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
+      requestPayload
+    );
+
+    const candles = data?.candles ?? [];
+
+    const mapped: Candle[] = candles.map((candle: any) => ({
+      time: new Date(candle.time).getTime(),
+      open: quotationToNumber(candle.open),
+      high: quotationToNumber(candle.high),
+      low: quotationToNumber(candle.low),
+      close: quotationToNumber(candle.close),
+      volume: Number(candle.volume ?? 0)
+    }));
+
+    console.log(
+      '[getCandles]',
+      'symbol=', symbol,
+      'timeframe=', timeframe,
+      'requestedLimit=', limit,
+      'received=', mapped.length,
+      'from=', from.toISOString(),
+      'to=', to.toISOString()
+    );
+
+    return mapped.slice(-limit);
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      console.error('[getCandles] API error', {
+        symbol,
+        timeframe,
+        instrumentId,
+        interval,
+        limit,
+        intervalMs,
+        historyMultiplier,
+        from: requestPayload.from,
+        to: requestPayload.to,
+        status: error.response?.status,
+        response: error.response?.data,
+        requestData: error.config?.data,
+        message: error.message
+      });
     }
-  );
 
-  const candles = data?.candles ?? [];
-
-  const mapped = candles.map((c: any) => ({
-    time: new Date(c.time).getTime(),
-    open: quotationToNumber(c.open),
-    high: quotationToNumber(c.high),
-    low: quotationToNumber(c.low),
-    close: quotationToNumber(c.close),
-    volume: Number(c.volume ?? 0)
-  }));
-
-  console.log(
-    '[getCandles]',
-    'symbol=', symbol,
-    'timeframe=', timeframe,
-    'requestedLimit=', limit,
-    'received=', mapped.length,
-    'from=', from.toISOString(),
-    'to=', to.toISOString()
-  );
-
-  return mapped.slice(-limit);
+    throw error;
+  }
 }
 
-export async function getCurrentPrice(symbol: string): Promise<number> {
+export async function getCurrentPrice(
+  symbol: string
+): Promise<number> {
   const instrumentId = await resolveInstrumentId(symbol);
 
   const { data } = await api.post(
@@ -197,7 +317,9 @@ export async function getCurrentPrice(symbol: string): Promise<number> {
   const lastPrice = prices[0]?.price;
 
   if (!lastPrice) {
-    throw new Error(`Не удалось получить текущую цену для ${symbol}`);
+    throw new Error(
+      `Не удалось получить текущую цену для ${symbol}`
+    );
   }
 
   return quotationToNumber(lastPrice);
