@@ -23,7 +23,6 @@ const MIN_ADX_RANGE = 18;
 const BB_SQUEEZE_THRESHOLD = 0.06;
 const STOP_STRUCTURE_LOOKBACK = 8;
 const STOP_SWING_PAD_ATR = 0.18;
-const MAX_EXTENSION_FROM_EMA20 = 0.01;
 
 // MOEX: основная сессия 10:00–18:59 МСК (07:00–15:59 UTC)
 // + вечерняя 19:00–23:49 МСК (16:00–20:49 UTC).
@@ -33,10 +32,6 @@ const TRADING_HOUR_UTC_TO = 21;
 export const MIN_QUANTITY = 2;
 const DEFAULT_TIME_FAIL_BARS = 4;
 
-const MAX_DAY_EXT = 3.5;
-const BOUNCE_LOOKBACK = 10;
-const MAX_BOUNCE_ATR = 1.1;
-
 // ============================================================================
 // BREAKOUT SETTINGS
 // ============================================================================
@@ -44,14 +39,8 @@ const BREAKOUT_ATR_BUFFER_K = 0.1;
 const BREAKOUT_BODY_ATR_MIN = 0.4;
 
 /**
- * Максимальный допустимый размер тела breakout-свечи.
- *
- * Если сигнал появляется на свече с телом больше 1.8 ATR, движение может быть
- * уже кульминационным: на 15m значительная часть импульса уже произошла,
- * поэтому вход на её закрытии часто оказывается запоздалым.
- *
- * Работает только для breakout_watch и trend_breakout.
- * Не применяется к continuationShort.
+ * Не входить на закрытии кульминационной 5m/15m свечи.
+ * Применяется к breakout-сигналам, не к continuationShort.
  */
 const MAX_BREAKOUT_BODY_ATR = 1.8;
 
@@ -64,18 +53,43 @@ const VOLUME_LOOKBACK = 20;
 const VOLUME_SPIKE_MULTIPLIER = 1.1;
 
 // ============================================================================
+// 5M ENTRY SETTINGS
+// ============================================================================
+/**
+ * Локальная структура для 5m триггера.
+ * На 5m 6 баров = 30 минут: достаточно, чтобы определить недавний high/low,
+ * но без чрезмерного запаздывания.
+ */
+const ENTRY_5M_BREAKOUT_LOOKBACK = 6;
+
+/**
+ * Требуется реальный пробой локального уровня, а не касание/один тик.
+ */
+const ENTRY_5M_BREAKOUT_ATR_BUFFER = 0.05;
+
+/**
+ * На 5m вход запрещён, если цена уже слишком далеко от EMA20.
+ * Не догоняем ускорившееся движение.
+ */
+const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 0.8;
+
+/**
+ * Мягкое подтверждение объёма на 5m.
+ */
+const ENTRY_5M_VOLUME_MULTIPLIER = 1.2;
+
+/**
+ * Stop для входа строится за структурой 5m, но не ближе 1.1 ATR.
+ */
+const ENTRY_5M_ATR_STOP_MULT = 1.1;
+
+// ============================================================================
 // MINIMAL CONTINUATION-SHORT FILTERS
 // ============================================================================
 const CONTINUATION_BREAKDOWN_LOOKBACK = 6;
 const CONTINUATION_BREAKDOWN_ATR_BUFFER = 0.05;
 const SHORT_REVERSAL_LOOKBACK = 3;
 const SHORT_REVERSAL_BODY_ATR = 1.2;
-
-// ============================================================================
-// MINIMAL BREAKOUT-WATCH SHORT FILTER
-// ============================================================================
-const BREAKOUT_BREAKDOWN_LOOKBACK = 6;
-const BREAKOUT_BREAKDOWN_ATR_BUFFER = 0.05;
 
 // ============================================================================
 // ТИПЫ
@@ -140,21 +154,22 @@ export interface StrategySignal {
   indicators: Record<string, unknown>;
 }
 
+export interface MultiTimeframeInput {
+  candles15m: Candle[];
+  candles5m: Candle[];
+  balance?: number;
+  htf?: HtfFilterOptions;
+}
+
 // ============================================================================
 // УТИЛИТЫ
 // ============================================================================
-function last<T>(arr: T[]) {
+function last<T>(arr: T[]): T {
   return arr[arr.length - 1];
 }
 
-function prev<T>(arr: T[]) {
+function prev<T>(arr: T[]): T {
   return arr[arr.length - 2];
-}
-
-function mean(values: number[]) {
-  return values.length
-    ? values.reduce((a, b) => a + b, 0) / values.length
-    : 0;
 }
 
 function median(values: number[]): number {
@@ -171,37 +186,31 @@ function median(values: number[]): number {
     : sorted[mid];
 }
 
-/**
- * Определяет длительность бара по последним свечам.
- * Берётся минимальная положительная дельта — межсессионные гэпы отбрасываются.
- */
 function inferBarMs(candles: Candle[]): number {
   const deltas: number[] = [];
 
   for (let i = Math.max(1, candles.length - 12); i < candles.length; i++) {
-    const d = candles[i].time - candles[i - 1].time;
+    const delta = candles[i].time - candles[i - 1].time;
 
-    if (Number.isFinite(d) && d > 0) {
-      deltas.push(d);
+    if (Number.isFinite(delta) && delta > 0) {
+      deltas.push(delta);
     }
   }
 
   return deltas.length ? Math.min(...deltas) : 15 * 60_000;
 }
 
-/**
- * Доступ к значению индикатора по индексу свечи.
- * Индикаторные массивы короче массива свечей — вычисляем смещение.
- */
 function indicatorAt<T>(
   arr: T[],
   candleIndex: number,
   candleCount: number
 ): T | undefined {
   const offset = candleCount - arr.length;
-  const i = candleIndex - offset;
+  const index = candleIndex - offset;
 
-  return i >= 0 && i < arr.length ? arr[i] : undefined;
+  return index >= 0 && index < arr.length
+    ? arr[index]
+    : undefined;
 }
 
 interface VolumeCheck {
@@ -227,7 +236,9 @@ function checkSignalVolume(
 
   const medianVolume = median(baselineVolumes);
   const threshold = medianVolume * multiplier;
-  const ratio = medianVolume > 0 ? signalVolume / medianVolume : null;
+  const ratio = medianVolume > 0
+    ? signalVolume / medianVolume
+    : null;
 
   return {
     ok:
@@ -243,51 +254,10 @@ function checkSignalVolume(
   };
 }
 
-export function isTradingHour(ts: number) {
-  const h = new Date(ts).getUTCHours();
+export function isTradingHour(ts: number): boolean {
+  const hour = new Date(ts).getUTCHours();
 
-  return h >= TRADING_HOUR_UTC_FROM && h < TRADING_HOUR_UTC_TO;
-}
-
-function sessionStartTs(ts: number): number {
-  const d = new Date(ts);
-
-  return Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate(),
-    TRADING_HOUR_UTC_FROM,
-    0,
-    0,
-    0
-  );
-}
-
-function getSessionRange(
-  candles: Candle[],
-  ts: number
-): { high: number; low: number } | null {
-  const start = sessionStartTs(ts);
-  let hi = -Infinity;
-  let lo = Infinity;
-  let n = 0;
-
-  for (let i = candles.length - 1; i >= 0; i--) {
-    const c = candles[i];
-
-    if (c.time < start) break;
-    if (c.time > ts) continue;
-
-    hi = Math.max(hi, c.high);
-    lo = Math.min(lo, c.low);
-    n += 1;
-  }
-
-  if (n === 0 || !Number.isFinite(hi) || !Number.isFinite(lo)) {
-    return null;
-  }
-
-  return { high: hi, low: lo };
+  return hour >= TRADING_HOUR_UTC_FROM && hour < TRADING_HOUR_UTC_TO;
 }
 
 function getStructureStop(params: {
@@ -297,8 +267,15 @@ function getStructureStop(params: {
   price: number;
   lastAtr: number;
   atrStopMult: number;
-}) {
-  const { side, highs, lows, price, lastAtr, atrStopMult } = params;
+}): number {
+  const {
+    side,
+    highs,
+    lows,
+    price,
+    lastAtr,
+    atrStopMult
+  } = params;
 
   const recentHigh = Math.max(...highs.slice(-STOP_STRUCTURE_LOOKBACK));
   const recentLow = Math.min(...lows.slice(-STOP_STRUCTURE_LOOKBACK));
@@ -361,7 +338,10 @@ function calcPositionSize(params: {
   }
 
   let quantity = Math.floor(riskCapital / riskPerShare);
-  const maxQty = Math.floor((balance * MAX_POSITION_FRAC) / price);
+
+  const maxQty = Math.floor(
+    (balance * MAX_POSITION_FRAC) / price
+  );
 
   quantity = Math.min(quantity, maxQty);
 
@@ -381,42 +361,43 @@ function calcPositionSize(params: {
 // ============================================================================
 // HTF (1H BIAS)
 // ============================================================================
-export function hourBucketStart(ts: number) {
-  const d = new Date(ts);
+export function hourBucketStart(ts: number): number {
+  const date = new Date(ts);
 
   return Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate(),
-    d.getUTCHours(),
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    date.getUTCHours(),
     0,
     0,
     0
   );
 }
 
-export function aggregateTo1h(candles15: Candle[]) {
+export function aggregateTo1h(candles: Candle[]): Candle[] {
   const map = new Map<number, Candle>();
 
-  for (const c of candles15) {
-    const key = hourBucketStart(c.time);
-    const prevBar = map.get(key);
+  for (const candle of candles) {
+    const key = hourBucketStart(candle.time);
+    const existing = map.get(key);
 
-    if (!prevBar) {
+    if (!existing) {
       map.set(key, {
         time: key,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume
       });
-    } else {
-      prevBar.high = Math.max(prevBar.high, c.high);
-      prevBar.low = Math.min(prevBar.low, c.low);
-      prevBar.close = c.close;
-      prevBar.volume += c.volume;
+      continue;
     }
+
+    existing.high = Math.max(existing.high, candle.high);
+    existing.low = Math.min(existing.low, candle.low);
+    existing.close = candle.close;
+    existing.volume += candle.volume;
   }
 
   return [...map.values()].sort((a, b) => a.time - b.time);
@@ -425,12 +406,12 @@ export function aggregateTo1h(candles15: Candle[]) {
 export function buildHtfBiasSeries(
   hours: Candle[],
   minAdx1h = 18
-) {
+): HtfBarState[] {
   if (hours.length < 100) return [];
 
-  const closes = hours.map(h => h.close);
-  const highs = hours.map(h => h.high);
-  const lows = hours.map(h => h.low);
+  const closes = hours.map(bar => bar.close);
+  const highs = hours.map(bar => bar.high);
+  const lows = hours.map(bar => bar.low);
 
   const ema20Arr = EMA.calculate({ period: 20, values: closes });
   const ema50Arr = EMA.calculate({ period: 50, values: closes });
@@ -443,31 +424,36 @@ export function buildHtfBiasSeries(
     close: closes
   });
 
-  const n = hours.length;
-  const offE20 = n - ema20Arr.length;
-  const offE50 = n - ema50Arr.length;
-  const offE200 = n - ema200Arr.length;
-  const offAdx = n - adxArr.length;
+  const candleCount = hours.length;
+  const offEma20 = candleCount - ema20Arr.length;
+  const offEma50 = candleCount - ema50Arr.length;
+  const offEma200 = candleCount - ema200Arr.length;
+  const offAdx = candleCount - adxArr.length;
 
-  const out: HtfBarState[] = [];
+  const output: HtfBarState[] = [];
 
-  for (let i = 0; i < n; i++) {
-    const i20 = i - offE20;
-    const i50 = i - offE50;
-    const i200 = i - offE200;
-    const iAdx = i - offAdx;
+  for (let i = 0; i < candleCount; i++) {
+    const ema20Index = i - offEma20;
+    const ema50Index = i - offEma50;
+    const ema200Index = i - offEma200;
+    const adxIndex = i - offAdx;
 
-    if (i20 < 0 || i50 < 0 || i200 < 0 || iAdx < 0) {
+    if (
+      ema20Index < 0 ||
+      ema50Index < 0 ||
+      ema200Index < 0 ||
+      adxIndex < 0
+    ) {
       continue;
     }
 
-    const ema20 = ema20Arr[i20];
-    const ema50 = ema50Arr[i50];
-    const ema200 = ema200Arr[i200];
-    const adxVal = adxArr[iAdx].adx;
+    const ema20 = ema20Arr[ema20Index];
+    const ema50 = ema50Arr[ema50Index];
+    const ema200 = ema200Arr[ema200Index];
+    const adx = adxArr[adxIndex].adx;
     const close = closes[i];
 
-    const adxOk = minAdx1h <= 0 || adxVal >= minAdx1h;
+    const adxOk = minAdx1h <= 0 || adx >= minAdx1h;
 
     let bias: HtfBias = 'neutral';
 
@@ -477,10 +463,10 @@ export function buildHtfBiasSeries(
       bias = 'down';
     }
 
-    out.push({
+    output.push({
       time: hours[i].time,
       bias,
-      adx: adxVal,
+      adx,
       ema20,
       ema50,
       ema200,
@@ -488,42 +474,34 @@ export function buildHtfBiasSeries(
     });
   }
 
-  return out;
+  return output;
 }
 
 export function getHtfBiasAt(
   series: HtfBarState[],
-  ts15: number
-) {
+  timestamp: number
+): HtfBarState | null {
   if (!series.length) return null;
 
-  let lo = 0;
-  let hi = series.length - 1;
+  let low = 0;
+  let high = series.length - 1;
   let best: HtfBarState | null = null;
 
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const closeTs = series[mid].time + 3_600_000;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const closeTimestamp = series[mid].time + 3_600_000;
 
-    if (closeTs <= ts15) {
+    if (closeTimestamp <= timestamp) {
       best = series[mid];
-      lo = mid + 1;
+      low = mid + 1;
     } else {
-      hi = mid - 1;
+      high = mid - 1;
     }
   }
 
   return best;
 }
 
-/**
- * HTF допускает сделку, если старший таймфрейм:
- * - совпадает с направлением входа;
- * - нейтрален.
- *
- * Блокировка остаётся только при явно противоположном направлении:
- * Long при HTF down и Short при HTF up.
- */
 function isHtfDirectionAllowed(
   side: 'long' | 'short',
   htfBias: HtfBias
@@ -536,7 +514,7 @@ function isHtfDirectionAllowed(
 }
 
 // ============================================================================
-// РЕЖИМ РЫНКА
+// 15M MARKET CONTEXT
 // ============================================================================
 export function detectMarketRegime(
   candles: Candle[],
@@ -548,10 +526,10 @@ export function detectMarketRegime(
 
   const view = candles.slice(0, end);
 
-  const closes = view.map(c => c.close);
-  const highs = view.map(c => c.high);
-  const lows = view.map(c => c.low);
-  const volumes = view.map(c => c.volume);
+  const closes = view.map(candle => candle.close);
+  const highs = view.map(candle => candle.high);
+  const lows = view.map(candle => candle.low);
+  const volumes = view.map(candle => candle.volume);
 
   const atr = ATR.calculate({
     period: 14,
@@ -567,20 +545,9 @@ export function detectMarketRegime(
     close: closes
   });
 
-  const ema20 = EMA.calculate({
-    period: 20,
-    values: closes
-  });
-
-  const ema50 = EMA.calculate({
-    period: 50,
-    values: closes
-  });
-
-  const ema200 = EMA.calculate({
-    period: 200,
-    values: closes
-  });
+  const ema20 = EMA.calculate({ period: 20, values: closes });
+  const ema50 = EMA.calculate({ period: 50, values: closes });
+  const ema200 = EMA.calculate({ period: 200, values: closes });
 
   const bb = BollingerBands.calculate({
     period: 20,
@@ -606,7 +573,7 @@ export function detectMarketRegime(
   const lastClose = last(closes);
   const lastAtr = last(atr);
   const lastAdx = last(adx);
-  const prevAdx = prev(adx);
+  const previousAdx = prev(adx);
 
   const lastEma20 = last(ema20);
   const lastEma50 = last(ema50);
@@ -614,13 +581,12 @@ export function detectMarketRegime(
   const lastBb = last(bb);
 
   const regimeSignalIndex = view.length - 2;
-  const regimeVolumeCheck = checkSignalVolume(volumes, regimeSignalIndex);
+  const volumeCheck = checkSignalVolume(volumes, regimeSignalIndex);
 
-  const avgVol20 = regimeVolumeCheck.medianVolume;
   const bbWidth = (lastBb.upper - lastBb.lower) / lastBb.middle;
   const atrPct = lastAtr / lastClose;
 
-  const adxRising = lastAdx.adx > prevAdx.adx;
+  const adxRising = lastAdx.adx > previousAdx.adx;
 
   const adxOk =
     lastAdx.adx >= MIN_ADX_TREND &&
@@ -693,17 +659,21 @@ export function detectMarketRegime(
       ema20: lastEma20,
       ema50: lastEma50,
       ema200: lastEma200,
+      bbUpper: lastBb.upper,
+      bbMiddle: lastBb.middle,
+      bbLower: lastBb.lower,
       bbWidth,
-      avgVol20,
-      volumeMedian: regimeVolumeCheck.medianVolume,
-      volumeRatio: regimeVolumeCheck.ratio
+      volumeMedian: volumeCheck.medianVolume,
+      volumeRatio: volumeCheck.ratio,
+      volumeThreshold: volumeCheck.threshold
     }
   };
 }
 
 function emptySignal(
   price: number,
-  regime: MarketRegime = 'unknown'
+  regime: MarketRegime = 'unknown',
+  indicators: Record<string, unknown> = {}
 ): StrategySignal {
   return {
     price,
@@ -721,645 +691,460 @@ function emptySignal(
     initialR: null,
     timeFailBars: DEFAULT_TIME_FAIL_BARS,
     indicators: {
-      ready: false
+      ready: false,
+      ...indicators
     }
   };
 }
 
 // ============================================================================
-// ВХОД — BREAKOUT + TREND CONTINUATION
+// 5M ENTRY ANALYSIS WITH 15M CONTEXT
 // ============================================================================
-export function analyzeMarket(
-  candles: Candle[],
-  balance: number = STARTING_BALANCE,
-  htf: HtfFilterOptions = DEFAULT_HTF_FILTER
+export function analyzeMarketMultiTimeframe(
+  input: MultiTimeframeInput
 ): StrategySignal {
-  const n = candles.length;
-  const closes = candles.map(c => c.close);
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const volumes = candles.map(c => c.volume);
+  const {
+    candles15m,
+    candles5m,
+    balance = STARTING_BALANCE,
+    htf = DEFAULT_HTF_FILTER
+  } = input;
 
-  if (n < 40) {
-    return emptySignal(closes[n - 1] ?? 0);
+  if (candles15m.length < 220 || candles5m.length < 60) {
+    return emptySignal(candles5m.at(-1)?.close ?? candles15m.at(-1)?.close ?? 0);
   }
 
-  const barMs = inferBarMs(candles);
   const now = Date.now();
-  const lastCandleTime = candles[n - 1].time;
 
-  const lastIsForming = lastCandleTime + barMs > now;
-  const signalIndex = lastIsForming ? n - 2 : n - 1;
-  const setupIndex = signalIndex - 1;
+  // 15m regime is calculated only on closed bars.
+  const bar15mMs = inferBarMs(candles15m);
+  const last15mIsForming =
+    last(candles15m).time + bar15mMs > now;
 
-  if (setupIndex < 1) {
-    return emptySignal(closes[n - 1] ?? 0);
+  const setup15mIndex =
+    (last15mIsForming ? candles15m.length - 2 : candles15m.length - 1) - 1;
+
+  if (setup15mIndex < 1) {
+    return emptySignal(candles5m.at(-1)?.close ?? 0);
   }
 
-  const regimeInfo = detectMarketRegime(candles, setupIndex);
+  const context15m = detectMarketRegime(candles15m, setup15mIndex);
 
-  const macd = MACD.calculate({
-    values: closes,
-    fastPeriod: 12,
-    slowPeriod: 26,
-    signalPeriod: 9,
-    SimpleMAOscillator: false,
-    SimpleMASignal: false
-  });
+  // 5m signal is calculated only on closed bars.
+  const bar5mMs = inferBarMs(candles5m);
+  const last5mIsForming =
+    last(candles5m).time + bar5mMs > now;
 
-  const rsi = RSI.calculate({
+  const signal5mIndex =
+    last5mIsForming
+      ? candles5m.length - 2
+      : candles5m.length - 1;
+
+  if (
+    signal5mIndex < ENTRY_5M_BREAKOUT_LOOKBACK ||
+    !context15m.ready ||
+    !context15m.indicators
+  ) {
+    return emptySignal(candles5m.at(-1)?.close ?? 0, context15m.regime);
+  }
+
+  const closes5m = candles5m.map(candle => candle.close);
+  const highs5m = candles5m.map(candle => candle.high);
+  const lows5m = candles5m.map(candle => candle.low);
+  const volumes5m = candles5m.map(candle => candle.volume);
+
+  const atr5m = ATR.calculate({
     period: 14,
-    values: closes
+    high: highs5m,
+    low: lows5m,
+    close: closes5m
   });
 
-  const atr = ATR.calculate({
+  const rsi5m = RSI.calculate({
     period: 14,
-    high: highs,
-    low: lows,
-    close: closes
+    values: closes5m
   });
 
-  const bb = BollingerBands.calculate({
+  const ema20_5m = EMA.calculate({
     period: 20,
-    values: closes,
-    stdDev: 2
+    values: closes5m
   });
 
   if (
-    !regimeInfo.ready ||
-    !regimeInfo.indicators ||
-    macd.length < 2 ||
-    rsi.length < 2 ||
-    atr.length < 2 ||
-    bb.length < 2
+    atr5m.length < 2 ||
+    rsi5m.length < 1 ||
+    ema20_5m.length < 1
   ) {
-    return emptySignal(closes[n - 1] ?? 0);
+    return emptySignal(closes5m[signal5mIndex] ?? 0, context15m.regime);
   }
 
-  const signalCandle = candles[signalIndex];
-  const signalTime = signalCandle.time;
-  const price = signalCandle.close;
-  const regime = regimeInfo.regime;
+  const signalCandle5m = candles5m[signal5mIndex];
+  const price = signalCandle5m.close;
+  const signalTime = signalCandle5m.time;
 
-  const lastAtr = indicatorAt(atr, signalIndex, n);
-  const lastRsi = indicatorAt(rsi, signalIndex, n);
-  const lastBb = indicatorAt(bb, signalIndex, n);
+  const lastAtr5m = indicatorAt(atr5m, signal5mIndex, candles5m.length);
+  const lastRsi5m = indicatorAt(rsi5m, signal5mIndex, candles5m.length);
+  const lastEma20_5m = indicatorAt(
+    ema20_5m,
+    signal5mIndex,
+    candles5m.length
+  );
 
   if (
-    lastAtr === undefined ||
-    lastRsi === undefined ||
-    lastBb === undefined
+    lastAtr5m === undefined ||
+    lastRsi5m === undefined ||
+    lastEma20_5m === undefined ||
+    lastAtr5m <= 0
   ) {
-    return emptySignal(price, regime);
-  }
-
-  const lastCandle = signalCandle;
-
-  const lastAvailableCandleTime = candles[n - 1].time + barMs;
-  const ageMs = now - lastAvailableCandleTime;
-  const ageMinutes = ageMs / 60_000;
-
-  if (ageMinutes > 20) {
-    return {
-      ...emptySignal(price, regime),
-      indicators: {
-        ready: true,
-        reject: 'stale_data',
-        lastCandleTime: new Date(lastAvailableCandleTime).toISOString(),
-        ageMinutes
-      }
-    };
+    return emptySignal(price, context15m.regime);
   }
 
   if (!isTradingHour(signalTime)) {
-    return {
-      ...emptySignal(price, regime),
-      indicators: {
-        ready: true,
-        skipped: true,
-        regime,
-        reject: 'not_trading_hour',
-        signalTimeUtc: new Date(signalTime).toISOString()
-      }
-    };
+    return emptySignal(price, context15m.regime, {
+      ready: true,
+      reject: 'not_trading_hour',
+      signalTimeUtc: new Date(signalTime).toISOString()
+    });
   }
 
-  const volumeCheck = checkSignalVolume(volumes, signalIndex);
-  const volumeSpike = volumeCheck.ok;
-
-  const candleBody = Math.abs(lastCandle.close - lastCandle.open);
-  const candleBodyAtrRatio = candleBody / lastAtr;
-
-  const atrBuffer = lastAtr * BREAKOUT_ATR_BUFFER_K;
-  const minBody = lastAtr * BREAKOUT_BODY_ATR_MIN;
-  const maxBody = lastAtr * MAX_BREAKOUT_BODY_ATR;
-
-  const breakoutBodyWithinRange =
-    candleBody >= minBody &&
-    candleBody <= maxBody;
-
-  const upperTrigger = lastBb.upper + atrBuffer;
-  const lowerTrigger = lastBb.lower - atrBuffer;
-
-  const breakoutPreviousLows = lows.slice(
-    Math.max(0, signalIndex - BREAKOUT_BREAKDOWN_LOOKBACK),
-    signalIndex
+  const volume5m = checkSignalVolume(
+    volumes5m,
+    signal5mIndex,
+    VOLUME_LOOKBACK,
+    ENTRY_5M_VOLUME_MULTIPLIER
   );
 
-  const breakoutPreviousLocalLow =
-    breakoutPreviousLows.length === BREAKOUT_BREAKDOWN_LOOKBACK
-      ? Math.min(...breakoutPreviousLows)
-      : null;
+  const candleBody5m = Math.abs(
+    signalCandle5m.close - signalCandle5m.open
+  );
 
-  const breakoutBreakdownThreshold =
-    breakoutPreviousLocalLow === null
-      ? null
-      : breakoutPreviousLocalLow -
-        lastAtr * BREAKOUT_BREAKDOWN_ATR_BUFFER;
+  const candleBodyAtrRatio5m = candleBody5m / lastAtr5m;
 
-  const breakoutConfirmedDown =
-    breakoutBreakdownThreshold !== null &&
-    price < breakoutBreakdownThreshold;
+  const bodyLargeEnough =
+    candleBody5m >= lastAtr5m * BREAKOUT_BODY_ATR_MIN;
 
-  let longSignal = false;
-  let shortSignal = false;
+  const bodyNotExhausted =
+    candleBody5m <= lastAtr5m * MAX_BREAKOUT_BODY_ATR;
 
-  let breakoutUp = false;
-  let breakoutDown = false;
-  let breakoutSide: 'long' | 'short' | 'none' = 'none';
+  const bodyValid = bodyLargeEnough && bodyNotExhausted;
 
-  // --------------------------------------------------------------------------
-  // Breakout из breakout_watch
-  // --------------------------------------------------------------------------
-  if (regime === 'breakout_watch') {
-    breakoutUp =
-      price > upperTrigger &&
-      breakoutBodyWithinRange &&
-      lastRsi > 55 &&
-      volumeSpike;
+  const recent5mLows = lows5m.slice(
+    signal5mIndex - ENTRY_5M_BREAKOUT_LOOKBACK,
+    signal5mIndex
+  );
 
-    breakoutDown =
-      price < lowerTrigger &&
-      breakoutBodyWithinRange &&
-      lastRsi < 45 &&
-      volumeSpike &&
-      breakoutConfirmedDown;
+  const recent5mHighs = highs5m.slice(
+    signal5mIndex - ENTRY_5M_BREAKOUT_LOOKBACK,
+    signal5mIndex
+  );
 
-    if (breakoutUp) breakoutSide = 'long';
-    if (breakoutDown) breakoutSide = 'short';
-  }
+  const localLow5m = Math.min(...recent5mLows);
+  const localHigh5m = Math.max(...recent5mHighs);
 
-  // --------------------------------------------------------------------------
-  // Breakout из trend_breakout: пробой только в направлении режима
-  // --------------------------------------------------------------------------
-  if (regime === 'trend_breakout') {
-    const lastClose =
-      (regimeInfo.indicators?.lastClose as number | undefined) ?? price;
+  const shortBreakdownThreshold =
+    localLow5m - lastAtr5m * ENTRY_5M_BREAKOUT_ATR_BUFFER;
 
-    const lastEma200 =
-      (regimeInfo.indicators?.ema200 as number | undefined) ?? 0;
+  const longBreakoutThreshold =
+    localHigh5m + lastAtr5m * ENTRY_5M_BREAKOUT_ATR_BUFFER;
 
-    if (lastClose > lastEma200) {
-      breakoutUp =
-        price > upperTrigger &&
-        breakoutBodyWithinRange &&
-        lastRsi > 50 &&
-        volumeSpike;
+  const confirmedBreakdown5m = price < shortBreakdownThreshold;
+  const confirmedBreakout5m = price > longBreakoutThreshold;
 
-      if (breakoutUp) {
-        breakoutSide = 'long';
-      }
-    } else {
-      breakoutDown =
-        price < lowerTrigger &&
-        breakoutBodyWithinRange &&
-        lastRsi < 50 &&
-        volumeSpike;
+  const shortExtensionFromEma20 =
+    (lastEma20_5m - price) / lastAtr5m;
 
-      if (breakoutDown) {
-        breakoutSide = 'short';
-      }
-    }
-  }
+  const longExtensionFromEma20 =
+    (price - lastEma20_5m) / lastAtr5m;
 
-  // --------------------------------------------------------------------------
-  // Short continuation в trend_down
-  // --------------------------------------------------------------------------
-  let continuationShort = false;
+  const shortNotOverextended =
+    shortExtensionFromEma20 <= ENTRY_5M_MAX_EMA20_EXTENSION_ATR;
 
-  let previousLocalLow: number | null = null;
-  let confirmedBreakdown = false;
-  let recentBullishImpulse = false;
-  let recentBullishImpulseCount = 0;
-  let maxRecentBullishBody = 0;
+  const longNotOverextended =
+    longExtensionFromEma20 <= ENTRY_5M_MAX_EMA20_EXTENSION_ATR;
 
-  if (regime === 'trend_down' && breakoutSide === 'none') {
-    const lastEma20 =
-      (regimeInfo.indicators?.ema20 as number | undefined) ?? 0;
+  const closeNearLow =
+    signalCandle5m.close <=
+    signalCandle5m.low + lastAtr5m * 0.25;
 
-    const lastEma50 =
-      (regimeInfo.indicators?.ema50 as number | undefined) ?? 0;
+  const closeNearHigh =
+    signalCandle5m.close >=
+    signalCandle5m.high - lastAtr5m * 0.25;
 
-    const previousLows = lows.slice(
-      Math.max(0, signalIndex - CONTINUATION_BREAKDOWN_LOOKBACK),
-      signalIndex
+  const contextRegime = context15m.regime;
+
+  const allowShortContext =
+    contextRegime === 'breakout_watch' ||
+    contextRegime === 'trend_down' ||
+    contextRegime === 'trend_breakout';
+
+  const allowLongContext =
+    contextRegime === 'breakout_watch' ||
+    contextRegime === 'trend_up' ||
+    contextRegime === 'trend_breakout';
+
+  const contextEma200 =
+    context15m.indicators.ema200 as number | undefined;
+
+  const contextClose =
+    context15m.indicators.lastClose as number | undefined;
+
+  const contextTrendShort =
+    contextRegime === 'trend_down' ||
+    (
+      contextRegime === 'trend_breakout' &&
+      contextClose !== undefined &&
+      contextEma200 !== undefined &&
+      contextClose < contextEma200
     );
 
-    if (previousLows.length === CONTINUATION_BREAKDOWN_LOOKBACK) {
-      previousLocalLow = Math.min(...previousLows);
-
-      confirmedBreakdown =
-        price <
-        previousLocalLow -
-          lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER;
-    }
-
-    const recentCandles = candles.slice(
-      Math.max(0, signalIndex - SHORT_REVERSAL_LOOKBACK),
-      signalIndex
+  const contextTrendLong =
+    contextRegime === 'trend_up' ||
+    (
+      contextRegime === 'trend_breakout' &&
+      contextClose !== undefined &&
+      contextEma200 !== undefined &&
+      contextClose > contextEma200
     );
 
-    const bullishImpulses = recentCandles.filter(c => {
-      const greenBody = c.close - c.open;
+  const shortSignal =
+    allowShortContext &&
+    bodyValid &&
+    volume5m.ok &&
+    lastRsi5m < 48 &&
+    price < lastEma20_5m &&
+    confirmedBreakdown5m &&
+    closeNearLow &&
+    shortNotOverextended;
 
-      return (
-        c.close > c.open &&
-        greenBody >= lastAtr * SHORT_REVERSAL_BODY_ATR
-      );
-    });
-
-    recentBullishImpulse = bullishImpulses.length > 0;
-    recentBullishImpulseCount = bullishImpulses.length;
-
-    maxRecentBullishBody = recentCandles.reduce((maxBody, c) => {
-      const greenBody =
-        c.close > c.open
-          ? c.close - c.open
-          : 0;
-
-      return Math.max(maxBody, greenBody);
-    }, 0);
-
-    continuationShort =
-      price < lastEma20 &&
-      price < lastEma50 &&
-      lastRsi < 48 &&
-      volumeSpike &&
-      confirmedBreakdown &&
-      !recentBullishImpulse;
-
-    if (continuationShort) {
-      breakoutSide = 'short';
-      breakoutDown = true;
-    }
-  }
-
-  const sideWouldBe: 'long' | 'short' | 'none' = breakoutSide;
-
-  // ============================================================================
-  // HTF-фильтр
-  // ============================================================================
-  if (htf.enabled && sideWouldBe !== 'none') {
-    const minAdx = htf.minAdx1h ?? 18;
-
-    const series =
-      htf.precomputedHtf ??
-      buildHtfBiasSeries(aggregateTo1h(candles), minAdx);
-
-    const st = getHtfBiasAt(series, signalTime);
-
-    if (!st) {
-      return {
-        ...emptySignal(price, regime),
-        indicators: {
-          ready: true,
-          reject: 'htf_warmup',
-          breakoutUp,
-          breakoutDown,
-          continuationShort,
-          sideWouldBe,
-          htfSeriesLength: series.length,
-          volumeSpike,
-          volumeCurrent: volumeCheck.signalVolume,
-          volumeMedian: volumeCheck.medianVolume,
-          volumeRatio: volumeCheck.ratio,
-          volumeThreshold: volumeCheck.threshold,
-
-          candleBody,
-          lastAtr,
-          candleBodyAtrRatio,
-          minBody,
-          maxBody,
-          breakoutBodyWithinRange,
-
-          breakoutPreviousLocalLow,
-          breakoutBreakdownThreshold,
-          breakoutConfirmedDown,
-
-          previousLocalLow,
-          confirmedBreakdown,
-          recentBullishImpulse,
-          recentBullishImpulseCount,
-          maxRecentBullishBody,
-          reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
-        }
-      };
-    }
-
-    const htfAllowed = isHtfDirectionAllowed(sideWouldBe, st.bias);
-
-    if (!htfAllowed) {
-      return {
-        ...emptySignal(price, regime),
-        indicators: {
-          ready: true,
-          reject: 'htf_gate',
-          htfBias: st.bias,
-          htfAdx: st.adx,
-          sideWouldBe,
-          htfAllowed,
-          htfDecision: 'blocked_opposite_bias',
-          htfEma20: st.ema20,
-          htfEma50: st.ema50,
-          htfEma200: st.ema200,
-          upperTrigger,
-          lowerTrigger,
-          volumeSpike,
-          volumeCurrent: volumeCheck.signalVolume,
-          volumeMedian: volumeCheck.medianVolume,
-          volumeRatio: volumeCheck.ratio,
-          volumeThreshold: volumeCheck.threshold,
-
-          candleBody,
-          lastAtr,
-          candleBodyAtrRatio,
-          minBody,
-          maxBody,
-          breakoutBodyWithinRange,
-
-          breakoutPreviousLocalLow,
-          breakoutBreakdownThreshold,
-          breakoutConfirmedDown,
-
-          previousLocalLow,
-          confirmedBreakdown,
-          recentBullishImpulse,
-          recentBullishImpulseCount,
-          maxRecentBullishBody,
-          reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
-        }
-      };
-    }
-  }
+  const longSignal =
+    allowLongContext &&
+    bodyValid &&
+    volume5m.ok &&
+    lastRsi5m > 52 &&
+    price > lastEma20_5m &&
+    confirmedBreakout5m &&
+    closeNearHigh &&
+    longNotOverextended;
 
   let side: 'long' | 'short' | 'none' = 'none';
-  const entryPrice = price;
 
-  let tp1R = BREAKOUT_TP1_R;
-  let tp2R = BREAKOUT_TP2_R;
-  let atrStopMult = BREAKOUT_ATR_STOP_MULT;
-
-  if (continuationShort) {
-    tp1R = TREND_TP1_R;
-    tp2R = TREND_TP2_R;
-    atrStopMult = 1.2;
+  if (longSignal && !shortSignal) {
+    side = 'long';
+  } else if (shortSignal && !longSignal) {
+    side = 'short';
   }
 
-  if (breakoutUp) {
-    side = 'long';
-  } else if (breakoutDown) {
-    side = 'short';
+  const htfMeta: Record<string, unknown> = {};
+
+  if (side !== 'none' && htf.enabled) {
+    const minAdx = htf.minAdx1h ?? 18;
+    const series =
+      htf.precomputedHtf ??
+      buildHtfBiasSeries(
+        aggregateTo1h(candles15m),
+        minAdx
+      );
+
+    const htfState = getHtfBiasAt(series, signalTime);
+
+    if (!htfState) {
+      return emptySignal(price, contextRegime, {
+        ready: true,
+        reject: 'htf_warmup',
+        entryTimeframe: '5m',
+        contextTimeframe: '15m',
+        sideWouldBe: side,
+        htfSeriesLength: series.length
+      });
+    }
+
+    htfMeta.htfEnabled = true;
+    htfMeta.htfBias = htfState.bias;
+    htfMeta.htfAdx = htfState.adx;
+    htfMeta.htfEma20 = htfState.ema20;
+    htfMeta.htfEma50 = htfState.ema50;
+    htfMeta.htfEma200 = htfState.ema200;
+
+    if (!isHtfDirectionAllowed(side, htfState.bias)) {
+      return emptySignal(price, contextRegime, {
+        ready: true,
+        reject: 'htf_gate',
+        entryTimeframe: '5m',
+        contextTimeframe: '15m',
+        sideWouldBe: side,
+        htfAllowed: false,
+        ...htfMeta
+      });
+    }
   }
 
   if (side === 'none') {
     const rejectReasons: string[] = [];
 
-    if (
-      regime !== 'breakout_watch' &&
-      regime !== 'trend_breakout' &&
-      regime !== 'trend_down'
-    ) {
-      rejectReasons.push('regime_not_trading');
+    if (!allowShortContext && !allowLongContext) {
+      rejectReasons.push('15m_context_not_tradeable');
     }
 
-    if (regime === 'trend_down') {
-      if (!confirmedBreakdown) {
-        rejectReasons.push('continuation_no_confirmed_breakdown');
-      }
-
-      if (recentBullishImpulse) {
-        rejectReasons.push('continuation_recent_bullish_impulse');
-      }
+    if (!bodyLargeEnough) {
+      rejectReasons.push('5m_body_too_small');
     }
 
-    if (
-      regime === 'breakout_watch' &&
-      price < lowerTrigger &&
-      !breakoutConfirmedDown
-    ) {
-      rejectReasons.push('breakout_short_no_confirmed_local_low');
+    if (!bodyNotExhausted) {
+      rejectReasons.push('5m_body_too_large');
     }
 
-    if (
-      (regime === 'breakout_watch' || regime === 'trend_breakout') &&
-      candleBody > maxBody
-    ) {
-      rejectReasons.push('breakout_body_too_large');
+    if (!volume5m.ok) {
+      rejectReasons.push('5m_volume_below_threshold');
     }
 
-    if (breakoutUp === false && breakoutDown === false && !continuationShort) {
-      if (price <= upperTrigger) {
-        rejectReasons.push('price_up_not_reached');
-      }
-
-      if (price >= lowerTrigger) {
-        rejectReasons.push('price_down_not_reached');
-      }
-
-      if (candleBody < minBody) {
-        rejectReasons.push('body_too_small');
-      }
-
-      if (lastRsi <= 55 && lastRsi >= 45) {
-        rejectReasons.push('rsi_neutral');
-      }
-
-      if (!volumeSpike) {
-        rejectReasons.push('volume_below_median_threshold');
-      }
+    if (allowShortContext && !confirmedBreakdown5m) {
+      rejectReasons.push('5m_no_confirmed_breakdown');
     }
 
-    return {
-      ...emptySignal(price, regime),
-      indicators: {
-        ready: true,
-        longSignal,
-        shortSignal,
-        breakoutUp,
-        breakoutDown,
-        continuationShort,
-        lastRsi,
-        regime,
-        htfEnabled: htf.enabled,
-        price,
-        bbUpper: lastBb.upper,
-        bbLower: lastBb.lower,
-        atrBuffer,
-        upperTrigger,
-        lowerTrigger,
-        distanceToLongTrigger: upperTrigger - price,
-        distanceToShortTrigger: price - lowerTrigger,
+    if (allowLongContext && !confirmedBreakout5m) {
+      rejectReasons.push('5m_no_confirmed_breakout');
+    }
 
-        candleBody,
-        lastAtr,
-        candleBodyAtrRatio,
-        minBody,
-        maxBody,
-        maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
-        breakoutBodyWithinRange,
+    if (allowShortContext && !shortNotOverextended) {
+      rejectReasons.push('5m_short_overextended_from_ema20');
+    }
 
-        volumeSpike,
-        volumeCurrent: volumeCheck.signalVolume,
-        volumeMedian: volumeCheck.medianVolume,
-        volumeRatio: volumeCheck.ratio,
-        volumeThreshold: volumeCheck.threshold,
-        volumeSampleSize: volumeCheck.sampleSize,
-        signalTimeUtc: new Date(signalTime).toISOString(),
-        signalIndex,
-        lastIsForming,
+    if (allowLongContext && !longNotOverextended) {
+      rejectReasons.push('5m_long_overextended_from_ema20');
+    }
 
-        breakoutBreakdownLookback: BREAKOUT_BREAKDOWN_LOOKBACK,
-        breakoutBreakdownAtrBuffer: BREAKOUT_BREAKDOWN_ATR_BUFFER,
-        breakoutPreviousLocalLow,
-        breakoutBreakdownThreshold,
-        breakoutConfirmedDown,
+    return emptySignal(price, contextRegime, {
+      ready: true,
+      reject: 'no_5m_entry_conditions',
+      rejectReasons,
 
-        continuationBreakdownLookback: CONTINUATION_BREAKDOWN_LOOKBACK,
-        continuationBreakdownAtrBuffer: CONTINUATION_BREAKDOWN_ATR_BUFFER,
-        previousLocalLow,
-        breakdownThreshold:
-          previousLocalLow === null
-            ? null
-            : previousLocalLow -
-              lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
-        confirmedBreakdown,
+      entryTimeframe: '5m',
+      contextTimeframe: '15m',
+      signalTimeUtc: new Date(signalTime).toISOString(),
+      signal5mIndex,
+      last5mIsForming,
+      last15mIsForming,
 
-        shortReversalLookback: SHORT_REVERSAL_LOOKBACK,
-        shortReversalBodyAtr: SHORT_REVERSAL_BODY_ATR,
-        reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR,
-        recentBullishImpulse,
-        recentBullishImpulseCount,
-        maxRecentBullishBody,
+      contextRegime,
+      context15mAdx: context15m.indicators.adx,
+      context15mEma20: context15m.indicators.ema20,
+      context15mEma50: context15m.indicators.ema50,
+      context15mEma200: context15m.indicators.ema200,
+      context15mBbWidth: context15m.indicators.bbWidth,
+      allowShortContext,
+      allowLongContext,
+      contextTrendShort,
+      contextTrendLong,
 
-        reject: 'no_breakout_conditions',
-        rejectReasons
-      }
-    };
+      price,
+      lastAtr5m,
+      lastRsi5m,
+      ema20_5m: lastEma20_5m,
+
+      candleBody5m,
+      candleBodyAtrRatio5m,
+      minBody5m: lastAtr5m * BREAKOUT_BODY_ATR_MIN,
+      maxBody5m: lastAtr5m * MAX_BREAKOUT_BODY_ATR,
+      bodyValid,
+
+      volumeSpike: volume5m.ok,
+      volumeCurrent: volume5m.signalVolume,
+      volumeMedian: volume5m.medianVolume,
+      volumeRatio: volume5m.ratio,
+      volumeThreshold: volume5m.threshold,
+      volumeSampleSize: volume5m.sampleSize,
+
+      localLow5m,
+      localHigh5m,
+      shortBreakdownThreshold,
+      longBreakoutThreshold,
+      confirmedBreakdown5m,
+      confirmedBreakout5m,
+
+      shortExtensionFromEma20,
+      longExtensionFromEma20,
+      maxEma20ExtensionAtr: ENTRY_5M_MAX_EMA20_EXTENSION_ATR,
+      shortNotOverextended,
+      longNotOverextended,
+
+      closeNearLow,
+      closeNearHigh
+    });
   }
 
-  // Берём историю только до сигнальной свечи: без look-ahead из forming bar.
-  const signalHighs = highs.slice(0, signalIndex + 1);
-  const signalLows = lows.slice(0, signalIndex + 1);
+  const signalHighs5m = highs5m.slice(0, signal5mIndex + 1);
+  const signalLows5m = lows5m.slice(0, signal5mIndex + 1);
 
   const stopLossPrice = getStructureStop({
     side,
-    highs: signalHighs,
-    lows: signalLows,
-    price: entryPrice,
-    lastAtr,
-    atrStopMult
+    highs: signalHighs5m,
+    lows: signalLows5m,
+    price,
+    lastAtr: lastAtr5m,
+    atrStopMult: ENTRY_5M_ATR_STOP_MULT
   });
 
-  const initialR = Math.abs(entryPrice - stopLossPrice);
-  const stopPct = initialR / entryPrice;
+  const initialR = Math.abs(price - stopLossPrice);
+  const stopPct = initialR / price;
 
   if (
     initialR <= 0 ||
     stopPct < MIN_STOP_DISTANCE_RATE ||
     stopPct > MAX_STOP_DISTANCE_RATE
   ) {
-    return {
-      ...emptySignal(price, regime),
-      indicators: {
-        ready: true,
-        reject: 'stop_distance',
-        stopPct,
-        initialR,
-
-        candleBody,
-        lastAtr,
-        candleBodyAtrRatio,
-        minBody,
-        maxBody,
-        maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
-        breakoutBodyWithinRange,
-
-        breakoutPreviousLocalLow,
-        breakoutBreakdownThreshold,
-        breakoutConfirmedDown,
-
-        continuationShort,
-        previousLocalLow,
-        confirmedBreakdown,
-        recentBullishImpulse,
-        recentBullishImpulseCount,
-        maxRecentBullishBody,
-        reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
-      }
-    };
+    return emptySignal(price, contextRegime, {
+      ready: true,
+      reject: 'stop_distance',
+      entryTimeframe: '5m',
+      contextTimeframe: '15m',
+      stopPct,
+      initialR
+    });
   }
+
+  const isTrendContinuation =
+    side === 'short'
+      ? contextTrendShort
+      : contextTrendLong;
+
+  const tp1R = isTrendContinuation
+    ? TREND_TP1_R
+    : BREAKOUT_TP1_R;
+
+  const tp2R = isTrendContinuation
+    ? TREND_TP2_R
+    : BREAKOUT_TP2_R;
 
   const takeProfit1Price =
     side === 'long'
-      ? entryPrice + tp1R * initialR
-      : entryPrice - tp1R * initialR;
+      ? price + tp1R * initialR
+      : price - tp1R * initialR;
 
   const takeProfit2Price =
     side === 'long'
-      ? entryPrice + tp2R * initialR
-      : entryPrice - tp2R * initialR;
+      ? price + tp2R * initialR
+      : price - tp2R * initialR;
 
   const riskCapital = balance * MAX_RISK_PER_TRADE;
 
   const sized = calcPositionSize({
-    price: entryPrice,
+    price,
     stopLossPrice,
     riskCapital,
     balance
   });
 
   if (sized.quantity == null) {
-    return {
-      ...emptySignal(price, regime),
-      indicators: {
-        ready: true,
-        reject: 'size_calculation',
-
-        candleBody,
-        lastAtr,
-        candleBodyAtrRatio,
-        minBody,
-        maxBody,
-        maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
-        breakoutBodyWithinRange,
-
-        breakoutPreviousLocalLow,
-        breakoutBreakdownThreshold,
-        breakoutConfirmedDown,
-
-        continuationShort,
-        previousLocalLow,
-        confirmedBreakdown,
-        recentBullishImpulse,
-        recentBullishImpulseCount,
-        maxRecentBullishBody,
-        reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR
-      }
-    };
+    return emptySignal(price, contextRegime, {
+      ready: true,
+      reject: 'size_calculation',
+      entryTimeframe: '5m',
+      contextTimeframe: '15m'
+    });
   }
 
   return {
-    price: entryPrice,
+    price,
     buy: side === 'long',
     sell: side === 'short',
     side,
@@ -1370,65 +1155,93 @@ export function analyzeMarket(
     tp1Fraction: TP1_FRACTION,
     positionSize: sized.positionSize,
     quantity: sized.quantity,
-    regime,
+    regime: contextRegime,
     initialR,
     timeFailBars: DEFAULT_TIME_FAIL_BARS,
     indicators: {
       ready: true,
-      lastRsi,
+
+      entryTimeframe: '5m',
+      contextTimeframe: '15m',
+      signalTimeUtc: new Date(signalTime).toISOString(),
+      signal5mIndex,
+      last5mIsForming,
+      last15mIsForming,
+
+      contextRegime,
+      context15mAdx: context15m.indicators.adx,
+      context15mEma20: context15m.indicators.ema20,
+      context15mEma50: context15m.indicators.ema50,
+      context15mEma200: context15m.indicators.ema200,
+      context15mBbUpper: context15m.indicators.bbUpper,
+      context15mBbMiddle: context15m.indicators.bbMiddle,
+      context15mBbLower: context15m.indicators.bbLower,
+      context15mBbWidth: context15m.indicators.bbWidth,
+
+      allowShortContext,
+      allowLongContext,
+      contextTrendShort,
+      contextTrendLong,
+
+      lastAtr: lastAtr5m,
+      lastRsi: lastRsi5m,
+      ema20_5m: lastEma20_5m,
+
+      candleBody: candleBody5m,
+      candleBodyAtrRatio: candleBodyAtrRatio5m,
+      minBody: lastAtr5m * BREAKOUT_BODY_ATR_MIN,
+      maxBody: lastAtr5m * MAX_BREAKOUT_BODY_ATR,
+      breakoutBodyWithinRange: bodyValid,
+
+      volumeSpike: volume5m.ok,
+      volumeCurrent: volume5m.signalVolume,
+      volumeMedian: volume5m.medianVolume,
+      volumeRatio: volume5m.ratio,
+      volumeThreshold: volume5m.threshold,
+      volumeSampleSize: volume5m.sampleSize,
+
+      localLow5m,
+      localHigh5m,
+      shortBreakdownThreshold,
+      longBreakoutThreshold,
+      confirmedBreakdown5m,
+      confirmedBreakout5m,
+
+      shortExtensionFromEma20,
+      longExtensionFromEma20,
+      maxEma20ExtensionAtr: ENTRY_5M_MAX_EMA20_EXTENSION_ATR,
+      shortNotOverextended,
+      longNotOverextended,
+
+      closeNearLow,
+      closeNearHigh,
+
       initialR,
       stopPct,
       tp1: takeProfit1Price,
       tp2: takeProfit2Price,
 
-      breakoutUp,
-      breakoutDown,
-      continuationShort,
-
-      htfEnabled: htf.enabled,
-
-      upperTrigger,
-      lowerTrigger,
-
-      candleBody,
-      lastAtr,
-      candleBodyAtrRatio,
-      minBody,
-      maxBody,
-      maxBreakoutBodyAtr: MAX_BREAKOUT_BODY_ATR,
-      breakoutBodyWithinRange,
-
-      volumeSpike,
-      volumeCurrent: volumeCheck.signalVolume,
-      volumeMedian: volumeCheck.medianVolume,
-      volumeRatio: volumeCheck.ratio,
-      volumeThreshold: volumeCheck.threshold,
-      volumeSampleSize: volumeCheck.sampleSize,
-
-      signalTimeUtc: new Date(signalTime).toISOString(),
-
-      breakoutBreakdownLookback: BREAKOUT_BREAKDOWN_LOOKBACK,
-      breakoutBreakdownAtrBuffer: BREAKOUT_BREAKDOWN_ATR_BUFFER,
-      breakoutPreviousLocalLow,
-      breakoutBreakdownThreshold,
-      breakoutConfirmedDown,
-
-      continuationBreakdownLookback: CONTINUATION_BREAKDOWN_LOOKBACK,
-      continuationBreakdownAtrBuffer: CONTINUATION_BREAKDOWN_ATR_BUFFER,
-      previousLocalLow,
-      breakdownThreshold:
-        previousLocalLow === null
-          ? null
-          : previousLocalLow -
-            lastAtr * CONTINUATION_BREAKDOWN_ATR_BUFFER,
-      confirmedBreakdown,
-
-      shortReversalLookback: SHORT_REVERSAL_LOOKBACK,
-      shortReversalBodyAtr: SHORT_REVERSAL_BODY_ATR,
-      reversalBodyThreshold: lastAtr * SHORT_REVERSAL_BODY_ATR,
-      recentBullishImpulse,
-      recentBullishImpulseCount,
-      maxRecentBullishBody
+      ...htfMeta
     }
   };
+}
+
+// ============================================================================
+// LEGACY SINGLE-TIMEFRAME ENTRY
+//
+// Оставлена, чтобы текущие импорты не ломались до обновления autoBot.ts.
+// Для реальной работы 15m-context + 5m-entry используй
+// analyzeMarketMultiTimeframe({ candles15m, candles5m, balance, htf }).
+// ============================================================================
+export function analyzeMarket(
+  candles: Candle[],
+  balance: number = STARTING_BALANCE,
+  htf: HtfFilterOptions = DEFAULT_HTF_FILTER
+): StrategySignal {
+  return analyzeMarketMultiTimeframe({
+    candles15m: candles,
+    candles5m: candles,
+    balance,
+    htf
+  });
 }
