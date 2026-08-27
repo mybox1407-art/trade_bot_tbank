@@ -2,14 +2,9 @@
 //
 // Мульти-ТФ режим:
 // - 15m: контекст рынка, regime / Bollinger squeeze / направление.
-// - 5m: входной триггер, структура локального пробоя, ATR / объём / EMA20.
+// - 5m: входной триггер, ATR / объём / EMA20.
 // - 1h: старший трендовый фильтр.
 // - Мониторинг открытых позиций остаётся отдельным процессом.
-//
-// ВАЖНО:
-// Этот файл ожидает экспорт analyzeMarketMultiTimeframe из ./strategy.
-// Риск на сделку, размер позиции и максимальное число параллельных позиций
-// намеренно не менялись — это paper-trading режим.
 
 import { getCandles, getCurrentPrice } from './exchange';
 import {
@@ -35,57 +30,35 @@ import axios from 'axios';
 
 export const AUTO_BOT_CONFIG = {
   symbols: ['TATN', 'GAZP', 'NVTK'] as const,
-
-  // 5m — рабочий timeframe входа. Цикл запускается после закрытия 5m свечи.
   timeframe: '5m' as const,
-
-  // 15m — только контекст: regime / BB squeeze / направление.
   contextTimeframe: '15m' as const,
-
-  // 5m: 300 свечей = около 25 торговых часов.
   candlesLimit: 300,
-
-  // 15m: 250 свечей = около 62.5 торговых часов.
   contextCandlesLimit: 250,
-
   htfCandlesLimit: 300,
-
-  // Поле оставлено для обратной совместимости / статуса.
   regimeCheckIntervalMs: 5 * 60 * 1000,
-
-  // Запуск через 15 секунд после закрытия 5m бара.
   barCloseDelaySec: 15,
-
   dropFormingCandle: true,
   tradingHoursEnabled: true,
   tradingWindows: [[10 * 60 + 1, 23 * 60 + 59]] as const,
   maxSleepMs: 6 * 60 * 60 * 1000,
   logWhenMarketClosed: false,
-
-  // Не менял по запросу. Можно отдельно улучшить до 1–2 секунд.
   positionMonitorIntervalMs: 15 * 1000,
-
-  // Не менял по запросу: до 3 позиций.
   maxPositions: MAX_OPEN_POSITIONS,
-
-  // Не менял по запросу.
   positionSizeFraction: 0.30,
   startingBalance: STARTING_BALANCE,
-
   allowedMarketStates: ['resonant', 'transition'] as const,
-
   htfFilterEnabled: true,
   htfMinAdx1h: 18,
-
-  // На 5m: 4 бара = 20 минут ожидания исполнения pending-сигнала.
   entryTimeoutBars: 4,
-
   logSignals: true,
   logTrades: true,
 
   telegramEnabled: true,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
-  telegramChatId: process.env.TELEGRAM_CHAT_ID || ''
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
+
+  // Каждые 5 минут отправлять краткий результат проверки каждого тикера.
+  telegramSignalChecksEnabled: true
 } as const;
 
 type Symbol = typeof AUTO_BOT_CONFIG.symbols[number];
@@ -142,7 +115,7 @@ function log(
 }
 
 // ============================================================================
-// Маскировка секретов в логах и статусе
+// Маскировка секретов
 // ============================================================================
 function maskSecret(value: string): string {
   if (!value) return value;
@@ -159,7 +132,7 @@ function maskedConfig() {
 }
 
 // ============================================================================
-// Торговое окно и расписание закрытия 5m бара
+// Время торгов и расписание 5m цикла
 // ============================================================================
 const MSK_OFFSET_MIN = 180;
 
@@ -255,10 +228,6 @@ function nextTradingWindowOpenMs(now: number): number | null {
   return null;
 }
 
-/**
- * Новый цикл строится вокруг закрытия 5m свечи.
- * 15m остаётся контекстом, но не задаёт частоту входного цикла.
- */
 function computeRegimeDelayMs(): number {
   const now = nowMs();
 
@@ -298,7 +267,7 @@ function computeRegimeDelayMs(): number {
 }
 
 // ============================================================================
-// Свечи: удаление forming bar и жёсткий лимит
+// Свечи: удаление forming bar + limit
 // ============================================================================
 function candleOpenTimeMs(candle: Candle): number | null {
   const record = candle as unknown as Record<string, unknown>;
@@ -397,6 +366,135 @@ async function sendTelegramMessage(message: string) {
   }
 }
 
+function formatRejectReason(code: string): string {
+  const map: Record<string, string> = {
+    '15m_context_not_tradeable':
+      '15m-контекст не подходит',
+
+    '5m_body_too_small':
+      '5m-свеча слишком слабая',
+
+    '5m_body_too_large':
+      '5m-свеча слишком большая',
+
+    '5m_volume_below_threshold':
+      'недостаточный объём',
+
+    '5m_short_overextended_from_ema20':
+      'short запоздал: цена далеко ниже EMA20',
+
+    '5m_long_overextended_from_ema20':
+      'long запоздал: цена далеко выше EMA20',
+
+    '5m_short_close_not_near_low':
+      'short: закрытие далеко от low',
+
+    '5m_long_close_not_near_high':
+      'long: закрытие далеко от high',
+
+    'htf_gate':
+      'направление против 1h',
+
+    'htf_warmup':
+      'недостаточно 1h-данных',
+
+    'stop_distance':
+      'стоп вне допустимой дистанции',
+
+    'size_calculation':
+      'не рассчитан размер позиции',
+
+    'not_trading_hour':
+      'вне торгового времени',
+
+    'no_5m_entry_conditions':
+      'условия 5m-входа не выполнены',
+
+    'conditions_not_met':
+      'условия входа не выполнены'
+  };
+
+  return map[code] ?? code;
+}
+
+function getRejectCodes(
+  indicators: Record<string, unknown>
+): string[] {
+  const reasons = indicators.rejectReasons;
+
+  if (Array.isArray(reasons) && reasons.length > 0) {
+    return reasons
+      .filter(reason => typeof reason === 'string')
+      .map(reason => String(reason));
+  }
+
+  const reject = indicators.reject;
+
+  if (typeof reject === 'string' && reject) {
+    return [reject];
+  }
+
+  return ['conditions_not_met'];
+}
+
+/**
+ * Короткое сообщение отправляется КАЖДЫЙ цикл и по КАЖДОМУ тикеру,
+ * если стратегия не вернула торговый сигнал.
+ */
+async function sendTelegramRejectedSignalCheck(
+  symbol: Symbol,
+  regime: string,
+  price: number,
+  indicators: Record<string, unknown>
+) {
+  if (!AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+    return;
+  }
+
+  const reasons = getRejectCodes(indicators)
+    .map(formatRejectReason)
+    .join('; ');
+
+  const message = [
+    '[ПРОВЕРКА СИГНАЛА]',
+    `${symbol} | ${regime}`,
+    `Цена 5m: ${formatMoney(price)} RUB`,
+    `Отклонён: ${reasons}`
+  ].join('\n');
+
+  await sendTelegramMessage(message);
+}
+
+/**
+ * Короткое сообщение отправляется при разрешённом сигнале до попытки входа.
+ * После успешного исполнения придёт уже существующее полное сообщение
+ * об открытии позиции.
+ */
+async function sendTelegramApprovedSignalCheck(
+  symbol: Symbol,
+  side: 'long' | 'short',
+  regime: string,
+  price: number
+) {
+  if (!AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+    return;
+  }
+
+  const sideText =
+    side === 'long'
+      ? 'LONG'
+      : 'SHORT';
+
+  const message = [
+    '[ПРОВЕРКА СИГНАЛА]',
+    `${symbol} | ${regime}`,
+    `Цена 5m: ${formatMoney(price)} RUB`,
+    `Сигнал разрешён: ${sideText}`
+  ].join('\n');
+
+  await sendTelegramMessage(message);
+}
+
 export async function sendTelegramTestMessage() {
   const message = `
 [TEST] Автономный торговый бот MOEX
@@ -412,6 +510,7 @@ export async function sendTelegramTestMessage() {
 Вход: 5m после закрытия бара
 HTF: 1h
 Мониторинг позиции: каждые ${AUTO_BOT_CONFIG.positionMonitorIntervalMs / 1000} сек
+Telegram-проверки 5m: ${AUTO_BOT_CONFIG.telegramSignalChecksEnabled ? 'включены' : 'выключены'}
 
 Telegram подключён и работает.
 `.trim();
@@ -512,7 +611,7 @@ PNL: ${pnlSign}${formatMoney(realizedPnL)} руб (${pnlSign}${pnlPercent}%)
 }
 
 // ============================================================================
-// Хелперы логирования
+// Логирование
 // ============================================================================
 function getVolumeLogMeta(
   indicators: Record<string, unknown> | undefined
@@ -546,14 +645,22 @@ function get5mEntryLogMeta(
     context15mAdx: indicators.context15mAdx,
     context15mBbWidth: indicators.context15mBbWidth,
 
-    lastAtr: indicators.lastAtr,
-    lastRsi: indicators.lastRsi,
+    lastAtr: indicators.lastAtr5m ?? indicators.lastAtr,
+    lastRsi: indicators.lastRsi5m ?? indicators.lastRsi,
     ema20_5m: indicators.ema20_5m,
 
-    candleBody: indicators.candleBody,
-    candleBodyAtrRatio: indicators.candleBodyAtrRatio,
-    minBody: indicators.minBody,
-    maxBody: indicators.maxBody,
+    candleBody: indicators.candleBody5m ?? indicators.candleBody,
+    candleBodyAtrRatio:
+      indicators.candleBodyAtrRatio5m ??
+      indicators.candleBodyAtrRatio,
+
+    minBody: indicators.minBody5m ?? indicators.minBody,
+    maxBody: indicators.maxBody5m ?? indicators.maxBody,
+
+    bodyValid:
+      indicators.bodyValid ??
+      indicators.breakoutBodyWithinRange,
+
     breakoutBodyWithinRange:
       indicators.breakoutBodyWithinRange,
 
@@ -706,7 +813,7 @@ export async function runRegimeCheckCycle() {
 }
 
 // ============================================================================
-// Обработка тикера: запрос 15m + 5m + 1h
+// Обработка тикера: 15m context + 5m entry + 1h HTF
 // ============================================================================
 async function processSymbol(
   symbol: Symbol,
@@ -714,9 +821,6 @@ async function processSymbol(
 ) {
   log('info', `Processing ${symbol}...`);
 
-  // --------------------------------------------------------------------------
-  // 15m: контекст рынка
-  // --------------------------------------------------------------------------
   const candles15mRaw = await getCandles(
     symbol,
     AUTO_BOT_CONFIG.contextTimeframe,
@@ -738,9 +842,6 @@ async function processSymbol(
     return;
   }
 
-  // --------------------------------------------------------------------------
-  // 5m: входной timeframe
-  // --------------------------------------------------------------------------
   const candles5mRaw = await getCandles(
     symbol,
     AUTO_BOT_CONFIG.timeframe,
@@ -762,9 +863,6 @@ async function processSymbol(
     return;
   }
 
-  // --------------------------------------------------------------------------
-  // 1h: HTF
-  // --------------------------------------------------------------------------
   const candles1hRaw = await getCandles(
     symbol,
     '1h',
@@ -793,12 +891,10 @@ async function processSymbol(
     AUTO_BOT_CONFIG.htfMinAdx1h
   );
 
-  // marketState остаётся на 15m, чтобы входы 5m не шли в случайном шуме.
   const marketState = detectMarketState(candles15m);
 
   if (!marketState.ready) {
     log('warn', `${symbol}: 15m market state not ready`);
-
     return;
   }
 
@@ -817,6 +913,16 @@ async function processSymbol(
       'info',
       `${symbol}: 15m state=chaotic, skipping 5m entry`
     );
+
+    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+      await sendTelegramMessage(
+        [
+          '[ПРОВЕРКА СИГНАЛА]',
+          `${symbol} | chaotic`,
+          'Отклонён: 15m-рынок хаотичный'
+        ].join('\n')
+      );
+    }
 
     return;
   }
@@ -841,8 +947,11 @@ async function processSymbol(
         indicators.reject ??
         'conditions_not_met',
 
-      entryTimeframe: indicators.entryTimeframe ?? '5m',
-      contextTimeframe: indicators.contextTimeframe ?? '15m',
+      entryTimeframe:
+        indicators.entryTimeframe ?? '5m',
+
+      contextTimeframe:
+        indicators.contextTimeframe ?? '15m',
 
       marketState: marketState.state,
       marketBias: marketState.sideBias,
@@ -861,6 +970,13 @@ async function processSymbol(
       rejectReasons: indicators.rejectReasons
     });
 
+    await sendTelegramRejectedSignalCheck(
+      symbol,
+      signal.regime,
+      signal.price,
+      indicators
+    );
+
     return;
   }
 
@@ -875,7 +991,6 @@ async function processSymbol(
     return;
   }
 
-  // Сигнал 5m разрешается только если совпадает с 15m market-state bias.
   if (
     marketState.sideBias !== 'neutral' &&
     marketState.sideBias !== side
@@ -885,10 +1000,20 @@ async function processSymbol(
       `${symbol}: 5m signal ${side} conflicts with 15m market bias ${marketState.sideBias}, skipping`
     );
 
+    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+      await sendTelegramMessage(
+        [
+          '[ПРОВЕРКА СИГНАЛА]',
+          `${symbol} | ${signal.regime}`,
+          `Цена 5m: ${formatMoney(signal.price)} RUB`,
+          `Отклонён: ${side.toUpperCase()} против 15m bias ${marketState.sideBias}`
+        ].join('\n')
+      );
+    }
+
     return;
   }
 
-  // Coherence остаётся 15m: проверяем, что контекст действительно согласован.
   const coherence = computeCoherenceScore(
     candles15m,
     side
@@ -899,6 +1024,17 @@ async function processSymbol(
       'info',
       `${symbol}: low 15m coherence ${coherence.toFixed(4)} for 5m ${side}, skipping`
     );
+
+    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+      await sendTelegramMessage(
+        [
+          '[ПРОВЕРКА СИГНАЛА]',
+          `${symbol} | ${signal.regime}`,
+          `Цена 5m: ${formatMoney(signal.price)} RUB`,
+          `Отклонён: низкая 15m coherence (${coherence.toFixed(2)})`
+        ].join('\n')
+      );
+    }
 
     return;
   }
@@ -914,6 +1050,17 @@ async function processSymbol(
       `${symbol}: incomplete 5m signal data`,
       signal
     );
+
+    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+      await sendTelegramMessage(
+        [
+          '[ПРОВЕРКА СИГНАЛА]',
+          `${symbol} | ${signal.regime}`,
+          `Цена 5m: ${formatMoney(signal.price)} RUB`,
+          'Отклонён: неполные параметры сделки'
+        ].join('\n')
+      );
+    }
 
     return;
   }
@@ -983,6 +1130,13 @@ async function processSymbol(
       ...get5mEntryLogMeta(signal.indicators),
       ...getVolumeLogMeta(signal.indicators)
     }
+  );
+
+  await sendTelegramApprovedSignalCheck(
+    symbol,
+    side,
+    signal.regime,
+    signal.price
   );
 
   await tryExecutePendingSignal(symbol, signal);
@@ -1419,7 +1573,9 @@ export async function startAutoBot() {
     htfTimeframe: '1h',
     maxPositions: AUTO_BOT_CONFIG.maxPositions,
     maxRiskPerTrade: '3%',
-    positionSizeFraction: '30%'
+    positionSizeFraction: '30%',
+    telegramSignalChecksEnabled:
+      AUTO_BOT_CONFIG.telegramSignalChecksEnabled
   });
 }
 
@@ -1472,6 +1628,9 @@ export function getAutoBotStatus() {
       timeoutBars: AUTO_BOT_CONFIG.entryTimeoutBars,
       entryTimeframe: '5m'
     })),
+
+    telegramSignalChecksEnabled:
+      AUTO_BOT_CONFIG.telegramSignalChecksEnabled,
 
     balance: getBalance(),
     availableBalance: getAvailableBalance()
