@@ -56,22 +56,26 @@ const VOLUME_SPIKE_MULTIPLIER = 1.1;
 // 5M ENTRY SETTINGS
 // ============================================================================
 /**
- * Локальная структура для 5m триггера.
- * На 5m 6 баров = 30 минут: достаточно, чтобы определить недавний high/low,
- * но без чрезмерного запаздывания.
+ * ENTRY_5M_BREAKOUT_LOOKBACK больше не используется как обязательный фильтр.
+ * Расчёт localLow/localHigh оставлен только для диагностики и может быть
+ * полезен, если позже понадобится вернуть структурное подтверждение.
+ *
+ * Текущая 5m-логика ловит ранний импульс, а 15m-контекст задаёт направление.
  */
-const ENTRY_5M_BREAKOUT_LOOKBACK = 6;
+const ENTRY_5M_DIAGNOSTIC_LOOKBACK = 6;
 
 /**
- * Требуется реальный пробой локального уровня, а не касание/один тик.
+ * Диагностический ATR-буфер для показа гипотетического local breakout.
+ * Не блокирует вход.
  */
-const ENTRY_5M_BREAKOUT_ATR_BUFFER = 0.05;
+const ENTRY_5M_DIAGNOSTIC_ATR_BUFFER = 0.05;
 
 /**
  * На 5m вход запрещён, если цена уже слишком далеко от EMA20.
- * Не догоняем ускорившееся движение.
+ * 1.4 ATR — мягкий предел для paper-trading: не догоняет 3–4 ATR движение,
+ * но не отсекает обычный импульс на 0.8–1.3 ATR.
  */
-const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 0.8;
+const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 1.4;
 
 /**
  * Мягкое подтверждение объёма на 5m.
@@ -82,6 +86,12 @@ const ENTRY_5M_VOLUME_MULTIPLIER = 1.2;
  * Stop для входа строится за структурой 5m, но не ближе 1.1 ATR.
  */
 const ENTRY_5M_ATR_STOP_MULT = 1.1;
+
+/**
+ * Форма свечи: цена должна закрыться ближе к low/high, но не на самом экстремуме.
+ * 0.50 ATR — мягкий фильтр, который допускает нормальный хвост.
+ */
+const ENTRY_5M_CLOSE_NEAR_EXTREME_ATR = 0.50;
 
 // ============================================================================
 // MINIMAL CONTINUATION-SHORT FILTERS
@@ -711,26 +721,33 @@ export function analyzeMarketMultiTimeframe(
   } = input;
 
   if (candles15m.length < 220 || candles5m.length < 60) {
-    return emptySignal(candles5m.at(-1)?.close ?? candles15m.at(-1)?.close ?? 0);
+    return emptySignal(
+      candles5m.at(-1)?.close ??
+      candles15m.at(-1)?.close ??
+      0
+    );
   }
 
   const now = Date.now();
 
-  // 15m regime is calculated only on closed bars.
   const bar15mMs = inferBarMs(candles15m);
   const last15mIsForming =
     last(candles15m).time + bar15mMs > now;
 
   const setup15mIndex =
-    (last15mIsForming ? candles15m.length - 2 : candles15m.length - 1) - 1;
+    (last15mIsForming
+      ? candles15m.length - 2
+      : candles15m.length - 1) - 1;
 
   if (setup15mIndex < 1) {
     return emptySignal(candles5m.at(-1)?.close ?? 0);
   }
 
-  const context15m = detectMarketRegime(candles15m, setup15mIndex);
+  const context15m = detectMarketRegime(
+    candles15m,
+    setup15mIndex
+  );
 
-  // 5m signal is calculated only on closed bars.
   const bar5mMs = inferBarMs(candles5m);
   const last5mIsForming =
     last(candles5m).time + bar5mMs > now;
@@ -741,11 +758,14 @@ export function analyzeMarketMultiTimeframe(
       : candles5m.length - 1;
 
   if (
-    signal5mIndex < ENTRY_5M_BREAKOUT_LOOKBACK ||
+    signal5mIndex < ENTRY_5M_DIAGNOSTIC_LOOKBACK ||
     !context15m.ready ||
     !context15m.indicators
   ) {
-    return emptySignal(candles5m.at(-1)?.close ?? 0, context15m.regime);
+    return emptySignal(
+      candles5m.at(-1)?.close ?? 0,
+      context15m.regime
+    );
   }
 
   const closes5m = candles5m.map(candle => candle.close);
@@ -775,15 +795,28 @@ export function analyzeMarketMultiTimeframe(
     rsi5m.length < 1 ||
     ema20_5m.length < 1
   ) {
-    return emptySignal(closes5m[signal5mIndex] ?? 0, context15m.regime);
+    return emptySignal(
+      closes5m[signal5mIndex] ?? 0,
+      context15m.regime
+    );
   }
 
   const signalCandle5m = candles5m[signal5mIndex];
   const price = signalCandle5m.close;
   const signalTime = signalCandle5m.time;
 
-  const lastAtr5m = indicatorAt(atr5m, signal5mIndex, candles5m.length);
-  const lastRsi5m = indicatorAt(rsi5m, signal5mIndex, candles5m.length);
+  const lastAtr5m = indicatorAt(
+    atr5m,
+    signal5mIndex,
+    candles5m.length
+  );
+
+  const lastRsi5m = indicatorAt(
+    rsi5m,
+    signal5mIndex,
+    candles5m.length
+  );
+
   const lastEma20_5m = indicatorAt(
     ema20_5m,
     signal5mIndex,
@@ -828,24 +861,25 @@ export function analyzeMarketMultiTimeframe(
 
   const bodyValid = bodyLargeEnough && bodyNotExhausted;
 
-  const recent5mLows = lows5m.slice(
-    signal5mIndex - ENTRY_5M_BREAKOUT_LOOKBACK,
+  // Диагностика локального пробоя. Не используется как обязательное условие.
+  const diagnosticLows = lows5m.slice(
+    signal5mIndex - ENTRY_5M_DIAGNOSTIC_LOOKBACK,
     signal5mIndex
   );
 
-  const recent5mHighs = highs5m.slice(
-    signal5mIndex - ENTRY_5M_BREAKOUT_LOOKBACK,
+  const diagnosticHighs = highs5m.slice(
+    signal5mIndex - ENTRY_5M_DIAGNOSTIC_LOOKBACK,
     signal5mIndex
   );
 
-  const localLow5m = Math.min(...recent5mLows);
-  const localHigh5m = Math.max(...recent5mHighs);
+  const localLow5m = Math.min(...diagnosticLows);
+  const localHigh5m = Math.max(...diagnosticHighs);
 
   const shortBreakdownThreshold =
-    localLow5m - lastAtr5m * ENTRY_5M_BREAKOUT_ATR_BUFFER;
+    localLow5m - lastAtr5m * ENTRY_5M_DIAGNOSTIC_ATR_BUFFER;
 
   const longBreakoutThreshold =
-    localHigh5m + lastAtr5m * ENTRY_5M_BREAKOUT_ATR_BUFFER;
+    localHigh5m + lastAtr5m * ENTRY_5M_DIAGNOSTIC_ATR_BUFFER;
 
   const confirmedBreakdown5m = price < shortBreakdownThreshold;
   const confirmedBreakout5m = price > longBreakoutThreshold;
@@ -864,11 +898,13 @@ export function analyzeMarketMultiTimeframe(
 
   const closeNearLow =
     signalCandle5m.close <=
-    signalCandle5m.low + lastAtr5m * 0.25;
+    signalCandle5m.low +
+      lastAtr5m * ENTRY_5M_CLOSE_NEAR_EXTREME_ATR;
 
   const closeNearHigh =
     signalCandle5m.close >=
-    signalCandle5m.high - lastAtr5m * 0.25;
+    signalCandle5m.high -
+      lastAtr5m * ENTRY_5M_CLOSE_NEAR_EXTREME_ATR;
 
   const contextRegime = context15m.regime;
 
@@ -906,13 +942,14 @@ export function analyzeMarketMultiTimeframe(
       contextClose > contextEma200
     );
 
+  // Без обязательного local lookback:
+  // 15m задаёт направление, 5m ловит раннюю импульсную свечу.
   const shortSignal =
     allowShortContext &&
     bodyValid &&
     volume5m.ok &&
     lastRsi5m < 48 &&
     price < lastEma20_5m &&
-    confirmedBreakdown5m &&
     closeNearLow &&
     shortNotOverextended;
 
@@ -922,7 +959,6 @@ export function analyzeMarketMultiTimeframe(
     volume5m.ok &&
     lastRsi5m > 52 &&
     price > lastEma20_5m &&
-    confirmedBreakout5m &&
     closeNearHigh &&
     longNotOverextended;
 
@@ -938,6 +974,7 @@ export function analyzeMarketMultiTimeframe(
 
   if (side !== 'none' && htf.enabled) {
     const minAdx = htf.minAdx1h ?? 18;
+
     const series =
       htf.precomputedHtf ??
       buildHtfBiasSeries(
@@ -997,20 +1034,20 @@ export function analyzeMarketMultiTimeframe(
       rejectReasons.push('5m_volume_below_threshold');
     }
 
-    if (allowShortContext && !confirmedBreakdown5m) {
-      rejectReasons.push('5m_no_confirmed_breakdown');
-    }
-
-    if (allowLongContext && !confirmedBreakout5m) {
-      rejectReasons.push('5m_no_confirmed_breakout');
-    }
-
     if (allowShortContext && !shortNotOverextended) {
       rejectReasons.push('5m_short_overextended_from_ema20');
     }
 
     if (allowLongContext && !longNotOverextended) {
       rejectReasons.push('5m_long_overextended_from_ema20');
+    }
+
+    if (allowShortContext && !closeNearLow) {
+      rejectReasons.push('5m_short_close_not_near_low');
+    }
+
+    if (allowLongContext && !closeNearHigh) {
+      rejectReasons.push('5m_long_close_not_near_high');
     }
 
     return emptySignal(price, contextRegime, {
@@ -1054,6 +1091,9 @@ export function analyzeMarketMultiTimeframe(
       volumeThreshold: volume5m.threshold,
       volumeSampleSize: volume5m.sampleSize,
 
+      // Диагностика бывшего фильтра локального пробоя.
+      diagnosticLookback: ENTRY_5M_DIAGNOSTIC_LOOKBACK,
+      diagnosticAtrBuffer: ENTRY_5M_DIAGNOSTIC_ATR_BUFFER,
       localLow5m,
       localHigh5m,
       shortBreakdownThreshold,
@@ -1068,7 +1108,8 @@ export function analyzeMarketMultiTimeframe(
       longNotOverextended,
 
       closeNearLow,
-      closeNearHigh
+      closeNearHigh,
+      closeNearExtremeAtr: ENTRY_5M_CLOSE_NEAR_EXTREME_ATR
     });
   }
 
@@ -1200,6 +1241,9 @@ export function analyzeMarketMultiTimeframe(
       volumeThreshold: volume5m.threshold,
       volumeSampleSize: volume5m.sampleSize,
 
+      // Бывший lookback-фильтр теперь только в диагностике.
+      diagnosticLookback: ENTRY_5M_DIAGNOSTIC_LOOKBACK,
+      diagnosticAtrBuffer: ENTRY_5M_DIAGNOSTIC_ATR_BUFFER,
       localLow5m,
       localHigh5m,
       shortBreakdownThreshold,
@@ -1215,6 +1259,7 @@ export function analyzeMarketMultiTimeframe(
 
       closeNearLow,
       closeNearHigh,
+      closeNearExtremeAtr: ENTRY_5M_CLOSE_NEAR_EXTREME_ATR,
 
       initialR,
       stopPct,
@@ -1229,8 +1274,7 @@ export function analyzeMarketMultiTimeframe(
 // ============================================================================
 // LEGACY SINGLE-TIMEFRAME ENTRY
 //
-// Оставлена, чтобы текущие импорты не ломались до обновления autoBot.ts.
-// Для реальной работы 15m-context + 5m-entry используй
+// Оставлена для обратной совместимости. Для 15m-context + 5m-entry:
 // analyzeMarketMultiTimeframe({ candles15m, candles5m, balance, htf }).
 // ============================================================================
 export function analyzeMarket(
