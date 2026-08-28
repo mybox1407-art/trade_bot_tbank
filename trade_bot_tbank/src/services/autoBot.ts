@@ -9,15 +9,7 @@
 import { getCandles, getCurrentPrice } from './exchange';
 import { detectMarketState, computeCoherenceScore } from './marketState';
 import { analyzeMarketMultiTimeframe, Candle, buildHtfBiasSeries } from './strategy';
-import {
-  getAllPositions,
-  openPosition,
-  closePosition,
-  getAvailableBalance,
-  getBalance,
-  MAX_OPEN_POSITIONS,
-  STARTING_BALANCE
-} from './positionState';
+import { getAllPositions, openPosition, closePosition, getAvailableBalance, getBalance, MAX_OPEN_POSITIONS, STARTING_BALANCE } from './positionState';
 import { logSignalCheck, logTrade } from './logger';
 import axios from 'axios';
 
@@ -166,9 +158,7 @@ function formatMskTime(now: number): string {
 
 function isWithinTradingWindows(now: number, windows: TradingWindows): boolean {
   const { weekday, minutes } = getMarketTimeParts(now);
-
   if (weekday === 0 || weekday === 6) return false;
-
   return windows.some(([start, end]) => minutes >= start && minutes <= end);
 }
 
@@ -213,13 +203,10 @@ function computeRegimeDelayMs(): number {
   const entryBarMs = timeframeToMs(AUTO_BOT_CONFIG.timeframe);
   const delayMs = AUTO_BOT_CONFIG.barCloseDelaySec * 1000;
   const barDelay = msUntilNextBarClose(now, entryBarMs, delayMs);
-
   if (!AUTO_BOT_CONFIG.tradingHoursEnabled) return barDelay;
   if (isTradingWindowOpen(now)) return barDelay;
-
   const nextOpen = nextTradingWindowOpenMs(now);
   if (nextOpen === null) return barDelay;
-
   const sleepMs = Math.min(nextOpen + delayMs - now, AUTO_BOT_CONFIG.maxSleepMs);
   return Math.max(sleepMs, 1_000);
 }
@@ -230,18 +217,15 @@ function computeRegimeDelayMs(): number {
 function candleOpenTimeMs(candle: Candle): number | null {
   const record = candle as unknown as Record<string, unknown>;
   const time = record.time ?? record.datetime ?? record.timestamp;
-
   if (time === null || time === undefined) return null;
   if (typeof time === 'number') return time > 1e12 ? time : time * 1000;
   if (time instanceof Date) return time.getTime();
-
   const parsed = Date.parse(String(time));
   return Number.isNaN(parsed) ? null : parsed;
 }
 
 function trimCandles(candles: Candle[], limit: number, intervalMs: number): Candle[] {
   let output = candles;
-
   if (AUTO_BOT_CONFIG.dropFormingCandle && output.length > 0) {
     const lastOpen = candleOpenTimeMs(output[output.length - 1]);
 
@@ -259,15 +243,12 @@ function trimCandles(candles: Candle[], limit: number, intervalMs: number): Cand
 // ============================================================================
 async function sendTelegramMessage(message: string) {
   if (!AUTO_BOT_CONFIG.telegramEnabled) return;
-
   if (!AUTO_BOT_CONFIG.telegramBotToken || !AUTO_BOT_CONFIG.telegramChatId) {
     log('warn', 'Telegram not configured: missing token or chatId');
     return;
   }
-
   try {
     const url = `https://api.telegram.org/bot${AUTO_BOT_CONFIG.telegramBotToken}/sendMessage`;
-
     await axios.post(url, {
       chat_id: AUTO_BOT_CONFIG.telegramChatId,
       text: message
@@ -282,7 +263,6 @@ async function sendTelegramMessage(message: string) {
 async function notifySessionStateIfChanged(now: number) {
   const currentState = getSessionState(now);
   if (lastSessionState === currentState) return;
-
   lastSessionState = currentState;
   if (!AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled) return;
 
@@ -319,7 +299,6 @@ function formatRejectReason(code: string): string {
 
 function getRejectCodes(indicators: Record<string, unknown>): string[] {
   const reasons = indicators.rejectReasons;
-
   if (Array.isArray(reasons) && reasons.length > 0) {
     return reasons
       .filter(reason => typeof reason === 'string')
@@ -328,7 +307,6 @@ function getRejectCodes(indicators: Record<string, unknown>): string[] {
 
   const reject = indicators.reject;
   if (typeof reject === 'string' && reject) return [reject];
-
   return ['conditions_not_met'];
 }
 
@@ -896,30 +874,22 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
     const currentPrice = await getCurrentPrice(symbol);
     const quoteReceivedAt = nowMs();
     const balanceBefore = getBalance();
-
     const baseTolerance = 0.001;
-
     const lastAtr =
       (signal.indicators?.lastAtr as number | undefined) ?? 0;
-
     const atrTolerance =
       lastAtr > 0
         ? lastAtr / pending.entryPrice
         : 0;
-
     const slippageTolerance =
       baseTolerance + 0.5 * atrTolerance;
-
     const priceDiff =
       Math.abs(currentPrice - pending.entryPrice) /
       pending.entryPrice;
-
     const fillDrift =
       currentPrice - pending.entryPrice;
-
     const fillDriftPct =
       priceDiff * 100;
-
     const entryQuality =
       pending.side === 'short'
         ? currentPrice >= pending.entryPrice
@@ -979,9 +949,7 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
     }
 
     pendingSignals.delete(symbol);
-
     const balanceAfter = getBalance();
-
     if (AUTO_BOT_CONFIG.logTrades) {
       logTrade({
         timestamp: formatTime(nowMs()),
@@ -1048,36 +1016,29 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
 // ============================================================================
 export async function runPositionMonitorCycle() {
   if (isPositionMonitorRunning) return;
-
   if (
     AUTO_BOT_CONFIG.tradingHoursEnabled &&
     !isMonitorWindowOpen(nowMs())
   ) {
     return;
   }
-
   isPositionMonitorRunning = true;
 
   try {
     const positions = getAllPositions();
     if (positions.length === 0) return;
-
     for (const position of positions) {
       try {
         const currentPrice = await getCurrentPrice(position.symbol);
-
         const hitTakeProfit =
           position.side === 'long'
             ? currentPrice >= position.takeProfitPrice
             : currentPrice <= position.takeProfitPrice;
-
         const hitStopLoss =
           position.side === 'long'
             ? currentPrice <= position.stopLossPrice
             : currentPrice >= position.stopLossPrice;
-
         if (!hitTakeProfit && !hitStopLoss) continue;
-
         const reason: 'take_profit' | 'stop_loss' =
           hitTakeProfit
             ? 'take_profit'
@@ -1119,7 +1080,6 @@ export async function runPositionMonitorCycle() {
         );
 
         const balanceBefore = getBalance();
-
         const result = closePosition(
           position.symbol,
           currentPrice,
