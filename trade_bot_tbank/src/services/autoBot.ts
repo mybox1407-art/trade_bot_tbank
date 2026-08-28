@@ -1,11 +1,3 @@
-// trade_bot_tbank/src/services/autoBot.ts
-//
-// Мульти-ТФ режим:
-// - 15m: контекст рынка, regime / Bollinger squeeze / направление.
-// - 5m: входной триггер, ATR / объём / EMA20.
-// - 1h: старший трендовый фильтр.
-// - Мониторинг открытых позиций остаётся отдельным процессом.
-
 import { getCandles, getCurrentPrice } from './exchange';
 import { detectMarketState, computeCoherenceScore } from './marketState';
 import { analyzeMarketMultiTimeframe, Candle, buildHtfBiasSeries } from './strategy';
@@ -460,14 +452,10 @@ function get5mEntryLogMeta(indicators: Record<string, unknown> | undefined) {
     lastRsi: indicators.lastRsi5m ?? indicators.lastRsi,
     ema20_5m: indicators.ema20_5m,
     candleBody: indicators.candleBody5m ?? indicators.candleBody,
-    candleBodyAtrRatio:
-      indicators.candleBodyAtrRatio5m ??
-      indicators.candleBodyAtrRatio,
+    candleBodyAtrRatio: indicators.candleBodyAtrRatio5m ?? indicators.candleBodyAtrRatio,
     minBody: indicators.minBody5m ?? indicators.minBody,
     maxBody: indicators.maxBody5m ?? indicators.maxBody,
-    bodyValid:
-      indicators.bodyValid ??
-      indicators.breakoutBodyWithinRange,
+    bodyValid: indicators.bodyValid ?? indicators.breakoutBodyWithinRange,
     breakoutBodyWithinRange: indicators.breakoutBodyWithinRange,
     localLow5m: indicators.localLow5m,
     localHigh5m: indicators.localHigh5m,
@@ -492,17 +480,14 @@ function get5mEntryLogMeta(indicators: Record<string, unknown> | undefined) {
 // Основной цикл стратегии
 // ============================================================================
 export async function runRegimeCheckCycle() {
-  if (isRegimeCheckRunning) {
-    log('warn', 'Regime check already running, skipping');
+  if (isRegimeCheckRunning) { log('warn', 'Regime check already running, skipping');
     return;
   }
   isRegimeCheckRunning = true;
   try {
     await notifySessionStateIfChanged(nowMs());
     if (AUTO_BOT_CONFIG.tradingHoursEnabled && !isTradingWindowOpen(nowMs())) {
-      if (AUTO_BOT_CONFIG.logWhenMarketClosed) {
-        log('info', 'Outside trading window, cycle skipped (no API calls)');
-      }
+      if (AUTO_BOT_CONFIG.logWhenMarketClosed) { log('info', 'Outside trading window, cycle skipped (no API calls)'); }
       return;
     }
     log('info', '=== 5M ENTRY / 15M CONTEXT CYCLE START ===');
@@ -537,10 +522,7 @@ export async function runRegimeCheckCycle() {
           log('info', `Signal expired for ${symbol} after ${pending.barsWaited} 5m bars`);
           pendingSignals.delete(symbol);
         } else {
-          log(
-            'info',
-            `Pending signal for ${symbol} waiting (5m bar ${pending.barsWaited}/${AUTO_BOT_CONFIG.entryTimeoutBars})`
-          );
+          log( 'info', `Pending signal for ${symbol} waiting (5m bar ${pending.barsWaited}/${AUTO_BOT_CONFIG.entryTimeoutBars})` );
         }
 
         continue;
@@ -586,10 +568,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   );
 
   if (candles1h.length < 100) {
-    log('warn', `${symbol}: not enough 1h candles for HTF`, {
-      received: candles1h.length,
-      required: 100
-    });
+    log('warn', `${symbol}: not enough 1h candles for HTF`, { received: candles1h.length, required: 100 });
   }
 
   const htfSeries = buildHtfBiasSeries(candles1h, AUTO_BOT_CONFIG.htfMinAdx1h);
@@ -627,15 +606,10 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     candles15m,
     candles5m,
     balance: availableBalance,
-    htf: {
-      enabled: AUTO_BOT_CONFIG.htfFilterEnabled,
-      minAdx1h: AUTO_BOT_CONFIG.htfMinAdx1h,
-      precomputedHtf: htfSeries
-    }
+    htf: { enabled: AUTO_BOT_CONFIG.htfFilterEnabled, minAdx1h: AUTO_BOT_CONFIG.htfMinAdx1h, precomputedHtf: htfSeries }
   });
 
-  if (!signal.buy && !signal.sell) {
-    const indicators = signal.indicators ?? {};
+  if (!signal.buy && !signal.sell) { const indicators = signal.indicators ?? {};
 
     log('info', `${symbol}: no 5m entry signal`, {
       regime: signal.regime,
@@ -655,12 +629,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       rejectReasons: indicators.rejectReasons
     });
 
-    await sendTelegramRejectedSignalCheck(
-      symbol,
-      signal.regime,
-      signal.price,
-      indicators
-    );
+    await sendTelegramRejectedSignalCheck( symbol, signal.regime, signal.price, indicators );
     return;
   }
 
@@ -686,8 +655,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
 
   const coherence = computeCoherenceScore(candles15m, side);
 
-  if (coherence < 0.4) {
-    log('info',  `${symbol}: low 15m coherence ${coherence.toFixed(4)} for 5m ${side}, skipping` );
+  if (coherence < 0.4) { log('info',  `${symbol}: low 15m coherence ${coherence.toFixed(4)} for 5m ${side}, skipping` );
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
       await sendTelegramMessage([
@@ -755,9 +723,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     });
   }
 
-  log(
-    'info',
-    `SIGNAL GENERATED: ${symbol} ${side.toUpperCase()} (5m entry / 15m context)`,
+  log( 'info', `SIGNAL GENERATED: ${symbol} ${side.toUpperCase()} (5m entry / 15m context)`,
     {
       entry: signal.price,
       sl: signal.stopLossPrice,
@@ -791,23 +757,17 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
     const quoteReceivedAt = nowMs();
     const balanceBefore = getBalance();
     const baseTolerance = 0.001;
-    const lastAtr =
-      (signal.indicators?.lastAtr as number | undefined) ?? 0;
+    const lastAtr = (signal.indicators?.lastAtr as number | undefined) ?? 0;
     const atrTolerance =
       lastAtr > 0
         ? lastAtr / pending.entryPrice
         : 0;
-    const slippageTolerance =
-      baseTolerance + 0.5 * atrTolerance;
-    const priceDiff =
-      Math.abs(currentPrice - pending.entryPrice) /
+    const slippageTolerance = baseTolerance + 0.5 * atrTolerance;
+    const priceDiff = Math.abs(currentPrice - pending.entryPrice) /
       pending.entryPrice;
-    const fillDrift =
-      currentPrice - pending.entryPrice;
-    const fillDriftPct =
-      priceDiff * 100;
-    const entryQuality =
-      pending.side === 'short'
+    const fillDrift = currentPrice - pending.entryPrice;
+    const fillDriftPct = priceDiff * 100;
+    const entryQuality = pending.side === 'short'
         ? currentPrice >= pending.entryPrice
           ? 'favorable_or_equal'
           : 'adverse'
@@ -829,9 +789,7 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
     });
 
     if (priceDiff > slippageTolerance) {
-      log(
-        'info',
-        `${symbol}: price moved too far (${fillDriftPct.toFixed(2)}%), waiting`,
+      log('info', `${symbol}: price moved too far (${fillDriftPct.toFixed(2)}%), waiting`,
         {
           side: pending.side,
           signalPrice: pending.entryPrice,
@@ -881,9 +839,7 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
       });
     }
 
-    log(
-      'info',
-      `POSITION OPENED: ${symbol} ${pending.side.toUpperCase()}`,
+    log( 'info', `POSITION OPENED: ${symbol} ${pending.side.toUpperCase()}`,
       {
         signalPrice: pending.entryPrice,
         entryPrice: currentPrice,
@@ -928,10 +884,7 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
 // ============================================================================
 export async function runPositionMonitorCycle() {
   if (isPositionMonitorRunning) return;
-  if (
-    AUTO_BOT_CONFIG.tradingHoursEnabled &&
-    !isMonitorWindowOpen(nowMs())
-  ) {
+  if ( AUTO_BOT_CONFIG.tradingHoursEnabled && !isMonitorWindowOpen(nowMs()) ) {
     return;
   }
   isPositionMonitorRunning = true;
@@ -971,9 +924,7 @@ export async function runPositionMonitorCycle() {
             ? triggerOvershoot / stopDistance
             : 0;
 
-        log(
-          'warn',
-          `EXIT TRIGGERED: ${position.symbol} ${position.side.toUpperCase()}`,
+        log( 'warn', `EXIT TRIGGERED: ${position.symbol} ${position.side.toUpperCase()}`,
           {
             reason,
             entryPrice: position.entryPrice,
@@ -1015,9 +966,7 @@ export async function runPositionMonitorCycle() {
           });
         }
 
-        log(
-          'info',
-          `POSITION CLOSED: ${position.symbol} ${position.side.toUpperCase()} @ ${currentPrice} (${reason.toUpperCase()})`,
+        log( 'info', `POSITION CLOSED: ${position.symbol} ${position.side.toUpperCase()} @ ${currentPrice} (${reason.toUpperCase()})`,
           {
             pnl:
               closedTrade?.realizedPnL?.toFixed(2),
