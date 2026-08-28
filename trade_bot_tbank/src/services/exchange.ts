@@ -1,3 +1,5 @@
+// trade_bot_tbank/src/services/exchange.ts
+
 import axios from 'axios';
 import https from 'https';
 import { env } from '../config/env';
@@ -206,30 +208,17 @@ async function resolveInstrumentId(symbol: string): Promise<string> {
   return instrumentId;
 }
 
-export async function getCandles(
+async function fetchCandlesOnce(
   symbol: string,
-  timeframe = '15m',
-  limit = 250
+  timeframe: string,
+  limit: number,
+  instrumentId: string,
+  interval: string,
+  intervalMs: number,
+  historyMultiplier: number,
+  from: Date,
+  to: Date
 ): Promise<Candle[]> {
-  const instrumentId = await resolveInstrumentId(symbol);
-
-  const interval = mapInterval(timeframe);
-  const intervalMs = getTimeframeMs(timeframe);
-
-  const to = new Date();
-
-  const historyMultiplier =
-    getHistoryMultiplier(timeframe);
-
-  const neededMs = limit * intervalMs;
-
-  const from = new Date(
-    to.getTime() - neededMs * historyMultiplier
-  );
-
-  const rangeHours =
-    (to.getTime() - from.getTime()) / 3_600_000;
-
   const requestPayload = {
     instrumentId,
     from: from.toISOString(),
@@ -247,58 +236,116 @@ export async function getCandles(
     historyMultiplier,
     from: requestPayload.from,
     to: requestPayload.to,
-    rangeHours: rangeHours.toFixed(2)
+    rangeHours: ((to.getTime() - from.getTime()) / 3_600_000).toFixed(2)
   });
 
-  try {
-    const { data } = await api.post(
-      '/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
-      requestPayload
-    );
+  const { data } = await api.post(
+    '/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
+    requestPayload
+  );
 
-    const candles = data?.candles ?? [];
+  const candles = data?.candles ?? [];
 
-    const mapped: Candle[] = candles.map((candle: any) => ({
-      time: new Date(candle.time).getTime(),
-      open: quotationToNumber(candle.open),
-      high: quotationToNumber(candle.high),
-      low: quotationToNumber(candle.low),
-      close: quotationToNumber(candle.close),
-      volume: Number(candle.volume ?? 0)
-    }));
+  const mapped: Candle[] = candles.map((candle: any) => ({
+    time: new Date(candle.time).getTime(),
+    open: quotationToNumber(candle.open),
+    high: quotationToNumber(candle.high),
+    low: quotationToNumber(candle.low),
+    close: quotationToNumber(candle.close),
+    volume: Number(candle.volume ?? 0)
+  }));
 
-    console.log(
-      '[getCandles]',
-      'symbol=', symbol,
-      'timeframe=', timeframe,
-      'requestedLimit=', limit,
-      'received=', mapped.length,
-      'from=', from.toISOString(),
-      'to=', to.toISOString()
-    );
+  console.log(
+    '[getCandles]',
+    'symbol=', symbol,
+    'timeframe=', timeframe,
+    'requestedLimit=', limit,
+    'received=', mapped.length,
+    'from=', from.toISOString(),
+    'to=', to.toISOString()
+  );
 
-    return mapped.slice(-limit);
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      console.error('[getCandles] API error', {
+  return mapped.slice(-limit);
+}
+
+export async function getCandles(
+  symbol: string,
+  timeframe = '15m',
+  limit = 250
+): Promise<Candle[]> {
+  const instrumentId = await resolveInstrumentId(symbol);
+
+  const interval = mapInterval(timeframe);
+  const intervalMs = getTimeframeMs(timeframe);
+
+  const to = new Date();
+  const historyMultiplier = getHistoryMultiplier(timeframe);
+  const neededMs = limit * intervalMs;
+  const from = new Date(to.getTime() - neededMs * historyMultiplier);
+
+  const maxRetries = 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const startedAt = Date.now();
+
+    try {
+      const candles = await fetchCandlesOnce(
         symbol,
         timeframe,
+        limit,
         instrumentId,
         interval,
-        limit,
         intervalMs,
         historyMultiplier,
-        from: requestPayload.from,
-        to: requestPayload.to,
-        status: error.response?.status,
-        response: error.response?.data,
-        requestData: error.config?.data,
-        message: error.message
-      });
-    }
+        from,
+        to
+      );
 
-    throw error;
+      console.log('[getCandles] success', {
+        symbol,
+        timeframe,
+        attempt,
+        durationMs: Date.now() - startedAt,
+        candles: candles.length
+      });
+
+      return candles;
+    } catch (err) {
+      lastError = err;
+
+      const isTimeout =
+        err instanceof Error &&
+        err.message.includes('timeout');
+
+      console.error('[getCandles] attempt failed', {
+        symbol,
+        timeframe,
+        attempt,
+        maxRetries,
+        durationMs: Date.now() - startedAt,
+        isTimeout,
+        error: err instanceof Error ? err.message : err
+      });
+
+      if (!isTimeout || attempt === maxRetries) {
+        break;
+      }
+
+      const delayMs = 2000 * attempt;
+      console.log('[getCandles] retrying', {
+        symbol,
+        timeframe,
+        attempt: attempt + 1,
+        maxRetries,
+        delayMs
+      });
+
+      await new Promise(r => setTimeout(r, delayMs));
+    }
   }
+
+  throw lastError;
 }
 
 export async function getCurrentPrice(
