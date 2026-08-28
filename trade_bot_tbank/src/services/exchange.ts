@@ -30,7 +30,7 @@ const api = axios.create({
     Authorization: `Bearer ${env.tinkoffToken}`,
     'Content-Type': 'application/json'
   },
-  timeout: 15_000,
+  timeout: 60_000,
   httpsAgent
 });
 
