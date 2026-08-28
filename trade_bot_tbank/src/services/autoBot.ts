@@ -49,7 +49,6 @@ export const AUTO_BOT_CONFIG = {
   entryTimeoutBars: 4,
   logSignals: true,
   logTrades: true,
-
   telegramEnabled: true,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
@@ -127,10 +126,8 @@ const MSK_OFFSET_MIN = 180;
 function timeframeToMs(timeframe: string): number {
   const match = /^(\d+)([mhd])$/.exec(timeframe);
   if (!match) throw new Error(`Unsupported timeframe: ${timeframe}`);
-
   const value = Number(match[1]);
   const unitMs = match[2] === 'm' ? 60_000 : match[2] === 'h' ? 3_600_000 : 86_400_000;
-
   return value * unitMs;
 }
 
@@ -152,7 +149,6 @@ function formatMskTime(now: number): string {
   const { minutes } = getMarketTimeParts(now);
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-
   return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')} МСК`;
 }
 
@@ -177,7 +173,6 @@ function getSessionState(now: number): SessionState {
 function nextTradingWindowOpenMs(now: number): number | null {
   const mskNow = now + MSK_OFFSET_MIN * 60_000;
   const mskMidnight = Math.floor(mskNow / 86_400_000) * 86_400_000;
-
   for (let dayOffset = 0; dayOffset < 9; dayOffset++) {
     for (const [startMinutes] of AUTO_BOT_CONFIG.tradingWindows) {
       const openTimestamp =
@@ -185,12 +180,9 @@ function nextTradingWindowOpenMs(now: number): number | null {
         MSK_OFFSET_MIN * 60_000 +
         startMinutes * 60_000 +
         dayOffset * 86_400_000;
-
       if (openTimestamp <= now) continue;
-
       const { weekday } = getMarketTimeParts(openTimestamp);
       if (weekday === 0 || weekday === 6) continue;
-
       return openTimestamp;
     }
   }
@@ -228,12 +220,10 @@ function trimCandles(candles: Candle[], limit: number, intervalMs: number): Cand
   let output = candles;
   if (AUTO_BOT_CONFIG.dropFormingCandle && output.length > 0) {
     const lastOpen = candleOpenTimeMs(output[output.length - 1]);
-
     if (lastOpen !== null && lastOpen + intervalMs > nowMs()) {
       output = output.slice(0, -1);
     }
   }
-
   if (output.length > limit) output = output.slice(-limit);
   return output;
 }
@@ -265,7 +255,6 @@ async function notifySessionStateIfChanged(now: number) {
   if (lastSessionState === currentState) return;
   lastSessionState = currentState;
   if (!AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled) return;
-
   const message =
     currentState === 'open'
       ? ['[СЕССИЯ]', 'Торговая сессия открыта', `Время: ${formatMskTime(now)}`].join('\n')
@@ -515,26 +504,20 @@ export async function runRegimeCheckCycle() {
     log('warn', 'Regime check already running, skipping');
     return;
   }
-
   isRegimeCheckRunning = true;
-
   try {
     await notifySessionStateIfChanged(nowMs());
-
     if (AUTO_BOT_CONFIG.tradingHoursEnabled && !isTradingWindowOpen(nowMs())) {
       if (AUTO_BOT_CONFIG.logWhenMarketClosed) {
         log('info', 'Outside trading window, cycle skipped (no API calls)');
       }
       return;
     }
-
     log('info', '=== 5M ENTRY / 15M CONTEXT CYCLE START ===');
-
     const openPositions = getAllPositions();
     const openSymbols = new Set(openPositions.map(position => position.symbol));
     const availableBalance = getAvailableBalance();
     const totalBalance = getBalance();
-
     log('info', 'Portfolio state', {
       balance: totalBalance,
       availableBalance,
@@ -596,16 +579,9 @@ export async function runRegimeCheckCycle() {
 async function processSymbol(symbol: Symbol, availableBalance: number) {
   log('info', `Processing ${symbol}...`);
 
-  const candles15mRaw = await getCandles(
-    symbol,
-    AUTO_BOT_CONFIG.contextTimeframe,
-    AUTO_BOT_CONFIG.contextCandlesLimit
-  );
+  const candles15mRaw = await getCandles(symbol, AUTO_BOT_CONFIG.contextTimeframe, AUTO_BOT_CONFIG.contextCandlesLimit);
 
-  const candles15m = trimCandles(
-    candles15mRaw,
-    AUTO_BOT_CONFIG.contextCandlesLimit,
-    timeframeToMs(AUTO_BOT_CONFIG.contextTimeframe)
+  const candles15m = trimCandles(candles15mRaw, AUTO_BOT_CONFIG.contextCandlesLimit, timeframeToMs(AUTO_BOT_CONFIG.contextTimeframe)
   );
 
   if (candles15m.length < 220) {
@@ -616,16 +592,9 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     return;
   }
 
-  const candles5mRaw = await getCandles(
-    symbol,
-    AUTO_BOT_CONFIG.timeframe,
-    AUTO_BOT_CONFIG.candlesLimit
-  );
+  const candles5mRaw = await getCandles(symbol,AUTO_BOT_CONFIG.timeframe,AUTO_BOT_CONFIG.candlesLimit);
 
-  const candles5m = trimCandles(
-    candles5mRaw,
-    AUTO_BOT_CONFIG.candlesLimit,
-    timeframeToMs(AUTO_BOT_CONFIG.timeframe)
+  const candles5m = trimCandles(candles5mRaw,AUTO_BOT_CONFIG.candlesLimit,timeframeToMs(AUTO_BOT_CONFIG.timeframe)
   );
 
   if (candles5m.length < 60) {
@@ -636,16 +605,9 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     return;
   }
 
-  const candles1hRaw = await getCandles(
-    symbol,
-    '1h',
-    AUTO_BOT_CONFIG.htfCandlesLimit
-  );
+  const candles1hRaw = await getCandles(symbol,'1h',AUTO_BOT_CONFIG.htfCandlesLimit);
 
-  const candles1h = trimCandles(
-    candles1hRaw,
-    AUTO_BOT_CONFIG.htfCandlesLimit,
-    timeframeToMs('1h')
+  const candles1h = trimCandles(candles1hRaw,AUTO_BOT_CONFIG.htfCandlesLimit,timeframeToMs('1h')
   );
 
   if (candles1h.length < 100) {
