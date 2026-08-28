@@ -520,14 +520,12 @@ export async function runRegimeCheckCycle() {
       contextTimeframe: AUTO_BOT_CONFIG.contextTimeframe
     });
 
-    if (openPositions.length >= AUTO_BOT_CONFIG.maxPositions) {
-      log('info', 'Max positions reached, skipping signal search');
+    if (openPositions.length >= AUTO_BOT_CONFIG.maxPositions) { log('info', 'Max positions reached, skipping signal search');
       return;
     }
 
     for (const symbol of AUTO_BOT_CONFIG.symbols) {
-      if (openSymbols.has(symbol)) {
-        log('info', `Skipping ${symbol}: position already open`);
+      if (openSymbols.has(symbol)) { log('info', `Skipping ${symbol}: position already open`);
         continue;
       }
 
@@ -550,9 +548,7 @@ export async function runRegimeCheckCycle() {
 
       try {
         await processSymbol(symbol, availableBalance);
-      } catch (error) {
-        log('error', `Error processing ${symbol}`, {error: error instanceof Error ? error.message : String(error) });
-
+      } catch (error) { log('error', `Error processing ${symbol}`, {error: error instanceof Error ? error.message : String(error) });
         await sleep(500);
       }
     }
@@ -570,7 +566,6 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   log('info', `Processing ${symbol}...`);
 
   const candles15mRaw = await getCandles(symbol, AUTO_BOT_CONFIG.contextTimeframe, AUTO_BOT_CONFIG.contextCandlesLimit);
-
   const candles15m = trimCandles(candles15mRaw, AUTO_BOT_CONFIG.contextCandlesLimit, timeframeToMs(AUTO_BOT_CONFIG.contextTimeframe)
   );
 
@@ -578,9 +573,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     log('warn', `${symbol}: not enough 15m context candles`, { received: candles15m.length, required: 220 });
     return;
   }
-
   const candles5mRaw = await getCandles(symbol,AUTO_BOT_CONFIG.timeframe,AUTO_BOT_CONFIG.candlesLimit);
-
   const candles5m = trimCandles(candles5mRaw,AUTO_BOT_CONFIG.candlesLimit,timeframeToMs(AUTO_BOT_CONFIG.timeframe)
   );
 
@@ -588,9 +581,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     log('warn', `${symbol}: not enough 5m entry candles`, { received: candles5m.length, required: 60 });
     return;
   }
-
   const candles1hRaw = await getCandles(symbol,'1h',AUTO_BOT_CONFIG.htfCandlesLimit);
-
   const candles1h = trimCandles(candles1hRaw,AUTO_BOT_CONFIG.htfCandlesLimit,timeframeToMs('1h')
   );
 
@@ -604,8 +595,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   const htfSeries = buildHtfBiasSeries(candles1h, AUTO_BOT_CONFIG.htfMinAdx1h);
   const marketState = detectMarketState(candles15m);
 
-  if (!marketState.ready) {
-    log('warn', `${symbol}: 15m market state not ready`);
+  if (!marketState.ready) { log('warn', `${symbol}: 15m market state not ready`);
     return;
   }
 
@@ -671,22 +661,16 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
       signal.price,
       indicators
     );
-
     return;
   }
 
   const side = signal.side;
-
-  if (side === 'none') {
-    log('warn', `${symbol}: signal side=none but buy/sell set?`);
+  if (side === 'none') { log('warn', `${symbol}: signal side=none but buy/sell set?`);
     return;
   }
 
   if (marketState.sideBias !== 'neutral' && marketState.sideBias !== side) {
-    log(
-      'info',
-      `${symbol}: 5m signal ${side} conflicts with 15m market bias ${marketState.sideBias}, skipping`
-    );
+    log( 'info', `${symbol}: 5m signal ${side} conflicts with 15m market bias ${marketState.sideBias}, skipping` );
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
       await sendTelegramMessage([
@@ -703,10 +687,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   const coherence = computeCoherenceScore(candles15m, side);
 
   if (coherence < 0.4) {
-    log(
-      'info',
-      `${symbol}: low 15m coherence ${coherence.toFixed(4)} for 5m ${side}, skipping`
-    );
+    log('info',  `${symbol}: low 15m coherence ${coherence.toFixed(4)} for 5m ${side}, skipping` );
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
       await sendTelegramMessage([
@@ -720,12 +701,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     return;
   }
 
-  if (
-    !signal.stopLossPrice ||
-    !signal.takeProfit1Price ||
-    !signal.takeProfit2Price ||
-    !signal.quantity
-  ) {
+  if ( !signal.stopLossPrice || !signal.takeProfit1Price || !signal.takeProfit2Price || !signal.quantity ) {
     log('warn', `${symbol}: incomplete 5m signal data`, signal);
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
@@ -798,13 +774,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
     }
   );
 
-  await sendTelegramApprovedSignalCheck(
-    symbol,
-    side,
-    signal.regime,
-    signal.price
-  );
-
+  await sendTelegramApprovedSignalCheck( symbol,side,signal.regime,signal.price);
   await tryExecutePendingSignal(symbol, signal);
 }
 
@@ -886,11 +856,7 @@ async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
       quantity: pending.quantity
     });
 
-    if (!result.ok) {
-      log('warn', `Failed to open position for ${symbol}`, {
-        message: result.message
-      });
-
+    if (!result.ok) { log('warn', `Failed to open position for ${symbol}`, { message: result.message });
       return;
     }
 
@@ -990,10 +956,7 @@ export async function runPositionMonitorCycle() {
             ? 'take_profit'
             : 'stop_loss';
 
-        const stopDistance = Math.abs(
-          position.entryPrice -
-          position.stopLossPrice
-        );
+        const stopDistance = Math.abs( position.entryPrice - position.stopLossPrice );
 
         const triggerOvershoot =
           reason !== 'stop_loss'
@@ -1019,25 +982,14 @@ export async function runPositionMonitorCycle() {
             observedExitPrice: currentPrice,
             triggerOvershoot,
             triggerOvershootR,
-            monitorIntervalMs:
-              AUTO_BOT_CONFIG.positionMonitorIntervalMs,
+            monitorIntervalMs: AUTO_BOT_CONFIG.positionMonitorIntervalMs,
             detectedAt: formatTime(nowMs())
           }
         );
 
         const balanceBefore = getBalance();
-        const result = closePosition(
-          position.symbol,
-          currentPrice,
-          reason
-        );
-
-        if (!result.ok) {
-          log('warn', `Failed to close ${position.symbol}`, {
-            reason,
-            message: result.message
-          });
-
+        const result = closePosition( position.symbol, currentPrice, reason );
+        if (!result.ok) { log('warn', `Failed to close ${position.symbol}`, { reason, message: result.message });
           continue;
         }
 
@@ -1142,14 +1094,8 @@ function scheduleNextRegimeCycle() {
 }
 
 export async function startAutoBot() {
-  log('info', 'Starting auto-bot...', {
-    config: maskedConfig()
-  });
-
-  if (AUTO_BOT_CONFIG.telegramEnabled) {
-    await sendTelegramTestMessage();
-  }
-
+  log('info', 'Starting auto-bot...', { config: maskedConfig() });
+  if (AUTO_BOT_CONFIG.telegramEnabled) { await sendTelegramTestMessage(); }
   await notifySessionStateIfChanged(nowMs());
 
   runRegimeCheckCycle()
@@ -1191,17 +1137,10 @@ export async function startAutoBot() {
 }
 
 export function stopAutoBot() {
-  if (regimeTimer) {
-    clearTimeout(regimeTimer);
-  }
-
-  if (monitorInterval) {
-    clearInterval(monitorInterval);
-  }
-
+  if (regimeTimer) { clearTimeout(regimeTimer); }
+  if (monitorInterval) { clearInterval(monitorInterval); }
   regimeTimer = null;
   monitorInterval = null;
-
   log('info', 'Auto-bot stopped');
 }
 
@@ -1240,10 +1179,8 @@ export function getAutoBotStatus() {
       entryTimeframe: '5m'
     })),
 
-    telegramSignalChecksEnabled:
-      AUTO_BOT_CONFIG.telegramSignalChecksEnabled,
-    telegramSessionNotificationsEnabled:
-      AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled,
+    telegramSignalChecksEnabled: AUTO_BOT_CONFIG.telegramSignalChecksEnabled,
+    telegramSessionNotificationsEnabled: AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled,
 
     balance: getBalance(),
     availableBalance: getAvailableBalance()
