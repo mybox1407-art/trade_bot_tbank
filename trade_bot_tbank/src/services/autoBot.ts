@@ -26,7 +26,7 @@ export const AUTO_BOT_CONFIG = {
   tradingHoursEnabled: true,
 
   // МСК: 10:01–18:54 и 19:01–23:45.
-  tradingWindows: [
+  tradingWindows: [ 
     [10 * 60 + 1, 18 * 60 + 54],
     [19 * 60 + 1, 23 * 60 + 45]
   ] as const,
@@ -84,17 +84,11 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function nowMs() {
-  return Date.now();
-}
+function nowMs() { return Date.now(); }
 
-function formatTime(timestamp: number) {
-  return new Date(timestamp).toISOString();
-}
+function formatTime(timestamp: number) {return new Date(timestamp).toISOString(); }
 
-function formatMoney(value: number) {
-  return value.toFixed(2);
-}
+function formatMoney(value: number) { return value.toFixed(2); }
 
 function log(level: 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) {
   const line = `[${formatTime(nowMs())}] [AUTO-BOT] [${level.toUpperCase()}] ${message}`;
@@ -244,9 +238,7 @@ async function sendTelegramMessage(message: string) {
       text: message
     });
   } catch (error) {
-    log('error', 'Telegram send failed', {
-      error: error instanceof Error ? error.message : String(error)
-    });
+    log('error', 'Telegram send failed', { error: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -559,9 +551,7 @@ export async function runRegimeCheckCycle() {
       try {
         await processSymbol(symbol, availableBalance);
       } catch (error) {
-        log('error', `Error processing ${symbol}`, {
-          error: error instanceof Error ? error.message : String(error)
-        });
+        log('error', `Error processing ${symbol}`, {error: error instanceof Error ? error.message : String(error) });
 
         await sleep(500);
       }
@@ -585,10 +575,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   );
 
   if (candles15m.length < 220) {
-    log('warn', `${symbol}: not enough 15m context candles`, {
-      received: candles15m.length,
-      required: 220
-    });
+    log('warn', `${symbol}: not enough 15m context candles`, { received: candles15m.length, required: 220 });
     return;
   }
 
@@ -598,10 +585,7 @@ async function processSymbol(symbol: Symbol, availableBalance: number) {
   );
 
   if (candles5m.length < 60) {
-    log('warn', `${symbol}: not enough 5m entry candles`, {
-      received: candles5m.length,
-      required: 60
-    });
+    log('warn', `${symbol}: not enough 5m entry candles`, { received: candles5m.length, required: 60 });
     return;
   }
 
