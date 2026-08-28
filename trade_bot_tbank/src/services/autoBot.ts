@@ -7,15 +7,8 @@
 // - Мониторинг открытых позиций остаётся отдельным процессом.
 
 import { getCandles, getCurrentPrice } from './exchange';
-import {
-  detectMarketState,
-  computeCoherenceScore
-} from './marketState';
-import {
-  analyzeMarketMultiTimeframe,
-  Candle,
-  buildHtfBiasSeries
-} from './strategy';
+import { detectMarketState, computeCoherenceScore } from './marketState';
+import { analyzeMarketMultiTimeframe, Candle, buildHtfBiasSeries } from './strategy';
 import {
   getAllPositions,
   openPosition,
@@ -39,12 +32,24 @@ export const AUTO_BOT_CONFIG = {
   barCloseDelaySec: 15,
   dropFormingCandle: true,
   tradingHoursEnabled: true,
-  tradingWindows: [[10 * 60 + 1, 23 * 60 + 59]] as const,
+
+  // МСК: 10:01–18:54 и 19:01–23:45.
+  tradingWindows: [
+    [10 * 60 + 1, 18 * 60 + 54],
+    [19 * 60 + 1, 23 * 60 + 45]
+  ] as const,
+
+  // МСК: 10:00–18:54 и 19:01–23:49.
+  monitorTradingWindows: [
+    [10 * 60, 18 * 60 + 54],
+    [19 * 60 + 1, 23 * 60 + 49]
+  ] as const,
+
   maxSleepMs: 6 * 60 * 60 * 1000,
   logWhenMarketClosed: false,
   positionMonitorIntervalMs: 15 * 1000,
   maxPositions: MAX_OPEN_POSITIONS,
-  positionSizeFraction: 0.30,
+  positionSizeFraction: 0.3,
   startingBalance: STARTING_BALANCE,
   allowedMarketStates: ['resonant', 'transition'] as const,
   htfFilterEnabled: true,
@@ -56,12 +61,13 @@ export const AUTO_BOT_CONFIG = {
   telegramEnabled: true,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
-
-  // Каждые 5 минут отправлять краткий результат проверки каждого тикера.
-  telegramSignalChecksEnabled: true
+  telegramSignalChecksEnabled: true,
+  telegramSessionNotificationsEnabled: true
 } as const;
 
 type Symbol = typeof AUTO_BOT_CONFIG.symbols[number];
+type TradingWindows = readonly (readonly [number, number])[];
+type SessionState = 'open' | 'closed';
 
 interface PendingSignal {
   symbol: Symbol;
@@ -79,9 +85,9 @@ interface PendingSignal {
 }
 
 const pendingSignals = new Map<Symbol, PendingSignal>();
-
 let isRegimeCheckRunning = false;
 let isPositionMonitorRunning = false;
+let lastSessionState: SessionState | null = null;
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -99,19 +105,10 @@ function formatMoney(value: number) {
   return value.toFixed(2);
 }
 
-function log(
-  level: 'info' | 'warn' | 'error',
-  message: string,
-  meta?: Record<string, unknown>
-) {
-  const line =
-    `[${formatTime(nowMs())}] [AUTO-BOT] [${level.toUpperCase()}] ${message}`;
-
-  if (meta) {
-    console.log(line, meta);
-  } else {
-    console.log(line);
-  }
+function log(level: 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) {
+  const line = `[${formatTime(nowMs())}] [AUTO-BOT] [${level.toUpperCase()}] ${message}`;
+  if (meta) console.log(line, meta);
+  else console.log(line);
 }
 
 // ============================================================================
@@ -120,7 +117,6 @@ function log(
 function maskSecret(value: string): string {
   if (!value) return value;
   if (value.length <= 8) return '***';
-
   return `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
 
@@ -132,97 +128,81 @@ function maskedConfig() {
 }
 
 // ============================================================================
-// Время торгов и расписание 5m цикла
+// Торговое время: TQBR / Y1
 // ============================================================================
 const MSK_OFFSET_MIN = 180;
 
 function timeframeToMs(timeframe: string): number {
   const match = /^(\d+)([mhd])$/.exec(timeframe);
-
-  if (!match) {
-    throw new Error(`Unsupported timeframe: ${timeframe}`);
-  }
+  if (!match) throw new Error(`Unsupported timeframe: ${timeframe}`);
 
   const value = Number(match[1]);
-
-  const unitMs =
-    match[2] === 'm'
-      ? 60_000
-      : match[2] === 'h'
-        ? 3_600_000
-        : 86_400_000;
+  const unitMs = match[2] === 'm' ? 60_000 : match[2] === 'h' ? 3_600_000 : 86_400_000;
 
   return value * unitMs;
 }
 
-function msUntilNextBarClose(
-  now: number,
-  barMs: number,
-  delayMs: number
-): number {
-  const nextClose =
-    (Math.floor(now / barMs) + 1) * barMs;
-
+function msUntilNextBarClose(now: number, barMs: number, delayMs: number): number {
+  const nextClose = (Math.floor(now / barMs) + 1) * barMs;
   return nextClose + delayMs - now;
 }
 
-function getMarketTimeParts(now: number): {
-  weekday: number;
-  minutes: number;
-} {
-  const shifted = new Date(
-    now + MSK_OFFSET_MIN * 60_000
-  );
+function getMarketTimeParts(now: number): { weekday: number; minutes: number } {
+  const shifted = new Date(now + MSK_OFFSET_MIN * 60_000);
 
   return {
     weekday: shifted.getUTCDay(),
-    minutes:
-      shifted.getUTCHours() * 60 +
-      shifted.getUTCMinutes()
+    minutes: shifted.getUTCHours() * 60 + shifted.getUTCMinutes()
   };
 }
 
-function isTradingWindowOpen(now: number): boolean {
+function formatMskTime(now: number): string {
+  const { minutes } = getMarketTimeParts(now);
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+
+  return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')} МСК`;
+}
+
+function isWithinTradingWindows(now: number, windows: TradingWindows): boolean {
   const { weekday, minutes } = getMarketTimeParts(now);
 
-  if (weekday === 0 || weekday === 6) {
-    return false;
-  }
+  if (weekday === 0 || weekday === 6) return false;
 
-  return AUTO_BOT_CONFIG.tradingWindows.some(
-    ([start, end]) => minutes >= start && minutes <= end
-  );
+  return windows.some(([start, end]) => minutes >= start && minutes <= end);
+}
+
+function isTradingWindowOpen(now: number): boolean {
+  return isWithinTradingWindows(now, AUTO_BOT_CONFIG.tradingWindows);
+}
+
+function isMonitorWindowOpen(now: number): boolean {
+  return isWithinTradingWindows(now, AUTO_BOT_CONFIG.monitorTradingWindows);
+}
+
+function getSessionState(now: number): SessionState {
+  return isMonitorWindowOpen(now) ? 'open' : 'closed';
 }
 
 function nextTradingWindowOpenMs(now: number): number | null {
-  const startMinutes =
-    AUTO_BOT_CONFIG.tradingWindows[0][0];
+  const mskNow = now + MSK_OFFSET_MIN * 60_000;
+  const mskMidnight = Math.floor(mskNow / 86_400_000) * 86_400_000;
 
-  for (let i = 0; i < 9; i++) {
-    const mskNow =
-      now + MSK_OFFSET_MIN * 60_000;
+  for (let dayOffset = 0; dayOffset < 9; dayOffset++) {
+    for (const [startMinutes] of AUTO_BOT_CONFIG.tradingWindows) {
+      const openTimestamp =
+        mskMidnight -
+        MSK_OFFSET_MIN * 60_000 +
+        startMinutes * 60_000 +
+        dayOffset * 86_400_000;
 
-    const mskMidnight =
-      Math.floor(mskNow / 86_400_000) * 86_400_000;
+      if (openTimestamp <= now) continue;
 
-    const openTimestamp =
-      mskMidnight -
-      MSK_OFFSET_MIN * 60_000 +
-      startMinutes * 60_000 +
-      i * 86_400_000;
+      const { weekday } = getMarketTimeParts(openTimestamp);
+      if (weekday === 0 || weekday === 6) continue;
 
-    if (openTimestamp <= now) {
-      continue;
+      return openTimestamp;
     }
-
-    const { weekday } =
-      getMarketTimeParts(openTimestamp);
-
-    if (weekday === 0 || weekday === 6) {
-      continue;
-    }
-
-    return openTimestamp;
   }
 
   return null;
@@ -230,101 +210,47 @@ function nextTradingWindowOpenMs(now: number): number | null {
 
 function computeRegimeDelayMs(): number {
   const now = nowMs();
+  const entryBarMs = timeframeToMs(AUTO_BOT_CONFIG.timeframe);
+  const delayMs = AUTO_BOT_CONFIG.barCloseDelaySec * 1000;
+  const barDelay = msUntilNextBarClose(now, entryBarMs, delayMs);
 
-  const entryBarMs = timeframeToMs(
-    AUTO_BOT_CONFIG.timeframe
-  );
-
-  const delayMs =
-    AUTO_BOT_CONFIG.barCloseDelaySec * 1000;
-
-  const barDelay = msUntilNextBarClose(
-    now,
-    entryBarMs,
-    delayMs
-  );
-
-  if (!AUTO_BOT_CONFIG.tradingHoursEnabled) {
-    return barDelay;
-  }
-
-  if (isTradingWindowOpen(now)) {
-    return barDelay;
-  }
+  if (!AUTO_BOT_CONFIG.tradingHoursEnabled) return barDelay;
+  if (isTradingWindowOpen(now)) return barDelay;
 
   const nextOpen = nextTradingWindowOpenMs(now);
+  if (nextOpen === null) return barDelay;
 
-  if (nextOpen === null) {
-    return barDelay;
-  }
-
-  const sleepMs = Math.min(
-    nextOpen + delayMs - now,
-    AUTO_BOT_CONFIG.maxSleepMs
-  );
-
+  const sleepMs = Math.min(nextOpen + delayMs - now, AUTO_BOT_CONFIG.maxSleepMs);
   return Math.max(sleepMs, 1_000);
 }
 
 // ============================================================================
-// Свечи: удаление forming bar + limit
+// Свечи: отбрасывание формирующейся свечи + limit
 // ============================================================================
 function candleOpenTimeMs(candle: Candle): number | null {
   const record = candle as unknown as Record<string, unknown>;
+  const time = record.time ?? record.datetime ?? record.timestamp;
 
-  const time =
-    record.time ??
-    record.datetime ??
-    record.timestamp;
-
-  if (time === null || time === undefined) {
-    return null;
-  }
-
-  if (typeof time === 'number') {
-    return time > 1e12
-      ? time
-      : time * 1000;
-  }
-
-  if (time instanceof Date) {
-    return time.getTime();
-  }
+  if (time === null || time === undefined) return null;
+  if (typeof time === 'number') return time > 1e12 ? time : time * 1000;
+  if (time instanceof Date) return time.getTime();
 
   const parsed = Date.parse(String(time));
-
-  return Number.isNaN(parsed)
-    ? null
-    : parsed;
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
-function trimCandles(
-  candles: Candle[],
-  limit: number,
-  intervalMs: number
-): Candle[] {
+function trimCandles(candles: Candle[], limit: number, intervalMs: number): Candle[] {
   let output = candles;
 
-  if (
-    AUTO_BOT_CONFIG.dropFormingCandle &&
-    output.length > 0
-  ) {
-    const lastOpen = candleOpenTimeMs(
-      output[output.length - 1]
-    );
+  if (AUTO_BOT_CONFIG.dropFormingCandle && output.length > 0) {
+    const lastOpen = candleOpenTimeMs(output[output.length - 1]);
 
-    if (
-      lastOpen !== null &&
-      lastOpen + intervalMs > nowMs()
-    ) {
+    if (lastOpen !== null && lastOpen + intervalMs > nowMs()) {
       output = output.slice(0, -1);
     }
   }
 
-  if (output.length > limit) {
-    output = output.slice(-limit);
-  }
-
+  if (output.length > limit) output = output.slice(-limit);
   return output;
 }
 
@@ -332,25 +258,15 @@ function trimCandles(
 // Telegram
 // ============================================================================
 async function sendTelegramMessage(message: string) {
-  if (!AUTO_BOT_CONFIG.telegramEnabled) {
-    return;
-  }
+  if (!AUTO_BOT_CONFIG.telegramEnabled) return;
 
-  if (
-    !AUTO_BOT_CONFIG.telegramBotToken ||
-    !AUTO_BOT_CONFIG.telegramChatId
-  ) {
-    log(
-      'warn',
-      'Telegram not configured: missing token or chatId'
-    );
-
+  if (!AUTO_BOT_CONFIG.telegramBotToken || !AUTO_BOT_CONFIG.telegramChatId) {
+    log('warn', 'Telegram not configured: missing token or chatId');
     return;
   }
 
   try {
-    const url =
-      `https://api.telegram.org/bot${AUTO_BOT_CONFIG.telegramBotToken}/sendMessage`;
+    const url = `https://api.telegram.org/bot${AUTO_BOT_CONFIG.telegramBotToken}/sendMessage`;
 
     await axios.post(url, {
       chat_id: AUTO_BOT_CONFIG.telegramChatId,
@@ -358,68 +274,50 @@ async function sendTelegramMessage(message: string) {
     });
   } catch (error) {
     log('error', 'Telegram send failed', {
-      error:
-        error instanceof Error
-          ? error.message
-          : String(error)
+      error: error instanceof Error ? error.message : String(error)
     });
   }
 }
 
+async function notifySessionStateIfChanged(now: number) {
+  const currentState = getSessionState(now);
+  if (lastSessionState === currentState) return;
+
+  lastSessionState = currentState;
+  if (!AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled) return;
+
+  const message =
+    currentState === 'open'
+      ? ['[СЕССИЯ]', 'Торговая сессия открыта', `Время: ${formatMskTime(now)}`].join('\n')
+      : ['[СЕССИЯ]', 'Торговая сессия закрыта', `Время: ${formatMskTime(now)}`].join('\n');
+
+  await sendTelegramMessage(message);
+  log('info', `Trading session state changed: ${currentState}`);
+}
+
 function formatRejectReason(code: string): string {
   const map: Record<string, string> = {
-    '15m_context_not_tradeable':
-      '15m-контекст не подходит',
-
-    '5m_body_too_small':
-      '5m-свеча слишком слабая',
-
-    '5m_body_too_large':
-      '5m-свеча слишком большая',
-
-    '5m_volume_below_threshold':
-      'недостаточный объём',
-
-    '5m_short_overextended_from_ema20':
-      'short запоздал: цена далеко ниже EMA20',
-
-    '5m_long_overextended_from_ema20':
-      'long запоздал: цена далеко выше EMA20',
-
-    '5m_short_close_not_near_low':
-      'short: закрытие далеко от low',
-
-    '5m_long_close_not_near_high':
-      'long: закрытие далеко от high',
-
-    'htf_gate':
-      'направление против 1h',
-
-    'htf_warmup':
-      'недостаточно 1h-данных',
-
-    'stop_distance':
-      'стоп вне допустимой дистанции',
-
-    'size_calculation':
-      'не рассчитан размер позиции',
-
-    'not_trading_hour':
-      'вне торгового времени',
-
-    'no_5m_entry_conditions':
-      'условия 5m-входа не выполнены',
-
-    'conditions_not_met':
-      'условия входа не выполнены'
+    '15m_context_not_tradeable': '15m-контекст не подходит',
+    '5m_body_too_small': '5m-свеча слишком слабая',
+    '5m_body_too_large': '5m-свеча слишком большая',
+    '5m_volume_below_threshold': 'недостаточный объём',
+    '5m_short_overextended_from_ema20': 'short запоздал: цена далеко ниже EMA20',
+    '5m_long_overextended_from_ema20': 'long запоздал: цена далеко выше EMA20',
+    '5m_short_close_not_near_low': 'short: закрытие далеко от low',
+    '5m_long_close_not_near_high': 'long: закрытие далеко от high',
+    'htf_gate': 'направление против 1h',
+    'htf_warmup': 'недостаточно 1h-данных',
+    'stop_distance': 'стоп вне допустимой дистанции',
+    'size_calculation': 'не рассчитан размер позиции',
+    'not_trading_hour': 'вне торгового времени',
+    'no_5m_entry_conditions': 'условия 5m-входа не выполнены',
+    'conditions_not_met': 'условия входа не выполнены'
   };
 
   return map[code] ?? code;
 }
 
-function getRejectCodes(
-  indicators: Record<string, unknown>
-): string[] {
+function getRejectCodes(indicators: Record<string, unknown>): string[] {
   const reasons = indicators.rejectReasons;
 
   if (Array.isArray(reasons) && reasons.length > 0) {
@@ -429,94 +327,70 @@ function getRejectCodes(
   }
 
   const reject = indicators.reject;
-
-  if (typeof reject === 'string' && reject) {
-    return [reject];
-  }
+  if (typeof reject === 'string' && reject) return [reject];
 
   return ['conditions_not_met'];
 }
 
-/**
- * Короткое сообщение отправляется КАЖДЫЙ цикл и по КАЖДОМУ тикеру,
- * если стратегия не вернула торговый сигнал.
- */
 async function sendTelegramRejectedSignalCheck(
   symbol: Symbol,
   regime: string,
   price: number,
   indicators: Record<string, unknown>
 ) {
-  if (!AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-    return;
-  }
+  if (!AUTO_BOT_CONFIG.telegramSignalChecksEnabled) return;
 
   const reasons = getRejectCodes(indicators)
     .map(formatRejectReason)
     .join('; ');
 
-  const message = [
+  await sendTelegramMessage([
     '[ПРОВЕРКА СИГНАЛА]',
     `${symbol} | ${regime}`,
     `Цена 5m: ${formatMoney(price)} RUB`,
     `Отклонён: ${reasons}`
-  ].join('\n');
-
-  await sendTelegramMessage(message);
+  ].join('\n'));
 }
 
-/**
- * Короткое сообщение отправляется при разрешённом сигнале до попытки входа.
- * После успешного исполнения придёт уже существующее полное сообщение
- * об открытии позиции.
- */
 async function sendTelegramApprovedSignalCheck(
   symbol: Symbol,
   side: 'long' | 'short',
   regime: string,
   price: number
 ) {
-  if (!AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-    return;
-  }
+  if (!AUTO_BOT_CONFIG.telegramSignalChecksEnabled) return;
 
-  const sideText =
-    side === 'long'
-      ? 'LONG'
-      : 'SHORT';
+  const sideText = side === 'long' ? 'LONG' : 'SHORT';
 
-  const message = [
+  await sendTelegramMessage([
     '[ПРОВЕРКА СИГНАЛА]',
     `${symbol} | ${regime}`,
     `Цена 5m: ${formatMoney(price)} RUB`,
     `Сигнал разрешён: ${sideText}`
-  ].join('\n');
-
-  await sendTelegramMessage(message);
+  ].join('\n'));
 }
 
 export async function sendTelegramTestMessage() {
-  const message = `
-[TEST] Автономный торговый бот MOEX
-
-Статус: OK
-Время: ${formatTime(nowMs())}
-Баланс: ${formatMoney(getBalance())} руб
-Свободно: ${formatMoney(getAvailableBalance())} руб
-Открыто позиций: ${getAllPositions().length}
-
-Тикеры: TATN, GAZP, NVTK
-Контекст: 15m
-Вход: 5m после закрытия бара
-HTF: 1h
-Мониторинг позиции: каждые ${AUTO_BOT_CONFIG.positionMonitorIntervalMs / 1000} сек
-Telegram-проверки 5m: ${AUTO_BOT_CONFIG.telegramSignalChecksEnabled ? 'включены' : 'выключены'}
-
-Telegram подключён и работает.
-`.trim();
+  const message = [
+    '[TEST] Автономный торговый бот MOEX',
+    '',
+    'Статус: OK',
+    `Время: ${formatTime(nowMs())}`,
+    `Баланс: ${formatMoney(getBalance())} руб`,
+    `Свободно: ${formatMoney(getAvailableBalance())} руб`,
+    `Открыто позиций: ${getAllPositions().length}`,
+    '',
+    'Тикеры: TATN, GAZP, NVTK',
+    'Контекст: 15m',
+    'Вход: 5m после закрытия бара',
+    'HTF: 1h',
+    `Мониторинг позиции: каждые ${AUTO_BOT_CONFIG.positionMonitorIntervalMs / 1000} сек`,
+    `Проверки сигналов: ${AUTO_BOT_CONFIG.telegramSignalChecksEnabled ? 'включены' : 'выключены'}`,
+    `Уведомления о сессии: ${AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled ? 'включены' : 'выключены'}`,
+    'Telegram подключён и работает.'
+  ].join('\n');
 
   await sendTelegramMessage(message);
-
   log('info', 'Telegram test message sent');
 }
 
@@ -533,30 +407,27 @@ function formatOpenPositionMessage(
   regime: string,
   initialR: number
 ) {
-  const sideText =
-    side === 'long'
-      ? 'LONG'
-      : 'SHORT';
+  const sideText = side === 'long' ? 'LONG' : 'SHORT';
 
-  return `
-[ОТКРЫТИЕ ПОЗИЦИИ] ${sideText}
-
-Тикер: ${symbol}
-Цена входа: ${formatMoney(entryPrice)} руб
-Количество: ${quantity} шт
-Объём позиции: ${formatMoney(positionSize)} руб
-Stop Loss: ${formatMoney(stopLoss)} руб
-Take Profit: ${formatMoney(takeProfit)} руб
-Риск (R): ${formatMoney(initialR)} руб
-
-Баланс до: ${formatMoney(balanceBefore)} руб
-Баланс после: ${formatMoney(balanceAfter)} руб
-Свободно: ${formatMoney(getAvailableBalance())} руб
-
-Режим 15m: ${regime}
-Точка входа: 5m
-Время: ${formatTime(nowMs())}
-`.trim();
+  return [
+    `[ОТКРЫТИЕ ПОЗИЦИИ] ${sideText}`,
+    '',
+    `Тикер: ${symbol}`,
+    `Цена входа: ${formatMoney(entryPrice)} руб`,
+    `Количество: ${quantity} шт`,
+    `Объём позиции: ${formatMoney(positionSize)} руб`,
+    `Stop Loss: ${formatMoney(stopLoss)} руб`,
+    `Take Profit: ${formatMoney(takeProfit)} руб`,
+    `Риск (R): ${formatMoney(initialR)} руб`,
+    '',
+    `Баланс до: ${formatMoney(balanceBefore)} руб`,
+    `Баланс после: ${formatMoney(balanceAfter)} руб`,
+    `Свободно: ${formatMoney(getAvailableBalance())} руб`,
+    '',
+    `Режим 15m: ${regime}`,
+    'Точка входа: 5m',
+    `Время: ${formatTime(nowMs())}`
+  ].join('\n');
 }
 
 function formatClosePositionMessage(
@@ -571,16 +442,8 @@ function formatClosePositionMessage(
   balanceAfter: number,
   totalCommission: number
 ) {
-  const sideText =
-    side === 'long'
-      ? 'LONG'
-      : 'SHORT';
-
-  const pnlSign =
-    realizedPnL >= 0
-      ? '+'
-      : '';
-
+  const sideText = side === 'long' ? 'LONG' : 'SHORT';
+  const pnlSign = realizedPnL >= 0 ? '+' : '';
   const reasonText =
     reason === 'take_profit'
       ? 'TAKE PROFIT'
@@ -588,37 +451,32 @@ function formatClosePositionMessage(
         ? 'STOP LOSS'
         : 'MANUAL';
 
-  const pnlPercent =
-    ((realizedPnL / balanceBefore) * 100).toFixed(2);
+  const pnlPercent = ((realizedPnL / balanceBefore) * 100).toFixed(2);
 
-  return `
-[ЗАКРЫТИЕ ПОЗИЦИИ] ${sideText}
-
-Тикер: ${symbol}
-Цена входа: ${formatMoney(entryPrice)} руб
-Цена выхода: ${formatMoney(exitPrice)} руб
-Количество: ${quantity} шт
-PNL: ${pnlSign}${formatMoney(realizedPnL)} руб (${pnlSign}${pnlPercent}%)
-Комиссии: ${formatMoney(totalCommission)} руб
-
-Баланс до: ${formatMoney(balanceBefore)} руб
-Баланс после: ${formatMoney(balanceAfter)} руб
-Изменение: ${pnlSign}${formatMoney(realizedPnL)} руб
-
-Причина: ${reasonText}
-Время: ${formatTime(nowMs())}
-`.trim();
+  return [
+    `[ЗАКРЫТИЕ ПОЗИЦИИ] ${sideText}`,
+    '',
+    `Тикер: ${symbol}`,
+    `Цена входа: ${formatMoney(entryPrice)} руб`,
+    `Цена выхода: ${formatMoney(exitPrice)} руб`,
+    `Количество: ${quantity} шт`,
+    `PNL: ${pnlSign}${formatMoney(realizedPnL)} руб (${pnlSign}${pnlPercent}%)`,
+    `Комиссии: ${formatMoney(totalCommission)} руб`,
+    '',
+    `Баланс до: ${formatMoney(balanceBefore)} руб`,
+    `Баланс после: ${formatMoney(balanceAfter)} руб`,
+    `Изменение: ${pnlSign}${formatMoney(realizedPnL)} руб`,
+    '',
+    `Причина: ${reasonText}`,
+    `Время: ${formatTime(nowMs())}`
+  ].join('\n');
 }
 
 // ============================================================================
 // Логирование
 // ============================================================================
-function getVolumeLogMeta(
-  indicators: Record<string, unknown> | undefined
-) {
-  if (!indicators) {
-    return {};
-  }
+function getVolumeLogMeta(indicators: Record<string, unknown> | undefined) {
+  if (!indicators) return {};
 
   return {
     volumeSpike: indicators.volumeSpike,
@@ -630,65 +488,41 @@ function getVolumeLogMeta(
   };
 }
 
-function get5mEntryLogMeta(
-  indicators: Record<string, unknown> | undefined
-) {
-  if (!indicators) {
-    return {};
-  }
+function get5mEntryLogMeta(indicators: Record<string, unknown> | undefined) {
+  if (!indicators) return {};
 
   return {
     entryTimeframe: indicators.entryTimeframe,
     contextTimeframe: indicators.contextTimeframe,
-
     contextRegime: indicators.contextRegime,
     context15mAdx: indicators.context15mAdx,
     context15mBbWidth: indicators.context15mBbWidth,
-
     lastAtr: indicators.lastAtr5m ?? indicators.lastAtr,
     lastRsi: indicators.lastRsi5m ?? indicators.lastRsi,
     ema20_5m: indicators.ema20_5m,
-
     candleBody: indicators.candleBody5m ?? indicators.candleBody,
     candleBodyAtrRatio:
       indicators.candleBodyAtrRatio5m ??
       indicators.candleBodyAtrRatio,
-
     minBody: indicators.minBody5m ?? indicators.minBody,
     maxBody: indicators.maxBody5m ?? indicators.maxBody,
-
     bodyValid:
       indicators.bodyValid ??
       indicators.breakoutBodyWithinRange,
-
-    breakoutBodyWithinRange:
-      indicators.breakoutBodyWithinRange,
-
+    breakoutBodyWithinRange: indicators.breakoutBodyWithinRange,
     localLow5m: indicators.localLow5m,
     localHigh5m: indicators.localHigh5m,
-    shortBreakdownThreshold:
-      indicators.shortBreakdownThreshold,
-    longBreakoutThreshold:
-      indicators.longBreakoutThreshold,
-    confirmedBreakdown5m:
-      indicators.confirmedBreakdown5m,
-    confirmedBreakout5m:
-      indicators.confirmedBreakout5m,
-
-    shortExtensionFromEma20:
-      indicators.shortExtensionFromEma20,
-    longExtensionFromEma20:
-      indicators.longExtensionFromEma20,
-    maxEma20ExtensionAtr:
-      indicators.maxEma20ExtensionAtr,
-    shortNotOverextended:
-      indicators.shortNotOverextended,
-    longNotOverextended:
-      indicators.longNotOverextended,
-
+    shortBreakdownThreshold: indicators.shortBreakdownThreshold,
+    longBreakoutThreshold: indicators.longBreakoutThreshold,
+    confirmedBreakdown5m: indicators.confirmedBreakdown5m,
+    confirmedBreakout5m: indicators.confirmedBreakout5m,
+    shortExtensionFromEma20: indicators.shortExtensionFromEma20,
+    longExtensionFromEma20: indicators.longExtensionFromEma20,
+    maxEma20ExtensionAtr: indicators.maxEma20ExtensionAtr,
+    shortNotOverextended: indicators.shortNotOverextended,
+    longNotOverextended: indicators.longNotOverextended,
     closeNearLow: indicators.closeNearLow,
     closeNearHigh: indicators.closeNearHigh,
-
     htfEnabled: indicators.htfEnabled,
     htfBias: indicators.htfBias,
     htfAdx: indicators.htfAdx
@@ -700,38 +534,26 @@ function get5mEntryLogMeta(
 // ============================================================================
 export async function runRegimeCheckCycle() {
   if (isRegimeCheckRunning) {
-    log(
-      'warn',
-      'Regime check already running, skipping'
-    );
-
+    log('warn', 'Regime check already running, skipping');
     return;
   }
 
   isRegimeCheckRunning = true;
 
   try {
-    if (
-      AUTO_BOT_CONFIG.tradingHoursEnabled &&
-      !isTradingWindowOpen(nowMs())
-    ) {
-      if (AUTO_BOT_CONFIG.logWhenMarketClosed) {
-        log(
-          'info',
-          'Outside trading window, cycle skipped (no API calls)'
-        );
-      }
+    await notifySessionStateIfChanged(nowMs());
 
+    if (AUTO_BOT_CONFIG.tradingHoursEnabled && !isTradingWindowOpen(nowMs())) {
+      if (AUTO_BOT_CONFIG.logWhenMarketClosed) {
+        log('info', 'Outside trading window, cycle skipped (no API calls)');
+      }
       return;
     }
 
     log('info', '=== 5M ENTRY / 15M CONTEXT CYCLE START ===');
 
     const openPositions = getAllPositions();
-    const openSymbols = new Set(
-      openPositions.map(position => position.symbol)
-    );
-
+    const openSymbols = new Set(openPositions.map(position => position.symbol));
     const availableBalance = getAvailableBalance();
     const totalBalance = getBalance();
 
@@ -745,42 +567,23 @@ export async function runRegimeCheckCycle() {
       contextTimeframe: AUTO_BOT_CONFIG.contextTimeframe
     });
 
-    if (
-      openPositions.length >=
-      AUTO_BOT_CONFIG.maxPositions
-    ) {
-      log(
-        'info',
-        'Max positions reached, skipping signal search'
-      );
-
+    if (openPositions.length >= AUTO_BOT_CONFIG.maxPositions) {
+      log('info', 'Max positions reached, skipping signal search');
       return;
     }
 
     for (const symbol of AUTO_BOT_CONFIG.symbols) {
       if (openSymbols.has(symbol)) {
-        log(
-          'info',
-          `Skipping ${symbol}: position already open`
-        );
-
+        log('info', `Skipping ${symbol}: position already open`);
         continue;
       }
 
       if (pendingSignals.has(symbol)) {
         const pending = pendingSignals.get(symbol)!;
-
         pending.barsWaited += 1;
 
-        if (
-          pending.barsWaited >=
-          AUTO_BOT_CONFIG.entryTimeoutBars
-        ) {
-          log(
-            'info',
-            `Signal expired for ${symbol} after ${pending.barsWaited} 5m bars`
-          );
-
+        if (pending.barsWaited >= AUTO_BOT_CONFIG.entryTimeoutBars) {
+          log('info', `Signal expired for ${symbol} after ${pending.barsWaited} 5m bars`);
           pendingSignals.delete(symbol);
         } else {
           log(
@@ -796,10 +599,7 @@ export async function runRegimeCheckCycle() {
         await processSymbol(symbol, availableBalance);
       } catch (error) {
         log('error', `Error processing ${symbol}`, {
-          error:
-            error instanceof Error
-              ? error.message
-              : String(error)
+          error: error instanceof Error ? error.message : String(error)
         });
 
         await sleep(500);
@@ -815,10 +615,7 @@ export async function runRegimeCheckCycle() {
 // ============================================================================
 // Обработка тикера: 15m context + 5m entry + 1h HTF
 // ============================================================================
-async function processSymbol(
-  symbol: Symbol,
-  availableBalance: number
-) {
+async function processSymbol(symbol: Symbol, availableBalance: number) {
   log('info', `Processing ${symbol}...`);
 
   const candles15mRaw = await getCandles(
@@ -838,7 +635,6 @@ async function processSymbol(
       received: candles15m.length,
       required: 220
     });
-
     return;
   }
 
@@ -859,7 +655,6 @@ async function processSymbol(
       received: candles5m.length,
       required: 60
     });
-
     return;
   }
 
@@ -876,21 +671,13 @@ async function processSymbol(
   );
 
   if (candles1h.length < 100) {
-    log(
-      'warn',
-      `${symbol}: not enough 1h candles for HTF`,
-      {
-        received: candles1h.length,
-        required: 100
-      }
-    );
+    log('warn', `${symbol}: not enough 1h candles for HTF`, {
+      received: candles1h.length,
+      required: 100
+    });
   }
 
-  const htfSeries = buildHtfBiasSeries(
-    candles1h,
-    AUTO_BOT_CONFIG.htfMinAdx1h
-  );
-
+  const htfSeries = buildHtfBiasSeries(candles1h, AUTO_BOT_CONFIG.htfMinAdx1h);
   const marketState = detectMarketState(candles15m);
 
   if (!marketState.ready) {
@@ -909,19 +696,14 @@ async function processSymbol(
   });
 
   if (marketState.state === 'chaotic') {
-    log(
-      'info',
-      `${symbol}: 15m state=chaotic, skipping 5m entry`
-    );
+    log('info', `${symbol}: 15m state=chaotic, skipping 5m entry`);
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-      await sendTelegramMessage(
-        [
-          '[ПРОВЕРКА СИГНАЛА]',
-          `${symbol} | chaotic`,
-          'Отклонён: 15m-рынок хаотичный'
-        ].join('\n')
-      );
+      await sendTelegramMessage([
+        '[ПРОВЕРКА СИГНАЛА]',
+        `${symbol} | chaotic`,
+        'Отклонён: 15m-рынок хаотичный'
+      ].join('\n'));
     }
 
     return;
@@ -943,30 +725,19 @@ async function processSymbol(
 
     log('info', `${symbol}: no 5m entry signal`, {
       regime: signal.regime,
-      reject:
-        indicators.reject ??
-        'conditions_not_met',
-
-      entryTimeframe:
-        indicators.entryTimeframe ?? '5m',
-
-      contextTimeframe:
-        indicators.contextTimeframe ?? '15m',
-
+      reject: indicators.reject ?? 'conditions_not_met',
+      entryTimeframe: indicators.entryTimeframe ?? '5m',
+      contextTimeframe: indicators.contextTimeframe ?? '15m',
       marketState: marketState.state,
       marketBias: marketState.sideBias,
-
       price: signal.price,
       stopPct: indicators.stopPct,
       sideWouldBe: indicators.sideWouldBe,
-
       htfSeriesLength: htfSeries.length,
       htfEnabled: indicators.htfEnabled,
       htfBias: indicators.htfBias,
-
       ...get5mEntryLogMeta(indicators),
       ...getVolumeLogMeta(indicators),
-
       rejectReasons: indicators.rejectReasons
     });
 
@@ -983,41 +754,29 @@ async function processSymbol(
   const side = signal.side;
 
   if (side === 'none') {
-    log(
-      'warn',
-      `${symbol}: signal side=none but buy/sell set?`
-    );
-
+    log('warn', `${symbol}: signal side=none but buy/sell set?`);
     return;
   }
 
-  if (
-    marketState.sideBias !== 'neutral' &&
-    marketState.sideBias !== side
-  ) {
+  if (marketState.sideBias !== 'neutral' && marketState.sideBias !== side) {
     log(
       'info',
       `${symbol}: 5m signal ${side} conflicts with 15m market bias ${marketState.sideBias}, skipping`
     );
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-      await sendTelegramMessage(
-        [
-          '[ПРОВЕРКА СИГНАЛА]',
-          `${symbol} | ${signal.regime}`,
-          `Цена 5m: ${formatMoney(signal.price)} RUB`,
-          `Отклонён: ${side.toUpperCase()} против 15m bias ${marketState.sideBias}`
-        ].join('\n')
-      );
+      await sendTelegramMessage([
+        '[ПРОВЕРКА СИГНАЛА]',
+        `${symbol} | ${signal.regime}`,
+        `Цена 5m: ${formatMoney(signal.price)} RUB`,
+        `Отклонён: ${side.toUpperCase()} против 15m bias ${marketState.sideBias}`
+      ].join('\n'));
     }
 
     return;
   }
 
-  const coherence = computeCoherenceScore(
-    candles15m,
-    side
-  );
+  const coherence = computeCoherenceScore(candles15m, side);
 
   if (coherence < 0.4) {
     log(
@@ -1026,14 +785,12 @@ async function processSymbol(
     );
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-      await sendTelegramMessage(
-        [
-          '[ПРОВЕРКА СИГНАЛА]',
-          `${symbol} | ${signal.regime}`,
-          `Цена 5m: ${formatMoney(signal.price)} RUB`,
-          `Отклонён: низкая 15m coherence (${coherence.toFixed(2)})`
-        ].join('\n')
-      );
+      await sendTelegramMessage([
+        '[ПРОВЕРКА СИГНАЛА]',
+        `${symbol} | ${signal.regime}`,
+        `Цена 5m: ${formatMoney(signal.price)} RUB`,
+        `Отклонён: низкая 15m coherence (${coherence.toFixed(2)})`
+      ].join('\n'));
     }
 
     return;
@@ -1045,21 +802,15 @@ async function processSymbol(
     !signal.takeProfit2Price ||
     !signal.quantity
   ) {
-    log(
-      'warn',
-      `${symbol}: incomplete 5m signal data`,
-      signal
-    );
+    log('warn', `${symbol}: incomplete 5m signal data`, signal);
 
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-      await sendTelegramMessage(
-        [
-          '[ПРОВЕРКА СИГНАЛА]',
-          `${symbol} | ${signal.regime}`,
-          `Цена 5m: ${formatMoney(signal.price)} RUB`,
-          'Отклонён: неполные параметры сделки'
-        ].join('\n')
-      );
+      await sendTelegramMessage([
+        '[ПРОВЕРКА СИГНАЛА]',
+        `${symbol} | ${signal.regime}`,
+        `Цена 5m: ${formatMoney(signal.price)} RUB`,
+        'Отклонён: неполные параметры сделки'
+      ].join('\n'));
     }
 
     return;
@@ -1073,9 +824,7 @@ async function processSymbol(
     takeProfit1Price: signal.takeProfit1Price,
     takeProfit2Price: signal.takeProfit2Price,
     quantity: signal.quantity,
-    positionSize:
-      signal.positionSize ??
-      signal.quantity * signal.price,
+    positionSize: signal.positionSize ?? signal.quantity * signal.price,
     regime: signal.regime,
     initialR: signal.initialR ?? 0,
     signalTime: nowMs(),
@@ -1090,23 +839,18 @@ async function processSymbol(
       symbol,
       side,
       regime: signal.regime,
-
       marketState: marketState.state,
       sideBias: marketState.sideBias,
       coherence: coherence.toFixed(6),
-
       entryTimeframe: '5m',
       contextTimeframe: '15m',
-
       entryPrice: signal.price,
       stopLoss: signal.stopLossPrice,
       tp1: signal.takeProfit1Price,
       tp2: signal.takeProfit2Price,
-
       quantity: signal.quantity,
       positionSize: pending.positionSize,
       initialR: (signal.initialR ?? 0).toFixed(4),
-
       action: 'signal_generated'
     });
   }
@@ -1122,11 +866,9 @@ async function processSymbol(
       qty: signal.quantity,
       size: pending.positionSize,
       R: signal.initialR?.toFixed(4),
-
       marketState: marketState.state,
       marketBias: marketState.sideBias,
       coherence: coherence.toFixed(4),
-
       ...get5mEntryLogMeta(signal.indicators),
       ...getVolumeLogMeta(signal.indicators)
     }
@@ -1145,21 +887,13 @@ async function processSymbol(
 // ============================================================================
 // Исполнение pending-сигнала
 // ============================================================================
-async function tryExecutePendingSignal(
-  symbol: Symbol,
-  signal: any
-) {
+async function tryExecutePendingSignal(symbol: Symbol, signal: any) {
   const pending = pendingSignals.get(symbol);
-
-  if (!pending) {
-    return;
-  }
+  if (!pending) return;
 
   try {
     const quoteStartedAt = nowMs();
-
     const currentPrice = await getCurrentPrice(symbol);
-
     const quoteReceivedAt = nowMs();
     const balanceBefore = getBalance();
 
@@ -1237,13 +971,9 @@ async function tryExecutePendingSignal(
     });
 
     if (!result.ok) {
-      log(
-        'warn',
-        `Failed to open position for ${symbol}`,
-        {
-          message: result.message
-        }
-      );
+      log('warn', `Failed to open position for ${symbol}`, {
+        message: result.message
+      });
 
       return;
     }
@@ -1258,16 +988,13 @@ async function tryExecutePendingSignal(
         symbol: pending.symbol,
         side: pending.side,
         action: 'open',
-
         entryPrice: currentPrice,
         stopLoss: pending.stopLossPrice,
         takeProfit: pending.takeProfit1Price,
-
         quantity: pending.quantity,
         positionSize: pending.positionSize,
         regime: pending.regime,
         initialR: (pending.initialR ?? 0).toFixed(4),
-
         balanceBefore,
         balanceAfter,
         availableBalance: result.availableBalance ?? 0
@@ -1283,11 +1010,9 @@ async function tryExecutePendingSignal(
         fillDrift,
         fillDriftPct,
         entryQuality,
-
         stopLoss: pending.stopLossPrice,
         takeProfit1: pending.takeProfit1Price,
         takeProfit2: pending.takeProfit2Price,
-
         quantity: pending.quantity,
         balance: result.balance
       }
@@ -1309,16 +1034,12 @@ async function tryExecutePendingSignal(
 
     await sendTelegramMessage(telegramMessage);
   } catch (error) {
-    log(
-      'error',
-      `Error executing signal for ${symbol}`,
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error)
-      }
-    );
+    log('error', `Error executing signal for ${symbol}`, {
+      error:
+        error instanceof Error
+          ? error.message
+          : String(error)
+    });
   }
 }
 
@@ -1326,7 +1047,12 @@ async function tryExecutePendingSignal(
 // Мониторинг открытых позиций
 // ============================================================================
 export async function runPositionMonitorCycle() {
-  if (isPositionMonitorRunning) {
+  if (isPositionMonitorRunning) return;
+
+  if (
+    AUTO_BOT_CONFIG.tradingHoursEnabled &&
+    !isMonitorWindowOpen(nowMs())
+  ) {
     return;
   }
 
@@ -1334,16 +1060,11 @@ export async function runPositionMonitorCycle() {
 
   try {
     const positions = getAllPositions();
-
-    if (positions.length === 0) {
-      return;
-    }
+    if (positions.length === 0) return;
 
     for (const position of positions) {
       try {
-        const currentPrice = await getCurrentPrice(
-          position.symbol
-        );
+        const currentPrice = await getCurrentPrice(position.symbol);
 
         const hitTakeProfit =
           position.side === 'long'
@@ -1355,9 +1076,7 @@ export async function runPositionMonitorCycle() {
             ? currentPrice <= position.stopLossPrice
             : currentPrice >= position.stopLossPrice;
 
-        if (!hitTakeProfit && !hitStopLoss) {
-          continue;
-        }
+        if (!hitTakeProfit && !hitStopLoss) continue;
 
         const reason: 'take_profit' | 'stop_loss' =
           hitTakeProfit
@@ -1391,13 +1110,10 @@ export async function runPositionMonitorCycle() {
             plannedStop: position.stopLossPrice,
             plannedTakeProfit: position.takeProfitPrice,
             observedExitPrice: currentPrice,
-
             triggerOvershoot,
             triggerOvershootR,
-
             monitorIntervalMs:
               AUTO_BOT_CONFIG.positionMonitorIntervalMs,
-
             detectedAt: formatTime(nowMs())
           }
         );
@@ -1411,14 +1127,10 @@ export async function runPositionMonitorCycle() {
         );
 
         if (!result.ok) {
-          log(
-            'warn',
-            `Failed to close ${position.symbol}`,
-            {
-              reason,
-              message: result.message
-            }
-          );
+          log('warn', `Failed to close ${position.symbol}`, {
+            reason,
+            message: result.message
+          });
 
           continue;
         }
@@ -1432,17 +1144,13 @@ export async function runPositionMonitorCycle() {
             symbol: position.symbol,
             side: position.side,
             action: 'close',
-
             entryPrice: position.entryPrice,
             exitPrice: currentPrice,
-
             stopLoss: position.stopLossPrice,
             takeProfit: position.takeProfitPrice,
-
             quantity: position.quantity,
             realizedPnL: closedTrade.realizedPnL,
             reason,
-
             balanceBefore,
             balanceAfter,
             totalCommission: closedTrade.totalCommission
@@ -1455,17 +1163,14 @@ export async function runPositionMonitorCycle() {
           {
             pnl:
               closedTrade?.realizedPnL?.toFixed(2),
-
             triggerOvershoot:
               reason === 'stop_loss'
                 ? triggerOvershoot.toFixed(6)
                 : '0',
-
             triggerOvershootR:
               reason === 'stop_loss'
                 ? triggerOvershootR.toFixed(4)
                 : '0',
-
             balance: result.balance
           }
         );
@@ -1487,16 +1192,12 @@ export async function runPositionMonitorCycle() {
           await sendTelegramMessage(telegramMessage);
         }
       } catch (error) {
-        log(
-          'error',
-          `Monitor error for ${position.symbol}`,
-          {
-            error:
-              error instanceof Error
-                ? error.message
-                : String(error)
-          }
-        );
+        log('error', `Monitor error for ${position.symbol}`, {
+          error:
+            error instanceof Error
+              ? error.message
+              : String(error)
+        });
       }
     }
   } finally {
@@ -1543,6 +1244,8 @@ export async function startAutoBot() {
     await sendTelegramTestMessage();
   }
 
+  await notifySessionStateIfChanged(nowMs());
+
   runRegimeCheckCycle()
     .catch(error => {
       log('error', 'Initial regime check failed', {
@@ -1575,7 +1278,9 @@ export async function startAutoBot() {
     maxRiskPerTrade: '3%',
     positionSizeFraction: '30%',
     telegramSignalChecksEnabled:
-      AUTO_BOT_CONFIG.telegramSignalChecksEnabled
+      AUTO_BOT_CONFIG.telegramSignalChecksEnabled,
+    telegramSessionNotificationsEnabled:
+      AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled
   });
 }
 
@@ -1598,10 +1303,10 @@ export function getAutoBotStatus() {
   return {
     running: Boolean(regimeTimer),
     config: maskedConfig(),
-
     entryTimeframe: AUTO_BOT_CONFIG.timeframe,
     contextTimeframe: AUTO_BOT_CONFIG.contextTimeframe,
     htfTimeframe: '1h',
+    sessionState: getSessionState(nowMs()),
 
     openPositions: getAllPositions().map(position => ({
       symbol: position.symbol,
@@ -1631,6 +1336,8 @@ export function getAutoBotStatus() {
 
     telegramSignalChecksEnabled:
       AUTO_BOT_CONFIG.telegramSignalChecksEnabled,
+    telegramSessionNotificationsEnabled:
+      AUTO_BOT_CONFIG.telegramSessionNotificationsEnabled,
 
     balance: getBalance(),
     availableBalance: getAvailableBalance()
