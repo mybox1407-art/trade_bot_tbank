@@ -61,6 +61,19 @@ export const AUTO_BOT_CONFIG = {
   telegramSessionNotificationsEnabled: true
 } as const;
 
+// Список выходных, когда ДСВД НЕ проводится (2026)
+const WEEKEND_HOLIDAYS_2026 = [
+  '2026-01-03', '2026-01-04', '2026-01-10', '2026-01-11',
+  '2026-02-14', '2026-02-15',
+  '2026-03-07', '2026-03-08', '2026-03-21', '2026-03-22',
+  '2026-05-09', '2026-05-10',
+  '2026-06-20', '2026-06-21',
+  '2026-08-01', '2026-08-02', '2026-08-15', '2026-08-16',  // ← 15-16 августа
+  '2026-09-12', '2026-09-13',
+  '2026-10-24', '2026-10-25',
+  '2026-12-05', '2026-12-06'
+];
+
 type Symbol = typeof AUTO_BOT_CONFIG.symbols[number];
 type TradingWindows = readonly (readonly [number, number])[];
 type SessionState = 'open' | 'closed';
@@ -196,17 +209,21 @@ function formatMskTime(now: number): string {
   return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')} МСК`;
 }
 
-function isWithinTradingWindows(
-  now: number,
-  windows: TradingWindows
-): boolean {
+function isWeekendHoliday(date: Date): boolean {
+  const dateStr = date.toISOString().split('T')[0];
+  return WEEKEND_HOLIDAYS_2026.includes(dateStr);
+}
+
+function isWithinTradingWindows(now: number, windows: TradingWindows): boolean {
   const { weekday, minutes } = getMarketTimeParts(now);
-
-  if (weekday === 0 || weekday === 6) return false;
-
-  return windows.some(
-    ([start, end]) => minutes >= start && minutes <= end
-  );
+  const currentDate = new Date(now);
+  
+  // Блокируем только официальные выходные, когда ДСВД не проводится
+  if ((weekday === 0 || weekday === 6) && isWeekendHoliday(currentDate)) {
+    return false;
+  }
+  
+  return windows.some(([start, end]) => minutes >= start && minutes <= end);
 }
 
 function isTradingWindowOpen(now: number): boolean {
