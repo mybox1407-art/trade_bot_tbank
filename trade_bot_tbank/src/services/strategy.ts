@@ -86,7 +86,7 @@ const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 1.4;
  * Мягкое подтверждение объёма на 5m.
  * Остаётся обязательным и для standard, и для breakout_entry.
  */
-const ENTRY_5M_VOLUME_MULTIPLIER = 1.1;
+const ENTRY_5M_VOLUME_MULTIPLIER = 1.05;
 
 /**
  * Stop для входа строится за структурой 5m, но не ближе 1.1 ATR.
