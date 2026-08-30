@@ -36,7 +36,7 @@ const DEFAULT_TIME_FAIL_BARS = 4;
 // BREAKOUT SETTINGS
 // ============================================================================
 const BREAKOUT_ATR_BUFFER_K = 0.1;
-const BREAKOUT_BODY_ATR_MIN = 0.4;
+const BREAKOUT_BODY_ATR_MIN = 0.3;
 
 /**
  * Не входить на закрытии кульминационной 5m/15m свечи.
@@ -45,7 +45,7 @@ const BREAKOUT_BODY_ATR_MIN = 0.4;
  * Новый breakout_entry этот фильтр не использует:
  * для него лимит задаётся расстоянием от уровня пробоя.
  */
-const MAX_BREAKOUT_BODY_ATR = 1.8;
+const MAX_BREAKOUT_BODY_ATR = 2;
 
 const BREAKOUT_ATR_STOP_MULT = 1.5;
 
@@ -97,7 +97,7 @@ const ENTRY_5M_ATR_STOP_MULT = 1.1;
  * Standard-вход требует закрытия ближе к high/low.
  * Не применяется к breakout_entry: там важен сам факт свежего пробоя уровня.
  */
-const ENTRY_5M_CLOSE_NEAR_EXTREME_ATR = 0.50;
+const ENTRY_5M_CLOSE_NEAR_EXTREME_ATR = 0.70;
 
 // ============================================================================
 // FRESH BREAKOUT ENTRY
