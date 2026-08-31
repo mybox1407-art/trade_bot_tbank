@@ -1182,7 +1182,6 @@ export function analyzeMarketMultiTimeframe(
 
       rsiLongOk,
       rsiShortOk,
-      lastRsi5m
     });
   }
 
