@@ -38,13 +38,6 @@ const DEFAULT_TIME_FAIL_BARS = 4;
 const BREAKOUT_ATR_BUFFER_K = 0.1;
 const BREAKOUT_BODY_ATR_MIN = 0.3;
 
-/**
- * Не входить на закрытии кульминационной 5m/15m свечи.
- * Применяется к standard-сигналам.
- *
- * Новый breakout_entry этот фильтр не использует:
- * для него лимит задаётся расстоянием от уровня пробоя.
- */
 const MAX_BREAKOUT_BODY_ATR = 2;
 
 const BREAKOUT_ATR_STOP_MULT = 1.5;
@@ -58,67 +51,17 @@ const VOLUME_SPIKE_MULTIPLIER = 1.1;
 // ============================================================================
 // 5M ENTRY SETTINGS
 // ============================================================================
-/**
- * ENTRY_5M_BREAKOUT_LOOKBACK больше не используется как обязательный фильтр
- * стандартного входа.
- *
- * localLow/localHigh применяются:
- * - как диагностика для standard-входа;
- * - как обязательный уровень для нового breakout_entry.
- */
 const ENTRY_5M_DIAGNOSTIC_LOOKBACK = 6;
-
-/**
- * ATR-буфер относительно локального уровня.
- *
- * Для long уровень = localHigh + 0.05 ATR.
- * Для short уровень = localLow - 0.05 ATR.
- */
 const ENTRY_5M_DIAGNOSTIC_ATR_BUFFER = 0.05;
-
-/**
- * На standard 5m-входе цена не должна быть слишком далеко от EMA20.
- * Не применяется к breakout_entry.
- */
 const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 0.8;
-
-/**
- * Мягкое подтверждение объёма на 5m.
- * Остаётся обязательным и для standard, и для breakout_entry.
- */
 const ENTRY_5M_VOLUME_MULTIPLIER = 1.05;
-
-/**
- * Stop для входа строится за структурой 5m, но не ближе 1.1 ATR.
- */
 const ENTRY_5M_ATR_STOP_MULT = 1.1;
-
-/**
- * Standard-вход требует закрытия ближе к high/low.
- * Не применяется к breakout_entry: там важен сам факт свежего пробоя уровня.
- */
 const ENTRY_5M_CLOSE_NEAR_EXTREME_ATR = 0.70;
-
-/**
- * Standard-вход не должен быть дальше 0.5 ATR от локального уровня.
- * Это защита от «догоняющих» входов после движения.
- */
 const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
 
 // ============================================================================
 // FRESH BREAKOUT ENTRY
 // ============================================================================
-/**
- * Новый путь входа: свежий подтверждённый 5m-пробой.
- *
- * Активен строго в 15m-режиме trend_breakout.
- * Не меняет правила trend_up, trend_down, breakout_watch и standard-входов.
- *
- * После пробоя контролируем удаление от пробойного уровня, а не от EMA20:
- * - 0.0 ATR: цена только пересекла уровень;
- * - до 0.6 ATR: допустимый свежий вход;
- * - больше 0.6 ATR: движение уже нельзя догонять.
- */
 const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.6;
 
 // ============================================================================
@@ -152,12 +95,6 @@ export type MarketRegime =
 
 export type HtfBias = 'up' | 'down' | 'neutral';
 
-/**
- * Это не новый MarketRegime, а способ получения входа.
- *
- * standard — твоя прежняя логика 5m-входа.
- * breakout_entry — новый строго ограниченный путь свежего пробоя.
- */
 export type EntryMode =
   | 'none'
   | 'standard'
@@ -190,13 +127,7 @@ export interface StrategySignal {
   buy: boolean;
   sell: boolean;
   side: 'long' | 'short' | 'none';
-
-  /**
-   * Видно в верхнеуровневом объекте сигнала:
-   * none / standard / breakout_entry.
-   */
   entryMode: EntryMode;
-
   stopLossPrice: number | null;
   takeProfit1Price: number | null;
   takeProfit2Price: number | null;
@@ -909,7 +840,6 @@ export function analyzeMarketMultiTimeframe(
 
   const bodyValid = bodyLargeEnough && bodyNotExhausted;
 
-  // Локальная структура из 6 предыдущих полностью закрытых 5m-свечей.
   const diagnosticLows = lows5m.slice(
     signal5mIndex - ENTRY_5M_DIAGNOSTIC_LOOKBACK,
     signal5mIndex
@@ -932,23 +862,12 @@ export function analyzeMarketMultiTimeframe(
   const confirmedBreakdown5m = price < shortBreakdownThreshold;
   const confirmedBreakout5m = price > longBreakoutThreshold;
 
-  /**
-   * Дистанция текущего закрытия сигнальной 5m-свечи от уровня пробоя.
-   *
-   * Положительное значение означает, что пробой уже состоялся:
-   * - long: цена выше longBreakoutThreshold;
-   * - short: цена ниже shortBreakdownThreshold.
-   */
   const longBreakoutDistanceAtr =
     (price - longBreakoutThreshold) / lastAtr5m;
 
   const shortBreakoutDistanceAtr =
     (shortBreakdownThreshold - price) / lastAtr5m;
 
-  /**
-   * Свежий пробой: уровень пересечён, но цена ещё не убежала.
-   * Это защита breakout_entry от позднего догоняющего входа.
-   */
   const freshLongBreakout =
     confirmedBreakout5m &&
     longBreakoutDistanceAtr >= 0 &&
@@ -983,7 +902,6 @@ export function analyzeMarketMultiTimeframe(
 
   const contextRegime = context15m.regime;
 
-  // ИЗМЕНЕНО: breakout_watch и range — только для breakout_entry
   const allowShortContext =
     contextRegime === 'trend_down' ||
     contextRegime === 'trend_breakout';
@@ -1016,18 +934,12 @@ export function analyzeMarketMultiTimeframe(
       contextClose > contextEma200
     );
 
-  // --------------------------------------------------------------------------
-  // STANDARD ENTRY: прежняя логика + новые фильтры
-  // --------------------------------------------------------------------------
-  
-  // Фильтр: не заходить после 0.5 ATR от локального уровня
   const longDistanceFromLevel = (price - localHigh5m) / lastAtr5m;
   const shortDistanceFromLevel = (localLow5m - price) / lastAtr5m;
   
   const standardLongNotLate = longDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
   const standardShortNotLate = shortDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
 
-  // RSI с потолками (защита от перекупленности/перепроданности)
   const rsiLongOk = lastRsi5m > 52 && lastRsi5m < 70;
   const rsiShortOk = lastRsi5m < 48 && lastRsi5m > 30;
 
@@ -1051,13 +963,6 @@ export function analyzeMarketMultiTimeframe(
     longNotOverextended &&
     standardLongNotLate;
 
-  // --------------------------------------------------------------------------
-  // BREAKOUT ENTRY: новый изолированный путь.
-  //
-  // Работает строго в trend_breakout. Не использует bodyValid,
-  // closeNearHigh/closeNearLow и EMA20-extension:
-  // вместо них использует свежесть пробоя относительно local high/low.
-  // --------------------------------------------------------------------------
   const breakoutLongSignal =
     contextRegime === 'trend_breakout' &&
     volume5m.ok &&
@@ -1181,10 +1086,6 @@ export function analyzeMarketMultiTimeframe(
       rejectReasons.push('5m_long_too_far_from_level');
     }
 
-    /**
-     * Явно покажет, что пробой был, но к моменту проверки вход уже поздний.
-     * Это относится только к новому breakout_entry-пути.
-     */
     if (
       contextRegime === 'trend_breakout' &&
       confirmedBreakout5m &&
@@ -1490,9 +1391,6 @@ export function analyzeMarketMultiTimeframe(
 
 // ============================================================================
 // LEGACY SINGLE-TIMEFRAME ENTRY
-//
-// Оставлена для обратной совместимости. Для 15m-context + 5m-entry:
-// analyzeMarketMultiTimeframe({ candles15m, candles5m, balance, htf }).
 // ============================================================================
 export function analyzeMarket(
   candles: Candle[],
