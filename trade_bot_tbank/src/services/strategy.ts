@@ -14,8 +14,8 @@ export const BREAKOUT_TP1_R = 1.0;
 export const BREAKOUT_TP2_R = 2.5;
 export const PARTIAL_LOCK_R = 0;
 
-const MIN_STOP_DISTANCE_RATE = 0.004;
-const MAX_STOP_DISTANCE_RATE = 0.01;
+const MIN_STOP_DISTANCE_RATE = 0.003;
+const MAX_STOP_DISTANCE_RATE = 0.012;
 const MAX_POSITION_FRAC = 0.3;
 const MAX_COMMISSION_SHARE_OF_RISK = 0.28;
 const MIN_ADX_TREND = 20;
@@ -80,13 +80,13 @@ const ENTRY_5M_DIAGNOSTIC_ATR_BUFFER = 0.05;
  * На standard 5m-входе цена не должна быть слишком далеко от EMA20.
  * Не применяется к breakout_entry.
  */
-const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 1.4;
+const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 0.8;
 
 /**
  * Мягкое подтверждение объёма на 5m.
  * Остаётся обязательным и для standard, и для breakout_entry.
  */
-const ENTRY_5M_VOLUME_MULTIPLIER = 1.05; // ВААЖНО! Если что увеличивать
+const ENTRY_5M_VOLUME_MULTIPLIER = 1.05;
 
 /**
  * Stop для входа строится за структурой 5m, но не ближе 1.1 ATR.
@@ -98,6 +98,12 @@ const ENTRY_5M_ATR_STOP_MULT = 1.1;
  * Не применяется к breakout_entry: там важен сам факт свежего пробоя уровня.
  */
 const ENTRY_5M_CLOSE_NEAR_EXTREME_ATR = 0.70;
+
+/**
+ * Standard-вход не должен быть дальше 0.5 ATR от локального уровня.
+ * Это защита от «догоняющих» входов после движения.
+ */
+const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
 
 // ============================================================================
 // FRESH BREAKOUT ENTRY
@@ -977,13 +983,12 @@ export function analyzeMarketMultiTimeframe(
 
   const contextRegime = context15m.regime;
 
+  // ИЗМЕНЕНО: breakout_watch и range — только для breakout_entry
   const allowShortContext =
-    contextRegime === 'breakout_watch' ||
     contextRegime === 'trend_down' ||
     contextRegime === 'trend_breakout';
 
   const allowLongContext =
-    contextRegime === 'breakout_watch' ||
     contextRegime === 'trend_up' ||
     contextRegime === 'trend_breakout';
 
@@ -1012,25 +1017,39 @@ export function analyzeMarketMultiTimeframe(
     );
 
   // --------------------------------------------------------------------------
-  // STANDARD ENTRY: прежняя логика без изменений.
+  // STANDARD ENTRY: прежняя логика + новые фильтры
   // --------------------------------------------------------------------------
+  
+  // Фильтр: не заходить после 0.5 ATR от локального уровня
+  const longDistanceFromLevel = (price - localHigh5m) / lastAtr5m;
+  const shortDistanceFromLevel = (localLow5m - price) / lastAtr5m;
+  
+  const standardLongNotLate = longDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
+  const standardShortNotLate = shortDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
+
+  // RSI с потолками (защита от перекупленности/перепроданности)
+  const rsiLongOk = lastRsi5m > 52 && lastRsi5m < 70;
+  const rsiShortOk = lastRsi5m < 48 && lastRsi5m > 30;
+
   const standardShortSignal =
     allowShortContext &&
     bodyValid &&
     volume5m.ok &&
-    lastRsi5m < 48 &&
+    rsiShortOk &&
     price < lastEma20_5m &&
     closeNearLow &&
-    shortNotOverextended;
+    shortNotOverextended &&
+    standardShortNotLate;
 
   const standardLongSignal =
     allowLongContext &&
     bodyValid &&
     volume5m.ok &&
-    lastRsi5m > 52 &&
+    rsiLongOk &&
     price > lastEma20_5m &&
     closeNearHigh &&
-    longNotOverextended;
+    longNotOverextended &&
+    standardLongNotLate;
 
   // --------------------------------------------------------------------------
   // BREAKOUT ENTRY: новый изолированный путь.
@@ -1154,6 +1173,14 @@ export function analyzeMarketMultiTimeframe(
       rejectReasons.push('5m_long_close_not_near_high');
     }
 
+    if (allowShortContext && !standardShortNotLate) {
+      rejectReasons.push('5m_short_too_far_from_level');
+    }
+
+    if (allowLongContext && !standardLongNotLate) {
+      rejectReasons.push('5m_long_too_far_from_level');
+    }
+
     /**
      * Явно покажет, что пробой был, но к моменту проверки вход уже поздний.
      * Это относится только к новому breakout_entry-пути.
@@ -1244,7 +1271,17 @@ export function analyzeMarketMultiTimeframe(
 
       closeNearLow,
       closeNearHigh,
-      closeNearExtremeAtr: ENTRY_5M_CLOSE_NEAR_EXTREME_ATR
+      closeNearExtremeAtr: ENTRY_5M_CLOSE_NEAR_EXTREME_ATR,
+
+      longDistanceFromLevel,
+      shortDistanceFromLevel,
+      maxDistanceFromLevelAtr: ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR,
+      standardLongNotLate,
+      standardShortNotLate,
+
+      rsiLongOk,
+      rsiShortOk,
+      lastRsi5m
     });
   }
 
@@ -1436,6 +1473,15 @@ export function analyzeMarketMultiTimeframe(
       stopPct,
       tp1: takeProfit1Price,
       tp2: takeProfit2Price,
+
+      longDistanceFromLevel,
+      shortDistanceFromLevel,
+      maxDistanceFromLevelAtr: ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR,
+      standardLongNotLate,
+      standardShortNotLate,
+
+      rsiLongOk,
+      rsiShortOk,
 
       ...htfMeta
     }
