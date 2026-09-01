@@ -92,6 +92,10 @@ interface PendingSignal {
   initialR: number;
   signalTime: number;
   barsWaited: number;
+
+  // ATR сохраняем в момент генерации сигнала, чтобы при retry
+  // сохранялась та же волатильностная шкала допуска.
+  lastAtr: number;
 }
 
 const pendingSignals = new Map<Symbol, PendingSignal>();
@@ -979,44 +983,48 @@ export async function runRegimeCheckCycle() {
         continue;
       }
 
-      if (pendingSignals.has(symbol)) {
-        const pending = pendingSignals.get(symbol)!;
-
-        pending.barsWaited += 1;
-
-        if (
-          pending.barsWaited >=
-          AUTO_BOT_CONFIG.entryTimeoutBars
-        ) {
-          log(
-            'info',
-            `Signal expired for ${symbol} after ${pending.barsWaited} 5m bars`,
-            {
-              entryMode: pending.entryMode,
-              side: pending.side,
-              entryPrice: pending.entryPrice,
-              regime: pending.regime
-            }
-          );
-
-          pendingSignals.delete(symbol);
-        } else {
-          log(
-            'info',
-            `Pending signal for ${symbol} waiting ` +
-            `(5m bar ${pending.barsWaited}/` +
-            `${AUTO_BOT_CONFIG.entryTimeoutBars})`,
-            {
-              entryMode: pending.entryMode,
-              side: pending.side,
-              entryPrice: pending.entryPrice,
-              regime: pending.regime
-            }
-          );
-        }
-
-        continue;
+    if (pendingSignals.has(symbol)) {
+      const pending = pendingSignals.get(symbol)!;
+    
+      pending.barsWaited += 1;
+    
+      if (
+        pending.barsWaited >=
+        AUTO_BOT_CONFIG.entryTimeoutBars
+      ) {
+        log(
+          'info',
+          `Signal expired for ${symbol} after ` +
+          `${pending.barsWaited} 5m bars`,
+          {
+            entryMode: pending.entryMode,
+            side: pending.side,
+            entryPrice: pending.entryPrice,
+            regime: pending.regime
+          }
+        );
+    
+        pendingSignals.delete(symbol);
+      } else {
+        log(
+          'info',
+          `Retrying pending signal for ${symbol} ` +
+          `(5m bar ${pending.barsWaited}/` +
+          `${AUTO_BOT_CONFIG.entryTimeoutBars})`,
+          {
+            entryMode: pending.entryMode,
+            side: pending.side,
+            entryPrice: pending.entryPrice,
+            regime: pending.regime,
+            lastAtr: pending.lastAtr
+          }
+        );
+    
+        await tryExecutePendingSignal(symbol);
       }
+    
+      continue;
+    }
 
       try {
         await processSymbol(
@@ -1344,11 +1352,17 @@ async function processSymbol(
     positionSize:
       signal.positionSize ??
       signal.quantity * signal.price,
-
+  
     regime: signal.regime,
     initialR: signal.initialR ?? 0,
     signalTime: nowMs(),
-    barsWaited: 0
+    barsWaited: 0,
+  
+    lastAtr:
+      typeof signal.indicators?.lastAtr === 'number' &&
+      Number.isFinite(signal.indicators.lastAtr)
+        ? signal.indicators.lastAtr
+        : 0
   };
 
   pendingSignals.set(symbol, pending);
@@ -1407,15 +1421,14 @@ async function processSymbol(
     signal.indicators
   );
 
-  await tryExecutePendingSignal(symbol, signal);
+  await tryExecutePendingSignal(symbol);
 }
 
 // ============================================================================
 // Исполнение pending-сигнала
 // ============================================================================
 async function tryExecutePendingSignal(
-  symbol: Symbol,
-  signal: any
+  symbol: Symbol
 ) {
   const pending = pendingSignals.get(symbol);
 
@@ -1429,20 +1442,43 @@ async function tryExecutePendingSignal(
     const quoteReceivedAt = nowMs();
     const balanceBefore = getBalance();
 
+    // Базовый допуск 0.10%.
+    // Для standard-логики сохраняем исходный расчёт.
     const baseTolerance = 0.001;
 
+    // ATR зафиксирован при генерации сигнала.
+    // Не пересчитываем его на retry, чтобы условия pending-сигнала
+    // не изменялись из-за текущей волатильности.
     const lastAtr =
-      (signal.indicators?.lastAtr as number | undefined) ??
-      0;
+      pending.lastAtr > 0 &&
+      Number.isFinite(pending.lastAtr)
+        ? pending.lastAtr
+        : 0;
 
     const atrTolerance =
-      lastAtr > 0
+      lastAtr > 0 &&
+      pending.entryPrice > 0
         ? lastAtr / pending.entryPrice
         : 0;
 
-    const slippageTolerance =
+    // Старое правило: 0.10% + 0.5 ATR в процентах от цены.
+    const standardSlippageTolerance =
       baseTolerance +
       0.5 * atrTolerance;
+
+    // Для подтверждённого 5m breakout разрешаем небольшой
+    // дополнительный drift. При этом остаётся ATR-привязка,
+    // поэтому допуск адаптируется к конкретному инструменту.
+    const breakoutSlippageTolerance =
+      Math.max(
+        standardSlippageTolerance,
+        1.25 * atrTolerance
+      );
+
+    const slippageTolerance =
+      pending.entryMode === 'breakout_entry'
+        ? breakoutSlippageTolerance
+        : standardSlippageTolerance;
 
     const priceDiff =
       Math.abs(
@@ -1477,13 +1513,18 @@ async function tryExecutePendingSignal(
         fillDrift,
         fillDriftPct,
         entryQuality,
+
         quoteLatencyMs:
           quoteReceivedAt -
           quoteStartedAt,
 
+        lastAtr,
         baseTolerance,
         atrTolerance,
-        slippageTolerance
+        standardSlippageTolerance,
+        breakoutSlippageTolerance,
+        slippageTolerance,
+        priceDiff
       }
     );
 
@@ -1498,10 +1539,18 @@ async function tryExecutePendingSignal(
           signalPrice: pending.entryPrice,
           currentPrice,
           fillDrift,
+          entryQuality,
+
+          lastAtr,
           baseTolerance,
           atrTolerance,
+          standardSlippageTolerance,
+          breakoutSlippageTolerance,
           slippageTolerance,
-          priceDiff
+          priceDiff,
+
+          barsWaited: pending.barsWaited,
+          timeoutBars: AUTO_BOT_CONFIG.entryTimeoutBars
         }
       );
 
@@ -1560,7 +1609,8 @@ async function tryExecutePendingSignal(
 
     log(
       'info',
-      `POSITION OPENED: ${symbol} ${pending.side.toUpperCase()}`,
+      `POSITION OPENED: ${symbol} ` +
+      `${pending.side.toUpperCase()}`,
       {
         entryMode: pending.entryMode,
         signalPrice: pending.entryPrice,
@@ -1568,6 +1618,11 @@ async function tryExecutePendingSignal(
         fillDrift,
         fillDriftPct,
         entryQuality,
+
+        standardSlippageTolerance,
+        breakoutSlippageTolerance,
+        slippageTolerance,
+
         stopLoss: pending.stopLossPrice,
         takeProfit1: pending.takeProfit1Price,
         takeProfit2: pending.takeProfit2Price,
