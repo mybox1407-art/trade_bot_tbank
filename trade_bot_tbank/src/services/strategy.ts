@@ -37,9 +37,7 @@ const DEFAULT_TIME_FAIL_BARS = 4;
 // ============================================================================
 const BREAKOUT_ATR_BUFFER_K = 0.1;
 const BREAKOUT_BODY_ATR_MIN = 0.3;
-
 const MAX_BREAKOUT_BODY_ATR = 2;
-
 const BREAKOUT_ATR_STOP_MULT = 1.5;
 
 // ============================================================================
@@ -51,7 +49,7 @@ const VOLUME_SPIKE_MULTIPLIER = 1.1;
 // ============================================================================
 // 5M ENTRY SETTINGS
 // ============================================================================
-const ENTRY_5M_DIAGNOSTIC_LOOKBACK = 6;
+const ENTRY_5M_DIAGNOSTIC_LOOKBACK = 4;
 const ENTRY_5M_DIAGNOSTIC_ATR_BUFFER = 0.05;
 const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 0.8;
 const ENTRY_5M_VOLUME_MULTIPLIER = 1.05;
@@ -62,15 +60,7 @@ const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
 // ============================================================================
 // FRESH BREAKOUT ENTRY
 // ============================================================================
-const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.6;
-
-// ============================================================================
-// MINIMAL CONTINUATION-SHORT FILTERS
-// ============================================================================
-const CONTINUATION_BREAKDOWN_LOOKBACK = 6;
-const CONTINUATION_BREAKDOWN_ATR_BUFFER = 0.05;
-const SHORT_REVERSAL_LOOKBACK = 3;
-const SHORT_REVERSAL_BODY_ATR = 1.2;
+const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.35;
 
 // ============================================================================
 // ТИПЫ
@@ -161,7 +151,7 @@ function prev<T>(arr: T[]): T {
 
 function median(values: number[]): number {
   const sorted = values
-    .filter(v => Number.isFinite(v) && v > 0)
+    .filter(value => Number.isFinite(value) && value > 0)
     .sort((a, b) => a - b);
 
   if (!sorted.length) return 0;
@@ -188,15 +178,15 @@ function inferBarMs(candles: Candle[]): number {
 }
 
 function indicatorAt<T>(
-  arr: T[],
+  values: T[],
   candleIndex: number,
   candleCount: number
 ): T | undefined {
-  const offset = candleCount - arr.length;
+  const offset = candleCount - values.length;
   const index = candleIndex - offset;
 
-  return index >= 0 && index < arr.length
-    ? arr[index]
+  return index >= 0 && index < values.length
+    ? values[index]
     : undefined;
 }
 
@@ -219,7 +209,7 @@ function checkSignalVolume(
 
   const baselineVolumes = volumes
     .slice(Math.max(0, signalIndex - lookback), signalIndex)
-    .filter(v => Number.isFinite(v) && v > 0);
+    .filter(value => Number.isFinite(value) && value > 0);
 
   const medianVolume = median(baselineVolumes);
   const threshold = medianVolume * multiplier;
@@ -241,10 +231,11 @@ function checkSignalVolume(
   };
 }
 
-export function isTradingHour(ts: number): boolean {
-  const hour = new Date(ts).getUTCHours();
+export function isTradingHour(timestamp: number): boolean {
+  const hour = new Date(timestamp).getUTCHours();
 
-  return hour >= TRADING_HOUR_UTC_FROM && hour < TRADING_HOUR_UTC_TO;
+  return hour >= TRADING_HOUR_UTC_FROM &&
+    hour < TRADING_HOUR_UTC_TO;
 }
 
 function getStructureStop(params: {
@@ -269,12 +260,12 @@ function getStructureStop(params: {
 
   const pad = lastAtr * STOP_SWING_PAD_ATR;
 
-  const minDist = Math.max(
+  const minDistance = Math.max(
     lastAtr * atrStopMult,
     price * MIN_STOP_DISTANCE_RATE
   );
 
-  const maxDist = Math.min(
+  const maxDistance = Math.min(
     lastAtr * 1.8,
     price * MAX_STOP_DISTANCE_RATE
   );
@@ -282,18 +273,18 @@ function getStructureStop(params: {
   if (side === 'long') {
     let stop = recentLow - pad;
 
-    if (price - stop < minDist) stop = price - minDist;
-    if (price - stop > maxDist) stop = price - maxDist;
-    if (stop >= price) stop = price - minDist;
+    if (price - stop < minDistance) stop = price - minDistance;
+    if (price - stop > maxDistance) stop = price - maxDistance;
+    if (stop >= price) stop = price - minDistance;
 
     return stop;
   }
 
   let stop = recentHigh + pad;
 
-  if (stop - price < minDist) stop = price + minDist;
-  if (stop - price > maxDist) stop = price + maxDist;
-  if (stop <= price) stop = price + minDist;
+  if (stop - price < minDistance) stop = price + minDistance;
+  if (stop - price > maxDistance) stop = price + maxDistance;
+  if (stop <= price) stop = price + minDistance;
 
   return stop;
 }
@@ -305,19 +296,19 @@ function calcPositionSize(params: {
   balance: number;
 }) {
   const { price, stopLossPrice, riskCapital, balance } = params;
-  const stopDist = Math.abs(price - stopLossPrice);
+  const stopDistance = Math.abs(price - stopLossPrice);
 
-  if (stopDist <= 0 || price <= 0) {
+  if (stopDistance <= 0 || price <= 0) {
     return {
       quantity: null as number | null,
       positionSize: null as number | null
     };
   }
 
-  const commPerShare = price * ROUND_TRIP_COMMISSION_RATE;
-  const riskPerShare = stopDist + commPerShare;
+  const commissionPerShare = price * ROUND_TRIP_COMMISSION_RATE;
+  const riskPerShare = stopDistance + commissionPerShare;
 
-  if (commPerShare / riskPerShare > MAX_COMMISSION_SHARE_OF_RISK) {
+  if (commissionPerShare / riskPerShare > MAX_COMMISSION_SHARE_OF_RISK) {
     return {
       quantity: null,
       positionSize: null
@@ -326,11 +317,11 @@ function calcPositionSize(params: {
 
   let quantity = Math.floor(riskCapital / riskPerShare);
 
-  const maxQty = Math.floor(
+  const maxQuantity = Math.floor(
     (balance * MAX_POSITION_FRAC) / price
   );
 
-  quantity = Math.min(quantity, maxQty);
+  quantity = Math.min(quantity, maxQuantity);
 
   if (quantity < MIN_QUANTITY) {
     return {
@@ -348,8 +339,8 @@ function calcPositionSize(params: {
 // ============================================================================
 // HTF (1H BIAS)
 // ============================================================================
-export function hourBucketStart(ts: number): number {
-  const date = new Date(ts);
+export function hourBucketStart(timestamp: number): number {
+  const date = new Date(timestamp);
 
   return Date.UTC(
     date.getUTCFullYear(),
@@ -910,6 +901,12 @@ export function analyzeMarketMultiTimeframe(
     contextRegime === 'trend_up' ||
     contextRegime === 'trend_breakout';
 
+  const breakoutContextAllowed =
+    contextRegime === 'breakout_watch' ||
+    contextRegime === 'trend_breakout' ||
+    contextRegime === 'trend_up' ||
+    contextRegime === 'trend_down';
+
   const contextEma200 =
     context15m.indicators.ema200 as number | undefined;
 
@@ -934,11 +931,17 @@ export function analyzeMarketMultiTimeframe(
       contextClose > contextEma200
     );
 
-  const longDistanceFromLevel = (price - localHigh5m) / lastAtr5m;
-  const shortDistanceFromLevel = (localLow5m - price) / lastAtr5m;
-  
-  const standardLongNotLate = longDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
-  const standardShortNotLate = shortDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
+  const longDistanceFromLevel =
+    (price - localHigh5m) / lastAtr5m;
+
+  const shortDistanceFromLevel =
+    (localLow5m - price) / lastAtr5m;
+
+  const standardLongNotLate =
+    longDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
+
+  const standardShortNotLate =
+    shortDistanceFromLevel <= ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR;
 
   const rsiLongOk = lastRsi5m > 52 && lastRsi5m < 70;
   const rsiShortOk = lastRsi5m < 48 && lastRsi5m > 30;
@@ -964,14 +967,18 @@ export function analyzeMarketMultiTimeframe(
     standardLongNotLate;
 
   const breakoutLongSignal =
-    contextRegime === 'trend_breakout' &&
+    breakoutContextAllowed &&
     volume5m.ok &&
+    bodyValid &&
+    closeNearHigh &&
     lastRsi5m > 52 &&
     freshLongBreakout;
 
   const breakoutShortSignal =
-    contextRegime === 'trend_breakout' &&
+    breakoutContextAllowed &&
     volume5m.ok &&
+    bodyValid &&
+    closeNearLow &&
     lastRsi5m < 48 &&
     freshShortBreakdown;
 
@@ -1046,7 +1053,11 @@ export function analyzeMarketMultiTimeframe(
   if (side === 'none') {
     const rejectReasons: string[] = [];
 
-    if (!allowShortContext && !allowLongContext) {
+    if (
+      !allowShortContext &&
+      !allowLongContext &&
+      !breakoutContextAllowed
+    ) {
       rejectReasons.push('15m_context_not_tradeable');
     }
 
@@ -1060,6 +1071,14 @@ export function analyzeMarketMultiTimeframe(
 
     if (!volume5m.ok) {
       rejectReasons.push('5m_volume_below_threshold');
+    }
+
+    if (
+      contextRegime === 'breakout_watch' &&
+      !freshLongBreakout &&
+      !freshShortBreakdown
+    ) {
+      rejectReasons.push('5m_breakout_not_confirmed');
     }
 
     if (allowShortContext && !shortNotOverextended) {
@@ -1087,7 +1106,6 @@ export function analyzeMarketMultiTimeframe(
     }
 
     if (
-      contextRegime === 'trend_breakout' &&
       confirmedBreakout5m &&
       longBreakoutDistanceAtr > BREAKOUT_ENTRY_MAX_DISTANCE_ATR
     ) {
@@ -1095,7 +1113,6 @@ export function analyzeMarketMultiTimeframe(
     }
 
     if (
-      contextRegime === 'trend_breakout' &&
       confirmedBreakdown5m &&
       shortBreakoutDistanceAtr > BREAKOUT_ENTRY_MAX_DISTANCE_ATR
     ) {
@@ -1120,8 +1137,10 @@ export function analyzeMarketMultiTimeframe(
       context15mEma50: context15m.indicators.ema50,
       context15mEma200: context15m.indicators.ema200,
       context15mBbWidth: context15m.indicators.bbWidth,
+
       allowShortContext,
       allowLongContext,
+      breakoutContextAllowed,
       contextTrendShort,
       contextTrendLong,
 
@@ -1181,7 +1200,7 @@ export function analyzeMarketMultiTimeframe(
       standardShortNotLate,
 
       rsiLongOk,
-      rsiShortOk,
+      rsiShortOk
     });
   }
 
@@ -1318,6 +1337,7 @@ export function analyzeMarketMultiTimeframe(
 
       allowShortContext,
       allowLongContext,
+      breakoutContextAllowed,
       contextTrendShort,
       contextTrendLong,
 
