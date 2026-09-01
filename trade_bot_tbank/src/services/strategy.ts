@@ -64,7 +64,7 @@ const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.35;
 
 // Для ранних breakout-entry допускаем нейтральный RSI.
 // Направление подтверждают: закрытие за уровнем, объём, тело свечи и closeNearHigh/Low.
-const BREAKOUT_LONG_RSI_MIN = 50;
+const BREAKOUT_LONG_RSI_MIN = 45;
 const BREAKOUT_LONG_RSI_MAX = 78;
 const BREAKOUT_SHORT_RSI_MIN = 22;
 const BREAKOUT_SHORT_RSI_MAX = 56;
