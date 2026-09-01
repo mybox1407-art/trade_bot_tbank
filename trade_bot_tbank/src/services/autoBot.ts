@@ -700,6 +700,7 @@ function formatOpenPositionMessage(
   symbol: string,
   side: 'long' | 'short',
   entryMode: EntryMode,
+  signalPrice: number,
   entryPrice: number,
   quantity: number,
   positionSize: number,
@@ -719,7 +720,9 @@ function formatOpenPositionMessage(
     `[ОТКРЫТИЕ ПОЗИЦИИ] ${sideText}`,
     '',
     `Тикер: ${symbol}`,
-    `Цена входа: ${formatMoney(entryPrice)} руб`,
+    `Цена сигнала: ${formatMoney(signalPrice)} руб`,
+    `Цена исполнения: ${formatMoney(entryPrice)} руб`,
+    `Drift: ${formatMoney(entryPrice - signalPrice)} руб`,
     `Количество: ${quantity} шт`,
     `Объём позиции: ${formatMoney(positionSize)} руб`,
     `Stop Loss: ${formatMoney(stopLoss)} руб`,
@@ -986,6 +989,28 @@ export async function runRegimeCheckCycle() {
     if (pendingSignals.has(symbol)) {
       const pending = pendingSignals.get(symbol)!;
     
+      // Пробой должен быть исполнен сразу после закрытия сигнальной 5m-свечи.
+      // Если первая попытка не прошла по цене, старый breakout не догоняем
+      // на следующем 5m-баре — он уже потерял актуальность.
+      if (pending.entryMode === 'breakout_entry') {
+        log(
+          'info',
+          `Breakout signal expired for ${symbol}: ` +
+          'not filled immediately',
+          {
+            entryMode: pending.entryMode,
+            side: pending.side,
+            signalPrice: pending.entryPrice,
+            regime: pending.regime,
+            barsWaited: pending.barsWaited
+          }
+        );
+    
+        pendingSignals.delete(symbol);
+        continue;
+      }
+    
+      // Старый retry-механизм оставляем только для standard-входов.
       pending.barsWaited += 1;
     
       if (
@@ -1008,7 +1033,7 @@ export async function runRegimeCheckCycle() {
       } else {
         log(
           'info',
-          `Retrying pending signal for ${symbol} ` +
+          `Retrying pending standard signal for ${symbol} ` +
           `(5m bar ${pending.barsWaited}/` +
           `${AUTO_BOT_CONFIG.entryTimeoutBars})`,
           {
@@ -1557,10 +1582,16 @@ async function tryExecutePendingSignal(
     );
 
     if (priceDiff > slippageTolerance) {
+      const isBreakout =
+        pending.entryMode === 'breakout_entry';
+    
       log(
         'info',
-        `${symbol}: price moved too far ` +
-        `(${fillDriftPct.toFixed(2)}%), waiting`,
+        isBreakout
+          ? `${symbol}: breakout price moved too far ` +
+            `(${fillDriftPct.toFixed(2)}%), cancelling`
+          : `${symbol}: price moved too far ` +
+            `(${fillDriftPct.toFixed(2)}%), waiting`,
         {
           side: pending.side,
           entryMode: pending.entryMode,
@@ -1568,7 +1599,7 @@ async function tryExecutePendingSignal(
           currentPrice,
           fillDrift,
           entryQuality,
-
+    
           lastAtr,
           baseTolerance,
           atrTolerance,
@@ -1576,12 +1607,16 @@ async function tryExecutePendingSignal(
           breakoutSlippageTolerance,
           slippageTolerance,
           priceDiff,
-
+    
           barsWaited: pending.barsWaited,
           timeoutBars: AUTO_BOT_CONFIG.entryTimeoutBars
         }
       );
-
+    
+      if (isBreakout) {
+        pendingSignals.delete(symbol);
+      }
+    
       return;
     }
 
@@ -1659,20 +1694,21 @@ async function tryExecutePendingSignal(
       }
     );
 
-    const telegramMessage = formatOpenPositionMessage(
-      pending.symbol,
-      pending.side,
-      pending.entryMode,
-      currentPrice,
-      pending.quantity,
-      pending.positionSize,
-      pending.stopLossPrice,
-      pending.takeProfit1Price,
-      balanceBefore,
-      balanceAfter,
-      pending.regime,
-      pending.initialR
-    );
+  const telegramMessage = formatOpenPositionMessage(
+    pending.symbol,
+    pending.side,
+    pending.entryMode,
+    pending.entryPrice,
+    currentPrice,
+    pending.quantity,
+    pending.positionSize,
+    pending.stopLossPrice,
+    pending.takeProfit1Price,
+    balanceBefore,
+    balanceAfter,
+    pending.regime,
+    pending.initialR
+  );
 
     await sendTelegramMessage(telegramMessage);
   } catch (error) {
