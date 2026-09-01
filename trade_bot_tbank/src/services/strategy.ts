@@ -62,6 +62,13 @@ const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
 // ============================================================================
 const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.35;
 
+// Для ранних breakout-entry допускаем нейтральный RSI.
+// Направление подтверждают: закрытие за уровнем, объём, тело свечи и closeNearHigh/Low.
+const BREAKOUT_LONG_RSI_MIN = 50;
+const BREAKOUT_LONG_RSI_MAX = 78;
+const BREAKOUT_SHORT_RSI_MIN = 22;
+const BREAKOUT_SHORT_RSI_MAX = 56;
+
 // ============================================================================
 // ТИПЫ
 // ============================================================================
@@ -946,6 +953,14 @@ export function analyzeMarketMultiTimeframe(
   const rsiLongOk = lastRsi5m > 52 && lastRsi5m < 70;
   const rsiShortOk = lastRsi5m < 48 && lastRsi5m > 30;
 
+  const rsiLongBreakoutOk =
+    lastRsi5m > BREAKOUT_LONG_RSI_MIN &&
+    lastRsi5m < BREAKOUT_LONG_RSI_MAX;
+
+  const rsiShortBreakoutOk =
+    lastRsi5m < BREAKOUT_SHORT_RSI_MAX &&
+    lastRsi5m > BREAKOUT_SHORT_RSI_MIN;
+
   const standardShortSignal =
     allowShortContext &&
     bodyValid &&
@@ -971,7 +986,7 @@ export function analyzeMarketMultiTimeframe(
     volume5m.ok &&
     bodyValid &&
     closeNearHigh &&
-    lastRsi5m > 52 &&
+    rsiLongBreakoutOk &&
     freshLongBreakout;
 
   const breakoutShortSignal =
@@ -979,7 +994,7 @@ export function analyzeMarketMultiTimeframe(
     volume5m.ok &&
     bodyValid &&
     closeNearLow &&
-    lastRsi5m < 48 &&
+    rsiShortBreakoutOk &&
     freshShortBreakdown;
 
   const longSignal =
@@ -1029,14 +1044,27 @@ export function analyzeMarketMultiTimeframe(
       });
     }
 
+    const htfDirectionAligned =
+      isHtfDirectionAllowed(side, htfState.bias);
+
+    const htfDirectionAllowed =
+      entryMode === 'breakout_entry'
+        ? true
+        : htfDirectionAligned;
+
     htfMeta.htfEnabled = true;
     htfMeta.htfBias = htfState.bias;
     htfMeta.htfAdx = htfState.adx;
     htfMeta.htfEma20 = htfState.ema20;
     htfMeta.htfEma50 = htfState.ema50;
     htfMeta.htfEma200 = htfState.ema200;
+    htfMeta.htfDirectionAligned = htfDirectionAligned;
+    htfMeta.htfDirectionAllowed = htfDirectionAllowed;
+    htfMeta.htfGateBypassedForBreakout =
+      entryMode === 'breakout_entry' &&
+      !htfDirectionAligned;
 
-    if (!isHtfDirectionAllowed(side, htfState.bias)) {
+    if (!htfDirectionAllowed) {
       return emptySignal(price, contextRegime, {
         ready: true,
         reject: 'htf_gate',
@@ -1119,6 +1147,20 @@ export function analyzeMarketMultiTimeframe(
       rejectReasons.push('breakout_short_too_far_from_level');
     }
 
+    if (
+      confirmedBreakout5m &&
+      !rsiLongBreakoutOk
+    ) {
+      rejectReasons.push('breakout_long_rsi_out_of_range');
+    }
+
+    if (
+      confirmedBreakdown5m &&
+      !rsiShortBreakoutOk
+    ) {
+      rejectReasons.push('breakout_short_rsi_out_of_range');
+    }
+
     return emptySignal(price, contextRegime, {
       ready: true,
       reject: 'no_5m_entry_conditions',
@@ -1182,6 +1224,13 @@ export function analyzeMarketMultiTimeframe(
       freshShortBreakdown,
       longBreakoutDistanceAtr,
       shortBreakoutDistanceAtr,
+
+      rsiLongBreakoutOk,
+      rsiShortBreakoutOk,
+      breakoutLongRsiMin: BREAKOUT_LONG_RSI_MIN,
+      breakoutLongRsiMax: BREAKOUT_LONG_RSI_MAX,
+      breakoutShortRsiMin: BREAKOUT_SHORT_RSI_MIN,
+      breakoutShortRsiMax: BREAKOUT_SHORT_RSI_MAX,
 
       shortExtensionFromEma20,
       longExtensionFromEma20,
@@ -1378,6 +1427,13 @@ export function analyzeMarketMultiTimeframe(
       freshShortBreakdown,
       longBreakoutDistanceAtr,
       shortBreakoutDistanceAtr,
+
+      rsiLongBreakoutOk,
+      rsiShortBreakoutOk,
+      breakoutLongRsiMin: BREAKOUT_LONG_RSI_MIN,
+      breakoutLongRsiMax: BREAKOUT_LONG_RSI_MAX,
+      breakoutShortRsiMin: BREAKOUT_SHORT_RSI_MIN,
+      breakoutShortRsiMax: BREAKOUT_SHORT_RSI_MAX,
 
       shortExtensionFromEma20,
       longExtensionFromEma20,
