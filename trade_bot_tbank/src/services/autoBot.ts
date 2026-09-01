@@ -1256,20 +1256,33 @@ async function processSymbol(
     (signal.indicators?.entryMode as EntryMode | undefined) ??
     'none';
 
-  if (
+  const isCounterTrendBreakout =
+    signalEntryMode === 'breakout_entry' &&
     marketState.sideBias !== 'neutral' &&
-    marketState.sideBias !== side
-  ) {
+    marketState.sideBias !== side;
+  
+  // Standard-входы идут только по направлению 15m market bias.
+  // Подтверждённый breakout-entry допускается в обе стороны:
+  // направление уже подтверждается 5m закрытием за уровнем,
+  // объёмом, формой свечи и ограничением дистанции от уровня.
+  const marketBiasAllowed =
+    signalEntryMode === 'breakout_entry' ||
+    marketState.sideBias === 'neutral' ||
+    marketState.sideBias === side;
+  
+  if (!marketBiasAllowed) {
     log(
       'info',
       `${symbol}: 5m signal ${side} conflicts with ` +
       `15m market bias ${marketState.sideBias}, skipping`,
       {
         entryMode: signalEntryMode,
-        regime: signal.regime
+        regime: signal.regime,
+        marketBias: marketState.sideBias,
+        signalSide: side
       }
     );
-
+  
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
       await sendTelegramMessage([
         '[ПРОВЕРКА СИГНАЛА]',
@@ -1279,8 +1292,22 @@ async function processSymbol(
         `Отклонён: ${side.toUpperCase()} против 15m bias ${marketState.sideBias}`
       ].join('\n'));
     }
-
+  
     return;
+  }
+  
+  if (isCounterTrendBreakout) {
+    log(
+      'info',
+      `${symbol}: allowing counter-trend breakout entry`,
+      {
+        entryMode: signalEntryMode,
+        side,
+        marketBias: marketState.sideBias,
+        regime: signal.regime,
+        signalPrice: signal.price
+      }
+    );
   }
 
   const coherence = computeCoherenceScore(
@@ -1406,6 +1433,7 @@ async function processSymbol(
       marketState: marketState.state,
       marketBias: marketState.sideBias,
       coherence: coherence.toFixed(4),
+      counterTrendBreakout: isCounterTrendBreakout,
 
       ...get5mEntryLogMeta(signal.indicators),
       ...getVolumeLogMeta(signal.indicators)
