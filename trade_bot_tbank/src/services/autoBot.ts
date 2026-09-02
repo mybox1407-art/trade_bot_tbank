@@ -516,7 +516,10 @@ function getClosedBarsAfterEntry(
       const closeTime = openTime + barMs;
 
       return (
-        openTime >= state.signalCandleTime &&
+        // Не берём сигнальную свечу.
+        openTime > state.signalCandleTime &&
+
+        // Берём только уже закрытые на текущий момент свечи.
         closeTime <= now
       );
     })
@@ -1647,6 +1650,11 @@ async function processSymbol(
     return;
   }
 
+  const signalCandleTime = floorToBar(
+    getSignalCandleTime(signal.indicators),
+    timeframeToMs(AUTO_BOT_CONFIG.timeframe)
+  );
+  
   const pending: PendingSignal = {
     symbol,
     side,
@@ -1688,9 +1696,7 @@ async function processSymbol(
       signal.minTp1R ??
       BREAKOUT_MIN_TP1_R,
   
-    signalCandleTime: getSignalCandleTime(
-      signal.indicators
-    )
+    signalCandleTime
   };
 
   pendingSignals.set(symbol, pending);
