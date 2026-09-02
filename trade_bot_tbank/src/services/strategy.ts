@@ -57,8 +57,8 @@ export const BREAKOUT_MIN_TP1_R = 1.15;
 
 // Если за 4 завершённых пятиминутных бара пробой не показал
 // хотя бы +0.25R движения в сторону позиции — закрыть breakout_time_fail.
-export const BREAKOUT_TIME_FAIL_BARS = 4;
-export const BREAKOUT_TIME_FAIL_MIN_MFE_R = 0.25;
+export const BREAKOUT_TIME_FAIL_BARS = 2;
+export const BREAKOUT_TIME_FAIL_MIN_MFE_R = 0.20;
 
 // ============================================================================
 // VOLUME SETTINGS
