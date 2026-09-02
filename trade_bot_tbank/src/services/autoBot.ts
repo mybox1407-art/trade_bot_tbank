@@ -1959,7 +1959,6 @@ async function tryExecutePendingSignal(
       stopLossPrice: pending.stopLossPrice,
       takeProfitPrice: pending.takeProfit1Price,
     
-      // Реальный R пересчитываем от цены исполнения.
       initialR: Math.abs(
         currentPrice - pending.stopLossPrice
       ),
@@ -1967,7 +1966,9 @@ async function tryExecutePendingSignal(
       regimeAtEntry: pending.regime,
     
       openedAt,
-      signalCandleTime: pending.signalCandleTime,
+    
+      // Сохраняем именно нормализованное начало 5m-свечи.
+      signalCandleTime,
     
       timeFailBars: pending.timeFailBars,
       timeFailMinMfeR: pending.timeFailMinMfeR,
