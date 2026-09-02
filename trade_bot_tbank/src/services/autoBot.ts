@@ -1594,6 +1594,40 @@ async function processSymbol(
     return;
   }
 
+  // Фильтр по направлению: не торгуем контртрендовые пробои.
+  // sideBias задаётся на 15m, side — направление пробоя на 5m.
+  const bias = marketState.sideBias;
+  
+  const isCounterTrend =
+    bias === 'long' && side === 'short' ||
+    bias === 'short' && side === 'long';
+  
+  if (isCounterTrend) {
+    log(
+      'info',
+      `${symbol}: breakout signal blocked by direction filter`,
+      {
+        entryMode: signalEntryMode,
+        regime: signal.regime,
+        marketBias: bias,
+        signalSide: side,
+        price: signal.price
+      }
+    );
+  
+    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+      await sendTelegramMessage([
+        '[ПРОВЕРКА СИГНАЛА]',
+        `${symbol} | ${signal.regime}`,
+        `Цена 5m: ${formatMoney(signal.price)} RUB`,
+        `Путь входа: ${getEntryModeLabel(signalEntryMode)}`,
+        `Отклонён: контртрендовый пробой (${bias} vs ${side})`
+      ].join('\n'));
+    }
+  
+    return;
+  }
+
   // Логируем все четыре режима входа:
   // breakout_watch, trend_up, trend_down, trend_breakout.
   //
