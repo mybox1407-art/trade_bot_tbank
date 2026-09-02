@@ -2582,7 +2582,8 @@ export async function runPositionMonitorCycle() {
               barsHeld5m: runtime
                 ? getTimeFailState(
                     runtime,
-                    candles5m
+                    candles5m,
+                    nowMs()
                   ).barsElapsed
                 : undefined,
               maxFavorableExcursionR:
