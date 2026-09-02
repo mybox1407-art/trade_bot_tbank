@@ -4,7 +4,11 @@ import {
   analyzeMarketMultiTimeframe,
   Candle,
   buildHtfBiasSeries,
-  EntryMode
+  EntryMode,
+  MarketRegime,
+  BREAKOUT_TIME_FAIL_BARS,
+  BREAKOUT_TIME_FAIL_MIN_MFE_R,
+  BREAKOUT_MIN_TP1_R
 } from './strategy';
 import {
   getAllPositions,
@@ -78,27 +82,77 @@ type Symbol = typeof AUTO_BOT_CONFIG.symbols[number];
 type TradingWindows = readonly (readonly [number, number])[];
 type SessionState = 'open' | 'closed';
 
+type CloseReason =
+  | 'take_profit'
+  | 'stop_loss'
+  | 'breakout_time_fail'
+  | 'session_close'
+  | 'manual';
+
 interface PendingSignal {
   symbol: Symbol;
   side: 'long' | 'short';
   entryMode: EntryMode;
+
   entryPrice: number;
   stopLossPrice: number;
   takeProfit1Price: number;
   takeProfit2Price: number;
+
   quantity: number;
   positionSize: number;
-  regime: string;
+
+  // Режим фиксируется при входе.
+  // Его нельзя заменять текущим режимом рынка в момент выхода.
+  regime: MarketRegime;
+
   initialR: number;
   signalTime: number;
   barsWaited: number;
 
-  // ATR сохраняем в момент генерации сигнала, чтобы при retry
-  // сохранялась та же волатильностная шкала допуска.
+  // ATR фиксируется на момент сигнала.
   lastAtr: number;
+
+  // Параметры time-fail, поступающие из strategy.ts.
+  timeFailBars: number;
+  timeFailMinMfeR: number;
+  minTp1R: number;
+
+  // Время начала сигнальной 5m-свечи.
+  signalCandleTime: number;
+}
+
+interface BreakoutRuntimeState {
+  symbol: Symbol;
+  side: 'long' | 'short';
+
+  entryPrice: number;
+  stopLossPrice: number;
+  takeProfitPrice: number;
+  initialR: number;
+
+  regimeAtEntry: MarketRegime;
+
+  openedAt: number;
+  signalCandleTime: number;
+
+  timeFailBars: number;
+  timeFailMinMfeR: number;
+
+  // Чтобы не учитывать одну и ту же закрытую 5m-свечу несколько раз.
+  processedCandleTimes: Set<number>;
+
+  // MFE ведём с момента открытия.
+  maxFavorableExcursionR: number;
 }
 
 const pendingSignals = new Map<Symbol, PendingSignal>();
+
+// Runtime-состояние для time-fail.
+// Важно: после рестарта оно сбрасывается.
+// Для постоянного хранения перенеси эти поля в positionState.ts.
+const breakoutRuntimeState = new Map<Symbol, BreakoutRuntimeState>();
+
 let isRegimeCheckRunning = false;
 let isPositionMonitorRunning = false;
 let lastSessionState: SessionState | null = null;
@@ -361,6 +415,174 @@ function trimCandles(
   return output;
 }
 
+function getSignalCandleTime(
+  indicators: Record<string, unknown> | undefined
+): number {
+  const signalTimeUtc = indicators?.signalTimeUtc;
+
+  if (typeof signalTimeUtc === 'string') {
+    const parsed = Date.parse(signalTimeUtc);
+
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return nowMs();
+}
+
+function getPositionKey(symbol: string): Symbol | null {
+  return AUTO_BOT_CONFIG.symbols.includes(symbol as Symbol)
+    ? symbol as Symbol
+    : null;
+}
+
+function getExitReasonFromCandle(
+  position: {
+    side: 'long' | 'short';
+    stopLossPrice: number;
+    takeProfitPrice: number;
+  },
+  candle: Candle
+): 'take_profit' | 'stop_loss' | null {
+  if (position.side === 'long') {
+    // Консервативная модель бэктеста:
+    // если одна 5m-свеча коснулась и SL, и TP,
+    // считаем, что сначала был исполнен stop-loss.
+    if (candle.low <= position.stopLossPrice) {
+      return 'stop_loss';
+    }
+
+    if (candle.high >= position.takeProfitPrice) {
+      return 'take_profit';
+    }
+
+    return null;
+  }
+
+  // Для short: SL выше входа, TP ниже входа.
+  if (candle.high >= position.stopLossPrice) {
+    return 'stop_loss';
+  }
+
+  if (candle.low <= position.takeProfitPrice) {
+    return 'take_profit';
+  }
+
+  return null;
+}
+
+function getCurrentFavorableExcursionR(
+  state: BreakoutRuntimeState,
+  candle: Candle
+): number {
+  if (
+    !Number.isFinite(state.initialR) ||
+    state.initialR <= 0
+  ) {
+    return 0;
+  }
+
+  if (state.side === 'long') {
+    return Math.max(
+      0,
+      (candle.high - state.entryPrice) / state.initialR
+    );
+  }
+
+  return Math.max(
+    0,
+    (state.entryPrice - candle.low) / state.initialR
+  );
+}
+
+function getClosedBarsAfterEntry(
+  candles: Candle[],
+  state: BreakoutRuntimeState
+): Candle[] {
+  const barMs = timeframeToMs(AUTO_BOT_CONFIG.timeframe);
+
+  return candles.filter(candle => {
+    const openTime = candleOpenTimeMs(candle);
+
+    if (openTime === null) {
+      return false;
+    }
+
+    const closeTime = openTime + barMs;
+
+    // Считаем только полностью закрытые бары, начавшиеся после входа.
+    // Сигнальная свеча не должна считаться первым time-fail баром.
+    return (
+      closeTime > state.openedAt &&
+      openTime > state.signalCandleTime
+    );
+  });
+}
+
+function getTimeFailState(
+  state: BreakoutRuntimeState,
+  candles: Candle[]
+): {
+  barsElapsed: number;
+  maxFavorableExcursionR: number;
+  failed: boolean;
+} {
+  const closedBars = getClosedBarsAfterEntry(candles, state);
+
+  for (const candle of closedBars) {
+    const candleTime = candleOpenTimeMs(candle);
+
+    if (
+      candleTime === null ||
+      state.processedCandleTimes.has(candleTime)
+    ) {
+      continue;
+    }
+
+    state.processedCandleTimes.add(candleTime);
+
+    const candleMfeR = getCurrentFavorableExcursionR(
+      state,
+      candle
+    );
+
+    state.maxFavorableExcursionR = Math.max(
+      state.maxFavorableExcursionR,
+      candleMfeR
+    );
+  }
+
+  const barsElapsed = closedBars.length;
+
+  return {
+    barsElapsed,
+    maxFavorableExcursionR:
+      state.maxFavorableExcursionR,
+
+    failed:
+      barsElapsed >= state.timeFailBars &&
+      state.maxFavorableExcursionR <
+        state.timeFailMinMfeR
+  };
+}
+
+async function loadClosed5mCandles(
+  symbol: Symbol
+): Promise<Candle[]> {
+  const raw = await getCandles(
+    symbol,
+    AUTO_BOT_CONFIG.timeframe,
+    AUTO_BOT_CONFIG.candlesLimit
+  );
+
+  return trimCandles(
+    raw,
+    AUTO_BOT_CONFIG.candlesLimit,
+    timeframeToMs(AUTO_BOT_CONFIG.timeframe)
+  );
+}
+
 // ============================================================================
 // Telegram
 // ============================================================================
@@ -477,7 +699,25 @@ function formatRejectReason(code: string): string {
       'условия 5m-входа не выполнены',
 
     'conditions_not_met':
-      'условия входа не выполнены'
+      'условия входа не выполнены',
+
+    '15m_breakout_context_not_tradeable':
+  '15m-контекст для пробоя не подходит',
+
+  '5m_breakout_not_confirmed_or_too_late':
+    'пробой не подтверждён или вход запоздал',
+  
+  'breakout_long_close_not_near_high':
+    'long-пробой: закрытие недостаточно близко к high',
+  
+  'breakout_short_close_not_near_low':
+    'short-пробой: закрытие недостаточно близко к low',
+  
+  'breakout_tp1_r_too_low':
+    'TP1/R меньше минимально допустимого',
+  
+  'no_breakout_entry_conditions':
+    'условия пробойного входа не выполнены',
   };
 
   return map[code] ?? code;
@@ -747,7 +987,7 @@ function formatClosePositionMessage(
   exitPrice: number,
   quantity: number,
   realizedPnL: number,
-  reason: 'take_profit' | 'stop_loss' | 'manual',
+  reason: CloseReason,
   balanceBefore: number,
   balanceAfter: number,
   totalCommission: number
@@ -767,11 +1007,15 @@ function formatClosePositionMessage(
       ? 'TAKE PROFIT'
       : reason === 'stop_loss'
         ? 'STOP LOSS'
-        : 'MANUAL';
+        : reason === 'breakout_time_fail'
+          ? 'BREAKOUT TIME FAIL'
+          : reason === 'session_close'
+            ? 'SESSION CLOSE'
+            : 'MANUAL';
 
-  const pnlPercent = (
-    (realizedPnL / balanceBefore) * 100
-  ).toFixed(2);
+  const pnlPercent = balanceBefore > 0
+    ? ((realizedPnL / balanceBefore) * 100).toFixed(2)
+    : '0.00';
 
   return [
     `[ЗАКРЫТИЕ ПОЗИЦИИ] ${sideText}`,
@@ -989,9 +1233,9 @@ export async function runRegimeCheckCycle() {
     if (pendingSignals.has(symbol)) {
       const pending = pendingSignals.get(symbol)!;
     
-      // Пробой должен быть исполнен сразу после закрытия сигнальной 5m-свечи.
-      // Если первая попытка не прошла по цене, старый breakout не догоняем
-      // на следующем 5m-баре — он уже потерял актуальность.
+      // Standard-входы отключены.
+      // Пробой должен быть исполнен непосредственно после сигнальной 5m-свечи.
+      // Повторный вход на следующей свече запрещён: это уже догонка движения.
       if (pending.entryMode === 'breakout_entry') {
         log(
           'info',
@@ -1010,44 +1254,18 @@ export async function runRegimeCheckCycle() {
         continue;
       }
     
-      // Старый retry-механизм оставляем только для standard-входов.
-      pending.barsWaited += 1;
+      // Аварийная защита: после выключения standard-ветки
+      // никакие другие pending-сигналы не должны исполняться.
+      log(
+        'warn',
+        `Unsupported pending signal removed for ${symbol}`,
+        {
+          entryMode: pending.entryMode,
+          side: pending.side
+        }
+      );
     
-      if (
-        pending.barsWaited >=
-        AUTO_BOT_CONFIG.entryTimeoutBars
-      ) {
-        log(
-          'info',
-          `Signal expired for ${symbol} after ` +
-          `${pending.barsWaited} 5m bars`,
-          {
-            entryMode: pending.entryMode,
-            side: pending.side,
-            entryPrice: pending.entryPrice,
-            regime: pending.regime
-          }
-        );
-    
-        pendingSignals.delete(symbol);
-      } else {
-        log(
-          'info',
-          `Retrying pending standard signal for ${symbol} ` +
-          `(5m bar ${pending.barsWaited}/` +
-          `${AUTO_BOT_CONFIG.entryTimeoutBars})`,
-          {
-            entryMode: pending.entryMode,
-            side: pending.side,
-            entryPrice: pending.entryPrice,
-            regime: pending.regime,
-            lastAtr: pending.lastAtr
-          }
-        );
-    
-        await tryExecutePendingSignal(symbol);
-      }
-    
+      pendingSignals.delete(symbol);
       continue;
     }
 
@@ -1281,10 +1499,21 @@ async function processSymbol(
     (signal.indicators?.entryMode as EntryMode | undefined) ??
     'none';
 
-  const isCounterTrendBreakout =
-    signalEntryMode === 'breakout_entry' &&
-    marketState.sideBias !== 'neutral' &&
-    marketState.sideBias !== side;
+  if (signalEntryMode !== 'breakout_entry') {
+    log(
+      'warn',
+      `${symbol}: non-breakout signal rejected`,
+      {
+        entryMode: signalEntryMode,
+        side,
+        regime: signal.regime
+      }
+    );
+  
+    return;
+  }
+  
+  const marketBiasAllowed = true;
   
   // Standard-входы идут только по направлению 15m market bias.
   // Подтверждённый breakout-entry допускается в обе стороны:
@@ -1395,17 +1624,21 @@ async function processSymbol(
   const pending: PendingSignal = {
     symbol,
     side,
-    entryMode: signalEntryMode,
+    entryMode: 'breakout_entry',
+  
     entryPrice: signal.price,
     stopLossPrice: signal.stopLossPrice,
     takeProfit1Price: signal.takeProfit1Price,
     takeProfit2Price: signal.takeProfit2Price,
+  
     quantity: signal.quantity,
+  
     positionSize:
       signal.positionSize ??
       signal.quantity * signal.price,
   
     regime: signal.regime,
+  
     initialR: signal.initialR ?? 0,
     signalTime: nowMs(),
     barsWaited: 0,
@@ -1414,7 +1647,24 @@ async function processSymbol(
       typeof signal.indicators?.lastAtr === 'number' &&
       Number.isFinite(signal.indicators.lastAtr)
         ? signal.indicators.lastAtr
-        : 0
+        : 0,
+  
+    timeFailBars:
+      signal.timeFailBars > 0
+        ? signal.timeFailBars
+        : BREAKOUT_TIME_FAIL_BARS,
+  
+    timeFailMinMfeR:
+      signal.timeFailMinMfeR ??
+      BREAKOUT_TIME_FAIL_MIN_MFE_R,
+  
+    minTp1R:
+      signal.minTp1R ??
+      BREAKOUT_MIN_TP1_R,
+  
+    signalCandleTime: getSignalCandleTime(
+      signal.indicators
+    )
   };
 
   pendingSignals.set(symbol, pending);
@@ -1644,6 +1894,33 @@ async function tryExecutePendingSignal(
 
     pendingSignals.delete(symbol);
 
+    const openedAt = nowMs();
+
+    breakoutRuntimeState.set(symbol, {
+      symbol,
+      side: pending.side,
+    
+      entryPrice: currentPrice,
+      stopLossPrice: pending.stopLossPrice,
+      takeProfitPrice: pending.takeProfit1Price,
+    
+      // Реальный R пересчитываем от цены исполнения.
+      initialR: Math.abs(
+        currentPrice - pending.stopLossPrice
+      ),
+    
+      regimeAtEntry: pending.regime,
+    
+      openedAt,
+      signalCandleTime: pending.signalCandleTime,
+    
+      timeFailBars: pending.timeFailBars,
+      timeFailMinMfeR: pending.timeFailMinMfeR,
+    
+      processedCandleTimes: new Set<number>(),
+      maxFavorableExcursionR: 0
+    });
+
     const balanceAfter = getBalance();
 
     if (AUTO_BOT_CONFIG.logTrades) {
@@ -1666,7 +1943,11 @@ async function tryExecutePendingSignal(
         balanceBefore,
         balanceAfter,
         availableBalance:
-          result.availableBalance ?? 0
+          result.availableBalance ?? 0,
+        regimeAtEntry: pending.regime,
+        timeFailBars: pending.timeFailBars,
+        timeFailMinMfeR: pending.timeFailMinMfeR,
+        minTp1R: pending.minTp1R
       });
     }
 
@@ -1730,170 +2011,533 @@ async function tryExecutePendingSignal(
 // Мониторинг открытых позиций
 // ============================================================================
 export async function runPositionMonitorCycle() {
-  if (isPositionMonitorRunning) return;
-
-  if (
-    AUTO_BOT_CONFIG.tradingHoursEnabled &&
-    !isMonitorWindowOpen(nowMs())
-  ) {
+  if (isPositionMonitorRunning) {
     return;
   }
 
   isPositionMonitorRunning = true;
 
   try {
+    const now = nowMs();
     const positions = getAllPositions();
 
-    if (positions.length === 0) return;
+    if (positions.length === 0) {
+      return;
+    }
+
+    const { minutes } = getMarketTimeParts(now);
+
+    // Вечерняя сессия завершается в 23:49 МСК.
+    // В 23:48 уже пытаемся закрыть остаток позиций,
+    // не дожидаясь, пока ликвидность исчезнет.
+    const forceCloseStartMinutes =
+      23 * 60 + 48;
+
+    const sessionEndMinutes =
+      23 * 60 + 49;
+
+    const shouldForceCloseSession =
+      minutes >= forceCloseStartMinutes &&
+      minutes <= sessionEndMinutes;
+
+    // Вне мониторингового окна котировки могут не обновляться.
+    // Но сессию уже нельзя просто "забыть": обязательно пишем предупреждение.
+    const monitorWindowOpen = isMonitorWindowOpen(now);
+
+    if (
+      AUTO_BOT_CONFIG.tradingHoursEnabled &&
+      !monitorWindowOpen &&
+      !shouldForceCloseSession
+    ) {
+      log(
+        'warn',
+        'Positions remain while monitor window is closed',
+        {
+          nowMsk: formatMskTime(now),
+          positions: positions.map(position => ({
+            symbol: position.symbol,
+            side: position.side,
+            entryPrice: position.entryPrice,
+            takeProfitPrice: position.takeProfitPrice,
+            stopLossPrice: position.stopLossPrice
+          }))
+        }
+      );
+
+      return;
+    }
 
     for (const position of positions) {
       try {
-        const currentPrice = await getCurrentPrice(
-          position.symbol
-        );
+        const symbol = getPositionKey(position.symbol);
 
-        const hitTakeProfit =
-          position.side === 'long'
-            ? currentPrice >= position.takeProfitPrice
-            : currentPrice <= position.takeProfitPrice;
-
-        const hitStopLoss =
-          position.side === 'long'
-            ? currentPrice <= position.stopLossPrice
-            : currentPrice >= position.stopLossPrice;
-
-        if (!hitTakeProfit && !hitStopLoss) {
-          continue;
-        }
-
-        const reason: 'take_profit' | 'stop_loss' =
-          hitTakeProfit
-            ? 'take_profit'
-            : 'stop_loss';
-
-        const stopDistance = Math.abs(
-          position.entryPrice -
-          position.stopLossPrice
-        );
-
-        const triggerOvershoot =
-          reason !== 'stop_loss'
-            ? 0
-            : position.side === 'long'
-              ? position.stopLossPrice - currentPrice
-              : currentPrice - position.stopLossPrice;
-
-        const triggerOvershootR =
-          reason === 'stop_loss' &&
-          stopDistance > 0
-            ? triggerOvershoot / stopDistance
-            : 0;
-
-        log(
-          'warn',
-          `EXIT TRIGGERED: ${position.symbol} ` +
-          `${position.side.toUpperCase()}`,
-          {
-            reason,
-            entryPrice: position.entryPrice,
-            plannedStop: position.stopLossPrice,
-            plannedTakeProfit: position.takeProfitPrice,
-            observedExitPrice: currentPrice,
-            triggerOvershoot,
-            triggerOvershootR,
-            monitorIntervalMs:
-              AUTO_BOT_CONFIG.positionMonitorIntervalMs,
-
-            detectedAt: formatTime(nowMs())
-          }
-        );
-
-        const balanceBefore = getBalance();
-
-        const result = closePosition(
-          position.symbol,
-          currentPrice,
-          reason
-        );
-
-        if (!result.ok) {
+        if (!symbol) {
           log(
             'warn',
-            `Failed to close ${position.symbol}`,
-            {
-              reason,
-              message: result.message
-            }
+            `Skipping unsupported position symbol ${position.symbol}`
           );
 
           continue;
         }
 
-        const balanceAfter = getBalance();
-        const closedTrade = result.lastClosedTrade;
+        const currentPrice = await getCurrentPrice(symbol);
 
-        if (
-          AUTO_BOT_CONFIG.logTrades &&
-          closedTrade
-        ) {
-          logTrade({
-            timestamp: formatTime(nowMs()),
-            symbol: position.symbol,
-            side: position.side,
-            action: 'close',
-            entryPrice: position.entryPrice,
-            exitPrice: currentPrice,
-            stopLoss: position.stopLossPrice,
-            takeProfit: position.takeProfitPrice,
-            quantity: position.quantity,
-            realizedPnL: closedTrade.realizedPnL,
-            reason,
-            balanceBefore,
-            balanceAfter,
-            totalCommission:
-              closedTrade.totalCommission
-          });
-        }
+        const runtime =
+          breakoutRuntimeState.get(symbol);
 
-        log(
-          'info',
-          `POSITION CLOSED: ${position.symbol} ` +
-          `${position.side.toUpperCase()} @ ${currentPrice} ` +
-          `(${reason.toUpperCase()})`,
-          {
-            pnl:
-              closedTrade?.realizedPnL?.toFixed(2),
+        // --------------------------------------------------------------------
+        // 1. Принудительное закрытие перед завершением вечерней сессии.
+        // --------------------------------------------------------------------
+        if (shouldForceCloseSession) {
+          const balanceBefore = getBalance();
 
-            triggerOvershoot:
-              reason === 'stop_loss'
-                ? triggerOvershoot.toFixed(6)
-                : '0',
+          const result = closePosition(
+            position.symbol,
+            currentPrice,
+            'session_close' as any
+          );
 
-            triggerOvershootR:
-              reason === 'stop_loss'
-                ? triggerOvershootR.toFixed(4)
-                : '0',
-
-            balance: result.balance
-          }
-        );
-
-        if (closedTrade) {
-          const telegramMessage =
-            formatClosePositionMessage(
-              position.symbol,
-              position.side,
-              position.entryPrice,
-              currentPrice,
-              position.quantity,
-              closedTrade.realizedPnL,
-              reason,
-              balanceBefore,
-              balanceAfter,
-              closedTrade.totalCommission
+          if (!result.ok) {
+            log(
+              'error',
+              `Failed to close ${position.symbol} at session end`,
+              {
+                reason: 'session_close',
+                message: result.message
+              }
             );
 
-          await sendTelegramMessage(telegramMessage);
+            continue;
+          }
+
+          breakoutRuntimeState.delete(symbol);
+
+          const balanceAfter = getBalance();
+          const closedTrade = result.lastClosedTrade;
+
+          if (
+            AUTO_BOT_CONFIG.logTrades &&
+            closedTrade
+          ) {
+            logTrade({
+              timestamp: formatTime(nowMs()),
+              symbol: position.symbol,
+              side: position.side,
+              entryMode: 'breakout_entry',
+              action: 'close',
+              entryPrice: position.entryPrice,
+              exitPrice: currentPrice,
+              stopLoss: position.stopLossPrice,
+              takeProfit: position.takeProfitPrice,
+              quantity: position.quantity,
+              realizedPnL: closedTrade.realizedPnL,
+              reason: 'session_close',
+              regime: runtime?.regimeAtEntry ?? 'unknown',
+              regimeAtEntry:
+                runtime?.regimeAtEntry ?? 'unknown',
+              balanceBefore,
+              balanceAfter,
+              totalCommission:
+                closedTrade.totalCommission
+            });
+          }
+
+          log(
+            'warn',
+            `SESSION CLOSE: ${position.symbol} ` +
+            `${position.side.toUpperCase()}`,
+            {
+              exitPrice: currentPrice,
+              reason: 'session_close',
+              balanceAfter
+            }
+          );
+
+          if (closedTrade) {
+            await sendTelegramMessage(
+              formatClosePositionMessage(
+                position.symbol,
+                position.side,
+                position.entryPrice,
+                currentPrice,
+                position.quantity,
+                closedTrade.realizedPnL,
+                'session_close',
+                balanceBefore,
+                balanceAfter,
+                closedTrade.totalCommission
+              )
+            );
+          }
+
+          continue;
+        }
+
+        // --------------------------------------------------------------------
+        // 2. Загружаем закрытые 5m-свечи.
+        // Именно high/low свечи определяют факт касания SL/TP.
+        // --------------------------------------------------------------------
+        const candles5m = await loadClosed5mCandles(
+          symbol
+        );
+
+        const lastClosedCandle =
+          candles5m.at(-1);
+
+        if (!lastClosedCandle) {
+          log(
+            'warn',
+            `${position.symbol}: no closed 5m candle ` +
+            'available for exit monitoring'
+          );
+
+          continue;
+        }
+
+        // --------------------------------------------------------------------
+        // 3. TP / SL по high-low последней закрытой свечи.
+        // Это устраняет пропуск краткого касания уровня между
+        // двумя 15-секундными запросами currentPrice.
+        // --------------------------------------------------------------------
+        const candleExitReason = getExitReasonFromCandle(
+          position,
+          lastClosedCandle
+        );
+
+        // Fallback на текущую цену нужен, если цена уже прошла уровень,
+        // но новая свеча ещё не закрылась.
+        const quoteExitReason:
+          | 'take_profit'
+          | 'stop_loss'
+          | null =
+          position.side === 'long'
+            ? currentPrice <= position.stopLossPrice
+              ? 'stop_loss'
+              : currentPrice >= position.takeProfitPrice
+                ? 'take_profit'
+                : null
+            : currentPrice >= position.stopLossPrice
+              ? 'stop_loss'
+              : currentPrice <= position.takeProfitPrice
+                ? 'take_profit'
+                : null;
+
+        const exitReason =
+          candleExitReason ??
+          quoteExitReason;
+
+        if (exitReason) {
+          const stopDistance = Math.abs(
+            position.entryPrice -
+            position.stopLossPrice
+          );
+
+          const triggerOvershoot =
+            exitReason !== 'stop_loss'
+              ? 0
+              : position.side === 'long'
+                ? position.stopLossPrice - currentPrice
+                : currentPrice - position.stopLossPrice;
+
+          const triggerOvershootR =
+            exitReason === 'stop_loss' &&
+            stopDistance > 0
+              ? triggerOvershoot / stopDistance
+              : 0;
+
+          log(
+            'warn',
+            `EXIT TRIGGERED: ${position.symbol} ` +
+            `${position.side.toUpperCase()}`,
+            {
+              reason: exitReason,
+
+              entryPrice: position.entryPrice,
+              plannedStop: position.stopLossPrice,
+              plannedTakeProfit: position.takeProfitPrice,
+
+              observedExitPrice: currentPrice,
+
+              candleTime: formatTime(
+                candleOpenTimeMs(lastClosedCandle) ?? nowMs()
+              ),
+
+              candleOpen: lastClosedCandle.open,
+              candleHigh: lastClosedCandle.high,
+              candleLow: lastClosedCandle.low,
+              candleClose: lastClosedCandle.close,
+
+              candleExitReason,
+              quoteExitReason,
+
+              triggerOvershoot,
+              triggerOvershootR,
+
+              monitorIntervalMs:
+                AUTO_BOT_CONFIG.positionMonitorIntervalMs,
+
+              detectedAt: formatTime(nowMs())
+            }
+          );
+
+          const balanceBefore = getBalance();
+
+          const result = closePosition(
+            position.symbol,
+            currentPrice,
+            exitReason
+          );
+
+          if (!result.ok) {
+            log(
+              'warn',
+              `Failed to close ${position.symbol}`,
+              {
+                reason: exitReason,
+                message: result.message
+              }
+            );
+
+            continue;
+          }
+
+          breakoutRuntimeState.delete(symbol);
+
+          const balanceAfter = getBalance();
+          const closedTrade = result.lastClosedTrade;
+
+          if (
+            AUTO_BOT_CONFIG.logTrades &&
+            closedTrade
+          ) {
+            logTrade({
+              timestamp: formatTime(nowMs()),
+              symbol: position.symbol,
+              side: position.side,
+              entryMode: 'breakout_entry',
+              action: 'close',
+              entryPrice: position.entryPrice,
+              exitPrice: currentPrice,
+              stopLoss: position.stopLossPrice,
+              takeProfit: position.takeProfitPrice,
+              quantity: position.quantity,
+              realizedPnL: closedTrade.realizedPnL,
+              reason: exitReason,
+              regime:
+                runtime?.regimeAtEntry ?? 'unknown',
+              regimeAtEntry:
+                runtime?.regimeAtEntry ?? 'unknown',
+              initialR:
+                runtime?.initialR?.toFixed(4) ??
+                Math.abs(
+                  position.entryPrice -
+                  position.stopLossPrice
+                ).toFixed(4),
+              barsHeld5m: runtime
+                ? getTimeFailState(
+                    runtime,
+                    candles5m
+                  ).barsElapsed
+                : undefined,
+              maxFavorableExcursionR:
+                runtime?.maxFavorableExcursionR,
+              balanceBefore,
+              balanceAfter,
+              totalCommission:
+                closedTrade.totalCommission
+            });
+          }
+
+          log(
+            'info',
+            `POSITION CLOSED: ${position.symbol} ` +
+            `${position.side.toUpperCase()} @ ${currentPrice} ` +
+            `(${exitReason.toUpperCase()})`,
+            {
+              pnl:
+                closedTrade?.realizedPnL?.toFixed(2),
+
+              triggerOvershoot:
+                exitReason === 'stop_loss'
+                  ? triggerOvershoot.toFixed(6)
+                  : '0',
+
+              triggerOvershootR:
+                exitReason === 'stop_loss'
+                  ? triggerOvershootR.toFixed(4)
+                  : '0',
+
+              balance: result.balance
+            }
+          );
+
+          if (closedTrade) {
+            await sendTelegramMessage(
+              formatClosePositionMessage(
+                position.symbol,
+                position.side,
+                position.entryPrice,
+                currentPrice,
+                position.quantity,
+                closedTrade.realizedPnL,
+                exitReason,
+                balanceBefore,
+                balanceAfter,
+                closedTrade.totalCommission
+              )
+            );
+          }
+
+          continue;
+        }
+
+        // --------------------------------------------------------------------
+        // 4. Breakout time-fail.
+        // Проверяется только после TP/SL, чтобы цель или стоп
+        // имели приоритет на той же свече.
+        // --------------------------------------------------------------------
+        if (runtime) {
+          const timeFail = getTimeFailState(
+            runtime,
+            candles5m
+          );
+
+          log(
+            'info',
+            `BREAKOUT TIME-FAIL CHECK: ${position.symbol}`,
+            {
+              side: position.side,
+
+              regimeAtEntry: runtime.regimeAtEntry,
+
+              barsElapsed: timeFail.barsElapsed,
+              requiredBars: runtime.timeFailBars,
+
+              maxFavorableExcursionR:
+                timeFail.maxFavorableExcursionR,
+
+              minRequiredMfeR:
+                runtime.timeFailMinMfeR,
+
+              failed: timeFail.failed
+            }
+          );
+
+          if (timeFail.failed) {
+            const balanceBefore = getBalance();
+
+            const result = closePosition(
+              position.symbol,
+              currentPrice,
+              'breakout_time_fail' as any
+            );
+
+            if (!result.ok) {
+              log(
+                'warn',
+                `Failed to close ${position.symbol} ` +
+                'by breakout time-fail',
+                {
+                  reason: 'breakout_time_fail',
+                  message: result.message,
+
+                  barsElapsed: timeFail.barsElapsed,
+                  maxFavorableExcursionR:
+                    timeFail.maxFavorableExcursionR,
+
+                  minRequiredMfeR:
+                    runtime.timeFailMinMfeR
+                }
+              );
+
+              continue;
+            }
+
+            breakoutRuntimeState.delete(symbol);
+
+            const balanceAfter = getBalance();
+            const closedTrade = result.lastClosedTrade;
+
+            if (
+              AUTO_BOT_CONFIG.logTrades &&
+              closedTrade
+            ) {
+              logTrade({
+                timestamp: formatTime(nowMs()),
+                symbol: position.symbol,
+                side: position.side,
+                entryMode: 'breakout_entry',
+                action: 'close',
+                entryPrice: position.entryPrice,
+                exitPrice: currentPrice,
+                stopLoss: position.stopLossPrice,
+                takeProfit: position.takeProfitPrice,
+                quantity: position.quantity,
+                realizedPnL: closedTrade.realizedPnL,
+                reason: 'breakout_time_fail',
+
+                regime: runtime.regimeAtEntry,
+                regimeAtEntry: runtime.regimeAtEntry,
+
+                initialR: runtime.initialR.toFixed(4),
+
+                barsHeld5m: timeFail.barsElapsed,
+
+                maxFavorableExcursionR:
+                  timeFail.maxFavorableExcursionR,
+
+                timeFailBars: runtime.timeFailBars,
+
+                timeFailMinMfeR:
+                  runtime.timeFailMinMfeR,
+
+                balanceBefore,
+                balanceAfter,
+
+                totalCommission:
+                  closedTrade.totalCommission
+              });
+            }
+
+            log(
+              'warn',
+              `BREAKOUT TIME FAIL: ${position.symbol} ` +
+              `${position.side.toUpperCase()}`,
+              {
+                reason: 'breakout_time_fail',
+
+                currentPrice,
+
+                barsElapsed: timeFail.barsElapsed,
+                requiredBars: runtime.timeFailBars,
+
+                maxFavorableExcursionR:
+                  timeFail.maxFavorableExcursionR,
+
+                minRequiredMfeR:
+                  runtime.timeFailMinMfeR,
+
+                regimeAtEntry: runtime.regimeAtEntry
+              }
+            );
+
+            if (closedTrade) {
+              await sendTelegramMessage(
+                formatClosePositionMessage(
+                  position.symbol,
+                  position.side,
+                  position.entryPrice,
+                  currentPrice,
+                  position.quantity,
+                  closedTrade.realizedPnL,
+                  'breakout_time_fail',
+                  balanceBefore,
+                  balanceAfter,
+                  closedTrade.totalCommission
+                )
+              );
+            }
+          }
         }
       } catch (error) {
         log(
