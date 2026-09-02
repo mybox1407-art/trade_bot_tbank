@@ -1873,10 +1873,26 @@ async function tryExecutePendingSignal(
     const result = openPosition({
       symbol: pending.symbol,
       side: pending.side,
+    
       entryPrice: currentPrice,
       takeProfitPrice: pending.takeProfit1Price,
       stopLossPrice: pending.stopLossPrice,
-      quantity: pending.quantity
+    
+      quantity: pending.quantity,
+    
+      entryMode: pending.entryMode,
+      regimeAtEntry: pending.regime,
+    
+      initialR: Math.abs(
+        currentPrice - pending.stopLossPrice
+      ),
+    
+      timeFailBars: pending.timeFailBars,
+      timeFailMinMfeR: pending.timeFailMinMfeR,
+    
+      minTp1R: pending.minTp1R,
+    
+      signalCandleTime: pending.signalCandleTime
     });
 
     if (!result.ok) {
@@ -2094,7 +2110,7 @@ export async function runPositionMonitorCycle() {
           const result = closePosition(
             position.symbol,
             currentPrice,
-            'session_close' as any
+            'session_close'
           );
 
           if (!result.ok) {
@@ -2429,7 +2445,7 @@ export async function runPositionMonitorCycle() {
             const result = closePosition(
               position.symbol,
               currentPrice,
-              'breakout_time_fail' as any
+              'breakout_time_fail'
             );
 
             if (!result.ok) {
