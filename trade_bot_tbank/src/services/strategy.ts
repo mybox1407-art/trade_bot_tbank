@@ -8,10 +8,15 @@ export const MAX_RISK_PER_TRADE = 0.03;
 export const COMMISSION_RATE = 0.0005;
 export const ROUND_TRIP_COMMISSION_RATE = COMMISSION_RATE * 2;
 export const TP1_FRACTION = 0.5;
+
 export const TREND_TP1_R = 1.2;
 export const TREND_TP2_R = 1.8;
-export const BREAKOUT_TP1_R = 1.0;
+
+// Breakout-only режим:
+// TP1 должен быть не меньше 1.15R, поэтому 1.0R здесь больше не подходит.
+export const BREAKOUT_TP1_R = 1.2;
 export const BREAKOUT_TP2_R = 2.5;
+
 export const PARTIAL_LOCK_R = 0;
 
 const MIN_STOP_DISTANCE_RATE = 0.003;
@@ -30,7 +35,10 @@ const TRADING_HOUR_UTC_FROM = 7;
 const TRADING_HOUR_UTC_TO = 21;
 
 export const MIN_QUANTITY = 2;
-const DEFAULT_TIME_FAIL_BARS = 4;
+
+// В данном режиме стратегия генерирует только breakout_entry.
+// Значение 0 исключает случайное применение time-fail к отсутствующим standard-входам.
+const DEFAULT_TIME_FAIL_BARS = 0;
 
 // ============================================================================
 // BREAKOUT SETTINGS
@@ -39,6 +47,18 @@ const BREAKOUT_ATR_BUFFER_K = 0.1;
 const BREAKOUT_BODY_ATR_MIN = 0.3;
 const MAX_BREAKOUT_BODY_ATR = 2;
 const BREAKOUT_ATR_STOP_MULT = 1.5;
+
+// ============================================================================
+// BREAKOUT RISK / EXIT SETTINGS
+// ============================================================================
+
+// Не открывать пробой, если расстояние от входа до TP1 меньше 1.15R.
+export const BREAKOUT_MIN_TP1_R = 1.15;
+
+// Если за 4 завершённых пятиминутных бара пробой не показал
+// хотя бы +0.25R движения в сторону позиции — закрыть breakout_time_fail.
+export const BREAKOUT_TIME_FAIL_BARS = 4;
+export const BREAKOUT_TIME_FAIL_MIN_MFE_R = 0.25;
 
 // ============================================================================
 // VOLUME SETTINGS
@@ -63,7 +83,8 @@ const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
 const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.35;
 
 // Для ранних breakout-entry допускаем нейтральный RSI.
-// Направление подтверждают: закрытие за уровнем, объём, тело свечи и closeNearHigh/Low.
+// Направление подтверждают: закрытие за уровнем, объём,
+// тело свечи и closeNearHigh/closeNearLow.
 const BREAKOUT_LONG_RSI_MIN = 45;
 const BREAKOUT_LONG_RSI_MAX = 78;
 const BREAKOUT_SHORT_RSI_MIN = 22;
@@ -89,6 +110,13 @@ export type MarketRegime =
   | 'trend_breakout'
   | 'high_volatility'
   | 'unknown';
+
+export type BreakoutRegimeBucket =
+  | 'breakout_watch'
+  | 'trend_up'
+  | 'trend_down'
+  | 'trend_breakout'
+  | 'other';
 
 export type HtfBias = 'up' | 'down' | 'neutral';
 
@@ -134,7 +162,13 @@ export interface StrategySignal {
   quantity: number | null;
   regime: MarketRegime;
   initialR: number | null;
+
+  // Параметры, которые должен сохранить position manager
+  // в момент фактического открытия позиции.
   timeFailBars: number;
+  timeFailMinMfeR: number | null;
+  minTp1R: number | null;
+
   indicators: Record<string, unknown>;
 }
 
@@ -195,6 +229,21 @@ function indicatorAt<T>(
   return index >= 0 && index < values.length
     ? values[index]
     : undefined;
+}
+
+function toBreakoutRegimeBucket(
+  regime: MarketRegime
+): BreakoutRegimeBucket {
+  if (
+    regime === 'breakout_watch' ||
+    regime === 'trend_up' ||
+    regime === 'trend_down' ||
+    regime === 'trend_breakout'
+  ) {
+    return regime;
+  }
+
+  return 'other';
 }
 
 interface VolumeCheck {
@@ -675,7 +724,11 @@ function emptySignal(
     quantity: null,
     regime,
     initialR: null,
+
     timeFailBars: DEFAULT_TIME_FAIL_BARS,
+    timeFailMinMfeR: null,
+    minTp1R: null,
+
     indicators: {
       ready: false,
       entryMode: 'none',
@@ -687,6 +740,11 @@ function emptySignal(
 // ============================================================================
 // 5M ENTRY ANALYSIS WITH 15M CONTEXT
 // ============================================================================
+//
+// ВАЖНО:
+// В данной версии отключены все standard-входы.
+// Единственный возможный вход — breakout_entry.
+//
 export function analyzeMarketMultiTimeframe(
   input: MultiTimeframeInput
 ): StrategySignal {
@@ -899,6 +957,7 @@ export function analyzeMarketMultiTimeframe(
       lastAtr5m * ENTRY_5M_CLOSE_NEAR_EXTREME_ATR;
 
   const contextRegime = context15m.regime;
+  const breakoutRegimeBucket = toBreakoutRegimeBucket(contextRegime);
 
   const allowShortContext =
     contextRegime === 'trend_down' ||
@@ -908,6 +967,9 @@ export function analyzeMarketMultiTimeframe(
     contextRegime === 'trend_up' ||
     contextRegime === 'trend_breakout';
 
+  // Для breakout_entry разрешаем вход во всех четырёх
+  // отслеживаемых режимах. Направление пока не ограничивается:
+  // long и short допустимы в каждом из них.
   const breakoutContextAllowed =
     contextRegime === 'breakout_watch' ||
     contextRegime === 'trend_breakout' ||
@@ -961,26 +1023,19 @@ export function analyzeMarketMultiTimeframe(
     lastRsi5m < BREAKOUT_SHORT_RSI_MAX &&
     lastRsi5m > BREAKOUT_SHORT_RSI_MIN;
 
-  const standardShortSignal =
-    allowShortContext &&
-    bodyValid &&
-    volume5m.ok &&
-    rsiShortOk &&
-    price < lastEma20_5m &&
-    closeNearLow &&
-    shortNotOverextended &&
-    standardShortNotLate;
+  // ==========================================================================
+  // STANDARD ENTRIES DISABLED
+  // ==========================================================================
+  //
+  // Оставлены как telemetry-поля, но всегда false.
+  // Ни один standard-вход больше не может открыть позицию.
+  //
+  const standardShortSignal = false;
+  const standardLongSignal = false;
 
-  const standardLongSignal =
-    allowLongContext &&
-    bodyValid &&
-    volume5m.ok &&
-    rsiLongOk &&
-    price > lastEma20_5m &&
-    closeNearHigh &&
-    longNotOverextended &&
-    standardLongNotLate;
-
+  // ==========================================================================
+  // BREAKOUT-ONLY ENTRY
+  // ==========================================================================
   const breakoutLongSignal =
     breakoutContextAllowed &&
     volume5m.ok &&
@@ -997,11 +1052,8 @@ export function analyzeMarketMultiTimeframe(
     rsiShortBreakoutOk &&
     freshShortBreakdown;
 
-  const longSignal =
-    standardLongSignal || breakoutLongSignal;
-
-  const shortSignal =
-    standardShortSignal || breakoutShortSignal;
+  const longSignal = breakoutLongSignal;
+  const shortSignal = breakoutShortSignal;
 
   let side: 'long' | 'short' | 'none' = 'none';
 
@@ -1014,9 +1066,7 @@ export function analyzeMarketMultiTimeframe(
   const entryMode: EntryMode =
     side === 'none'
       ? 'none'
-      : breakoutLongSignal || breakoutShortSignal
-        ? 'breakout_entry'
-        : 'standard';
+      : 'breakout_entry';
 
   const htfMeta: Record<string, unknown> = {};
 
@@ -1047,10 +1097,9 @@ export function analyzeMarketMultiTimeframe(
     const htfDirectionAligned =
       isHtfDirectionAllowed(side, htfState.bias);
 
-    const htfDirectionAllowed =
-      entryMode === 'breakout_entry'
-        ? true
-        : htfDirectionAligned;
+    // Поведение сохранено из исходной стратегии:
+    // HTF не блокирует breakout_entry, только логируется.
+    const htfDirectionAllowed = true;
 
     htfMeta.htfEnabled = true;
     htfMeta.htfBias = htfState.bias;
@@ -1061,7 +1110,6 @@ export function analyzeMarketMultiTimeframe(
     htfMeta.htfDirectionAligned = htfDirectionAligned;
     htfMeta.htfDirectionAllowed = htfDirectionAllowed;
     htfMeta.htfGateBypassedForBreakout =
-      entryMode === 'breakout_entry' &&
       !htfDirectionAligned;
 
     if (!htfDirectionAllowed) {
@@ -1081,12 +1129,8 @@ export function analyzeMarketMultiTimeframe(
   if (side === 'none') {
     const rejectReasons: string[] = [];
 
-    if (
-      !allowShortContext &&
-      !allowLongContext &&
-      !breakoutContextAllowed
-    ) {
-      rejectReasons.push('15m_context_not_tradeable');
+    if (!breakoutContextAllowed) {
+      rejectReasons.push('15m_breakout_context_not_tradeable');
     }
 
     if (!bodyLargeEnough) {
@@ -1101,36 +1145,8 @@ export function analyzeMarketMultiTimeframe(
       rejectReasons.push('5m_volume_below_threshold');
     }
 
-    if (
-      contextRegime === 'breakout_watch' &&
-      !freshLongBreakout &&
-      !freshShortBreakdown
-    ) {
-      rejectReasons.push('5m_breakout_not_confirmed');
-    }
-
-    if (allowShortContext && !shortNotOverextended) {
-      rejectReasons.push('5m_short_overextended_from_ema20');
-    }
-
-    if (allowLongContext && !longNotOverextended) {
-      rejectReasons.push('5m_long_overextended_from_ema20');
-    }
-
-    if (allowShortContext && !closeNearLow) {
-      rejectReasons.push('5m_short_close_not_near_low');
-    }
-
-    if (allowLongContext && !closeNearHigh) {
-      rejectReasons.push('5m_long_close_not_near_high');
-    }
-
-    if (allowShortContext && !standardShortNotLate) {
-      rejectReasons.push('5m_short_too_far_from_level');
-    }
-
-    if (allowLongContext && !standardLongNotLate) {
-      rejectReasons.push('5m_long_too_far_from_level');
+    if (!freshLongBreakout && !freshShortBreakdown) {
+      rejectReasons.push('5m_breakout_not_confirmed_or_too_late');
     }
 
     if (
@@ -1161,9 +1177,17 @@ export function analyzeMarketMultiTimeframe(
       rejectReasons.push('breakout_short_rsi_out_of_range');
     }
 
+    if (confirmedBreakout5m && !closeNearHigh) {
+      rejectReasons.push('breakout_long_close_not_near_high');
+    }
+
+    if (confirmedBreakdown5m && !closeNearLow) {
+      rejectReasons.push('breakout_short_close_not_near_low');
+    }
+
     return emptySignal(price, contextRegime, {
       ready: true,
-      reject: 'no_5m_entry_conditions',
+      reject: 'no_breakout_entry_conditions',
       rejectReasons,
 
       entryTimeframe: '5m',
@@ -1174,6 +1198,9 @@ export function analyzeMarketMultiTimeframe(
       last15mIsForming,
 
       contextRegime,
+      regimeAtEntry: contextRegime,
+      breakoutRegimeBucket,
+
       context15mAdx: context15m.indicators.adx,
       context15mEma20: context15m.indicators.ema20,
       context15mEma50: context15m.indicators.ema50,
@@ -1249,7 +1276,11 @@ export function analyzeMarketMultiTimeframe(
       standardShortNotLate,
 
       rsiLongOk,
-      rsiShortOk
+      rsiShortOk,
+
+      breakoutMinTp1R: BREAKOUT_MIN_TP1_R,
+      breakoutTimeFailBars: BREAKOUT_TIME_FAIL_BARS,
+      breakoutTimeFailMinMfeR: BREAKOUT_TIME_FAIL_MIN_MFE_R
     });
   }
 
@@ -1262,7 +1293,9 @@ export function analyzeMarketMultiTimeframe(
     lows: signalLows5m,
     price,
     lastAtr: lastAtr5m,
-    atrStopMult: ENTRY_5M_ATR_STOP_MULT
+
+    // Для пробойной ветки используем breakout-множитель.
+    atrStopMult: BREAKOUT_ATR_STOP_MULT
   });
 
   const initialR = Math.abs(price - stopLossPrice);
@@ -1278,10 +1311,16 @@ export function analyzeMarketMultiTimeframe(
       reject: 'stop_distance',
       entryTimeframe: '5m',
       contextTimeframe: '15m',
+
       sideWouldBe: side,
       entryModeWouldBe: entryMode,
+
       stopPct,
       initialR,
+
+      contextRegime,
+      regimeAtEntry: contextRegime,
+      breakoutRegimeBucket,
 
       localLow5m,
       localHigh5m,
@@ -1318,6 +1357,70 @@ export function analyzeMarketMultiTimeframe(
       ? price + tp2R * initialR
       : price - tp2R * initialR;
 
+  const takeProfit1Distance =
+    side === 'long'
+      ? takeProfit1Price - price
+      : price - takeProfit1Price;
+
+  const tp1ToInitialR =
+    initialR > 0
+      ? takeProfit1Distance / initialR
+      : 0;
+
+  // ==========================================================================
+  // BREAKOUT MINIMUM REWARD / RISK FILTER
+  // ==========================================================================
+  //
+  // Не открываем breakout_entry, если TP1 находится ближе 1.15R.
+  // Защищает от сделок типа GAZP long с TP/Risk около 0.64R.
+  //
+  if (tp1ToInitialR < BREAKOUT_MIN_TP1_R) {
+    return emptySignal(price, contextRegime, {
+      ready: true,
+      reject: 'breakout_tp1_r_too_low',
+
+      entryTimeframe: '5m',
+      contextTimeframe: '15m',
+      signalTimeUtc: new Date(signalTime).toISOString(),
+
+      sideWouldBe: side,
+      entryModeWouldBe: 'breakout_entry',
+
+      contextRegime,
+      regimeAtEntry: contextRegime,
+      breakoutRegimeBucket,
+
+      price,
+      stopLossPrice,
+      takeProfit1Price,
+      takeProfit2Price,
+
+      initialR,
+      stopPct,
+
+      tp1R,
+      tp2R,
+      tp1ToInitialR,
+      minBreakoutTp1R: BREAKOUT_MIN_TP1_R,
+
+      localLow5m,
+      localHigh5m,
+      shortBreakdownThreshold,
+      longBreakoutThreshold,
+
+      confirmedBreakdown5m,
+      confirmedBreakout5m,
+
+      freshLongBreakout,
+      freshShortBreakdown,
+
+      longBreakoutDistanceAtr,
+      shortBreakoutDistanceAtr,
+
+      breakoutEntryMaxDistanceAtr: BREAKOUT_ENTRY_MAX_DISTANCE_ATR
+    });
+  }
+
   const riskCapital = balance * MAX_RISK_PER_TRADE;
 
   const sized = calcPositionSize({
@@ -1331,19 +1434,44 @@ export function analyzeMarketMultiTimeframe(
     return emptySignal(price, contextRegime, {
       ready: true,
       reject: 'size_calculation',
+
       entryTimeframe: '5m',
       contextTimeframe: '15m',
+
       sideWouldBe: side,
-      entryModeWouldBe: entryMode,
+      entryModeWouldBe: 'breakout_entry',
+
+      contextRegime,
+      regimeAtEntry: contextRegime,
+      breakoutRegimeBucket,
+
+      price,
+      stopLossPrice,
+      takeProfit1Price,
+      takeProfit2Price,
+
+      initialR,
+      stopPct,
+
+      tp1R,
+      tp2R,
+      tp1ToInitialR,
+      minBreakoutTp1R: BREAKOUT_MIN_TP1_R,
 
       localLow5m,
       localHigh5m,
       shortBreakdownThreshold,
       longBreakoutThreshold,
+
       confirmedBreakdown5m,
       confirmedBreakout5m,
+
+      freshLongBreakout,
+      freshShortBreakdown,
+
       longBreakoutDistanceAtr,
       shortBreakoutDistanceAtr,
+
       breakoutEntryMaxDistanceAtr: BREAKOUT_ENTRY_MAX_DISTANCE_ATR
     });
   }
@@ -1353,28 +1481,45 @@ export function analyzeMarketMultiTimeframe(
     buy: side === 'long',
     sell: side === 'short',
     side,
-    entryMode,
+
+    entryMode: 'breakout_entry',
+
     stopLossPrice,
     takeProfit1Price,
     takeProfit2Price,
     takeProfitPrice: takeProfit2Price,
+
     tp1Fraction: TP1_FRACTION,
     positionSize: sized.positionSize,
     quantity: sized.quantity,
+
     regime: contextRegime,
     initialR,
-    timeFailBars: DEFAULT_TIME_FAIL_BARS,
+
+    // Эти параметры должен сохранить position manager при открытии.
+    // На 4-й закрытой 5m-свече он должен проверить MFE:
+    // если MFE < +0.25R — закрыть с breakout_time_fail.
+    timeFailBars: BREAKOUT_TIME_FAIL_BARS,
+    timeFailMinMfeR: BREAKOUT_TIME_FAIL_MIN_MFE_R,
+    minTp1R: BREAKOUT_MIN_TP1_R,
+
     indicators: {
       ready: true,
 
       entryTimeframe: '5m',
       contextTimeframe: '15m',
+
       signalTimeUtc: new Date(signalTime).toISOString(),
       signal5mIndex,
       last5mIsForming,
       last15mIsForming,
 
+      // Сохраняй именно эти значения в открытой позиции и CSV.
+      // Режим на момент выхода не должен подменять режим на момент входа.
       contextRegime,
+      regimeAtEntry: contextRegime,
+      breakoutRegimeBucket,
+
       context15mAdx: context15m.indicators.adx,
       context15mEma20: context15m.indicators.ema20,
       context15mEma50: context15m.indicators.ema50,
@@ -1390,9 +1535,13 @@ export function analyzeMarketMultiTimeframe(
       contextTrendShort,
       contextTrendLong,
 
-      entryMode,
+      entryMode: 'breakout_entry',
+
+      // Явное подтверждение: standard-ветка выключена.
+      standardEntriesEnabled: false,
       standardLongSignal,
       standardShortSignal,
+
       breakoutLongSignal,
       breakoutShortSignal,
 
@@ -1415,6 +1564,7 @@ export function analyzeMarketMultiTimeframe(
 
       diagnosticLookback: ENTRY_5M_DIAGNOSTIC_LOOKBACK,
       diagnosticAtrBuffer: ENTRY_5M_DIAGNOSTIC_ATR_BUFFER,
+
       localLow5m,
       localHigh5m,
       shortBreakdownThreshold,
@@ -1447,8 +1597,17 @@ export function analyzeMarketMultiTimeframe(
 
       initialR,
       stopPct,
+
+      tp1R,
+      tp2R,
       tp1: takeProfit1Price,
       tp2: takeProfit2Price,
+
+      tp1ToInitialR,
+      minBreakoutTp1R: BREAKOUT_MIN_TP1_R,
+
+      breakoutTimeFailBars: BREAKOUT_TIME_FAIL_BARS,
+      breakoutTimeFailMinMfeR: BREAKOUT_TIME_FAIL_MIN_MFE_R,
 
       longDistanceFromLevel,
       shortDistanceFromLevel,
