@@ -726,22 +726,31 @@ function formatRejectReason(code: string): string {
       'условия входа не выполнены',
 
     '15m_breakout_context_not_tradeable':
-  '15m-контекст для пробоя не подходит',
+      '15m-контекст для пробоя не подходит',
+  
+    '5m_breakout_not_confirmed_or_too_late':
+      'пробой не подтверждён или вход запоздал',
+    
+    'breakout_long_close_not_near_high':
+      'long-пробой: закрытие недостаточно близко к high',
+    
+    'breakout_short_close_not_near_low':
+      'short-пробой: закрытие недостаточно близко к low',
+    
+    'breakout_tp1_r_too_low':
+      'TP1/R меньше минимально допустимого',
+    
+    'no_breakout_entry_conditions':
+      'условия пробойного входа не выполнены',
 
-  '5m_breakout_not_confirmed_or_too_late':
-    'пробой не подтверждён или вход запоздал',
-  
-  'breakout_long_close_not_near_high':
-    'long-пробой: закрытие недостаточно близко к high',
-  
-  'breakout_short_close_not_near_low':
-    'short-пробой: закрытие недостаточно близко к low',
-  
-  'breakout_tp1_r_too_low':
-    'TP1/R меньше минимально допустимого',
-  
-  'no_breakout_entry_conditions':
-    'условия пробойного входа не выполнены',
+    'breakout_long_not_deep_enough':
+      'long-пробой недостаточно глубоко за уровнем',
+
+    'breakout_short_not_deep_enough':
+      'short-пробой недостаточно глубоко за уровнем',
+    
+    'breakout_tp1_r_too_low':
+      'фактический TP1/R ниже минимального',
   };
 
   return map[code] ?? code;
@@ -973,12 +982,27 @@ function formatOpenPositionMessage(
   balanceBefore: number,
   balanceAfter: number,
   regime: string,
-  initialR: number
+  plannedInitialR: number,
+  minTp1R: number = BREAKOUT_MIN_TP1_R
 ) {
   const sideText =
     side === 'long'
       ? 'LONG'
       : 'SHORT';
+
+  const actualInitialR = Math.abs(
+  entryPrice - stopLoss
+  );
+  
+  const actualTp1Distance =
+    side === 'long'
+      ? takeProfit - entryPrice
+      : entryPrice - takeProfit;
+  
+  const actualTp1R =
+    actualInitialR > 0
+      ? actualTp1Distance / actualInitialR
+      : 0;
 
   return [
     `[ОТКРЫТИЕ ПОЗИЦИИ] ${sideText}`,
@@ -991,7 +1015,10 @@ function formatOpenPositionMessage(
     `Объём позиции: ${formatMoney(positionSize)} руб`,
     `Stop Loss: ${formatMoney(stopLoss)} руб`,
     `Take Profit: ${formatMoney(takeProfit)} руб`,
-    `Риск (R): ${formatMoney(initialR)} руб`,
+    `Плановый R: ${formatMoney(plannedInitialR)} руб`,
+    `Фактический R: ${formatMoney(actualInitialR)} руб`,
+    `Фактический TP1/R: ${actualTp1R.toFixed(2)}R`,
+    `Минимальный TP1/R: ${minTp1R.toFixed(2)}R`,
     '',
     `Баланс до: ${formatMoney(balanceBefore)} руб`,
     `Баланс после: ${formatMoney(balanceAfter)} руб`,
@@ -1498,6 +1525,18 @@ async function processSymbol(
         ...get5mEntryLogMeta(indicators),
         ...getVolumeLogMeta(indicators),
 
+        breakoutEntryMinDistanceAtr:
+          indicators.breakoutEntryMinDistanceAtr,
+    
+        breakoutEntryMaxDistanceAtr:
+          indicators.breakoutEntryMaxDistanceAtr,
+    
+        tp1ToInitialR:
+          indicators.tp1ToInitialR,
+    
+        minBreakoutTp1R:
+          indicators.minBreakoutTp1R,
+
         rejectReasons: indicators.rejectReasons
       }
     );
@@ -1983,6 +2022,80 @@ async function tryExecutePendingSignal(
       return;
     }
 
+    const actualInitialR = Math.abs(
+      currentPrice - pending.stopLossPrice
+    );
+    
+    const actualTp1Distance =
+      pending.side === 'long'
+        ? pending.takeProfit1Price - currentPrice
+        : currentPrice - pending.takeProfit1Price;
+    
+    const actualTp1R =
+      actualInitialR > 0
+        ? actualTp1Distance / actualInitialR
+        : 0;
+    
+    const minTp1R =
+      pending.minTp1R ?? BREAKOUT_MIN_TP1_R;
+    
+    log(
+      'info',
+      `${symbol}: actual breakout R/R check`,
+      {
+        side: pending.side,
+    
+        signalPrice: pending.entryPrice,
+        executionPrice: currentPrice,
+        fillDrift,
+    
+        stopLoss: pending.stopLossPrice,
+        takeProfit1: pending.takeProfit1Price,
+    
+        plannedInitialR: pending.initialR,
+        actualInitialR,
+    
+        actualTp1Distance,
+        actualTp1R,
+        minTp1R
+      }
+    );
+    
+    if (
+      !Number.isFinite(actualTp1R) ||
+      actualTp1R < minTp1R
+    ) {
+      log(
+        'warn',
+        `${symbol}: breakout cancelled by actual TP1/R`,
+        {
+          side: pending.side,
+    
+          signalPrice: pending.entryPrice,
+          executionPrice: currentPrice,
+    
+          fillDrift,
+          fillDriftPct,
+    
+          stopLoss: pending.stopLossPrice,
+          takeProfit1: pending.takeProfit1Price,
+    
+          plannedInitialR: pending.initialR,
+          actualInitialR,
+    
+          actualTp1Distance,
+          actualTp1R,
+          minTp1R,
+    
+          regime: pending.regime
+        }
+      );
+    
+      pendingSignals.delete(symbol);
+    
+      return;
+    }
+
     const result = openPosition({
       symbol: pending.symbol,
       side: pending.side,
@@ -2123,7 +2236,8 @@ async function tryExecutePendingSignal(
     balanceBefore,
     balanceAfter,
     pending.regime,
-    pending.initialR
+    pending.initialR,
+    pending.minTp1R
   );
 
     await sendTelegramMessage(telegramMessage);
