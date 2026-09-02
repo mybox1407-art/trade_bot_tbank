@@ -81,6 +81,7 @@ const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
 // FRESH BREAKOUT ENTRY
 // ============================================================================
 const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.35;
+const BREAKOUT_ENTRY_MIN_DISTANCE_ATR = 0.10;
 
 // Для ранних breakout-entry допускаем нейтральный RSI.
 // Направление подтверждают: закрытие за уровнем, объём,
@@ -926,13 +927,17 @@ export function analyzeMarketMultiTimeframe(
 
   const freshLongBreakout =
     confirmedBreakout5m &&
-    longBreakoutDistanceAtr >= 0 &&
-    longBreakoutDistanceAtr <= BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
+    longBreakoutDistanceAtr >=
+      BREAKOUT_ENTRY_MIN_DISTANCE_ATR &&
+    longBreakoutDistanceAtr <=
+      BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
 
   const freshShortBreakdown =
     confirmedBreakdown5m &&
-    shortBreakoutDistanceAtr >= 0 &&
-    shortBreakoutDistanceAtr <= BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
+    shortBreakoutDistanceAtr >=
+      BREAKOUT_ENTRY_MIN_DISTANCE_ATR &&
+    shortBreakoutDistanceAtr <=
+      BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
 
   const shortExtensionFromEma20 =
     (lastEma20_5m - price) / lastAtr5m;
@@ -1183,6 +1188,26 @@ export function analyzeMarketMultiTimeframe(
 
     if (confirmedBreakdown5m && !closeNearLow) {
       rejectReasons.push('breakout_short_close_not_near_low');
+    }
+
+    if (
+      confirmedBreakout5m &&
+      longBreakoutDistanceAtr <
+        BREAKOUT_ENTRY_MIN_DISTANCE_ATR
+    ) {
+      rejectReasons.push(
+        'breakout_long_not_deep_enough'
+      );
+    }
+    
+    if (
+      confirmedBreakdown5m &&
+      shortBreakoutDistanceAtr <
+        BREAKOUT_ENTRY_MIN_DISTANCE_ATR
+    ) {
+      rejectReasons.push(
+        'breakout_short_not_deep_enough'
+      );
     }
 
     return emptySignal(price, contextRegime, {
@@ -1572,6 +1597,7 @@ export function analyzeMarketMultiTimeframe(
       confirmedBreakdown5m,
       confirmedBreakout5m,
 
+      breakoutEntryMinDistanceAtr: BREAKOUT_ENTRY_MIN_DISTANCE_ATR,
       breakoutEntryMaxDistanceAtr: BREAKOUT_ENTRY_MAX_DISTANCE_ATR,
       freshLongBreakout,
       freshShortBreakdown,
