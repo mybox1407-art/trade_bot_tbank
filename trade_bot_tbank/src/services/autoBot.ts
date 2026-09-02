@@ -1468,6 +1468,7 @@ async function processSymbol(
       {
         regime: signal.regime,
         entryMode: signal.entryMode,
+
         reject:
           indicators.reject ??
           'conditions_not_met',
@@ -1482,10 +1483,14 @@ async function processSymbol(
 
         marketState: marketState.state,
         marketBias: marketState.sideBias,
+
         price: signal.price,
         stopPct: indicators.stopPct,
+
         sideWouldBe: indicators.sideWouldBe,
-        entryModeWouldBe: indicators.entryModeWouldBe,
+        entryModeWouldBe:
+          indicators.entryModeWouldBe,
+
         htfSeriesLength: htfSeries.length,
         htfEnabled: indicators.htfEnabled,
         htfBias: indicators.htfBias,
@@ -1522,10 +1527,9 @@ async function processSymbol(
     signal.entryMode ??
     (signal.indicators?.entryMode as EntryMode | undefined) ??
     'none';
-  
-  // В данной версии бота разрешена только самостоятельная ветка пробоя.
-  // Даже если где-то в старом коде ещё сформируется standard-сигнал,
-  // autoBot не даст ему открыть позицию.
+
+  // В этой версии разрешены только пробойные входы.
+  // Любой случайный возврат standard-сигнала блокируется здесь.
   if (signalEntryMode !== 'breakout_entry') {
     log(
       'warn',
@@ -1536,7 +1540,7 @@ async function processSymbol(
         regime: signal.regime
       }
     );
-  
+
     if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
       await sendTelegramMessage([
         '[ПРОВЕРКА СИГНАЛА]',
@@ -1546,24 +1550,21 @@ async function processSymbol(
         'Отклонён: разрешены только пробойные входы'
       ].join('\n'));
     }
-  
+
     return;
   }
-  
-  // Статистика сохраняется для всех четырёх режимов:
+
+  // Логируем все четыре режима входа:
   // breakout_watch, trend_up, trend_down, trend_breakout.
   //
-  // Вход против текущего marketState.sideBias разрешён намеренно:
-  // направление подтверждается в strategy.ts фактом 5m-пробоя,
-  // объёмом, формой свечи, RSI и ограничением удаления от уровня.
+  // Контртрендовый breakout пока сознательно разрешён.
+  // Его эффективность затем будет сравниваться статистически.
   const isCounterTrendBreakout =
     marketState.sideBias !== 'neutral' &&
     marketState.sideBias !== side;
-  
-  // Единственный торговый режим — breakout_entry.
-  // Поэтому здесь нет отдельного фильтра market bias.
+
   const marketBiasAllowed = true;
-  
+
   if (!marketBiasAllowed) {
     log(
       'info',
@@ -1575,10 +1576,10 @@ async function processSymbol(
         signalSide: side
       }
     );
-  
+
     return;
   }
-  
+
   if (isCounterTrendBreakout) {
     log(
       'info',
@@ -1650,52 +1651,82 @@ async function processSymbol(
     return;
   }
 
+  const rawSignalTimeUtc =
+    signal.indicators?.signalTimeUtc;
+
   const signalCandleTime = floorToBar(
     getSignalCandleTime(signal.indicators),
     timeframeToMs(AUTO_BOT_CONFIG.timeframe)
   );
-  
+
+  // Это главный диагностический лог для проверки time-fail.
+  // В обычном цикле в 07:10:15 он должен показать:
+  //
+  // rawSignalTimeUtc: 2026-09-02T07:05:00.000Z
+  // normalizedSignalCandleTime: 2026-09-02T07:05:00.000Z
+  //
+  // Если rawSignalTimeUtc = 07:10:00, значит стратегия использует
+  // формирующуюся свечу или trimCandles() не отбрасывает её как ожидается.
+  log(
+    'info',
+    `BREAKOUT SIGNAL TIME: ${symbol}`,
+    {
+      rawSignalTimeUtc,
+
+      normalizedSignalCandleTime:
+        formatTime(signalCandleTime),
+
+      generatedAt:
+        formatTime(nowMs()),
+
+      signalCandleIndex:
+        signal.indicators?.signal5mIndex
+    }
+  );
+
   const pending: PendingSignal = {
     symbol,
     side,
     entryMode: 'breakout_entry',
-  
+
     entryPrice: signal.price,
     stopLossPrice: signal.stopLossPrice,
     takeProfit1Price: signal.takeProfit1Price,
     takeProfit2Price: signal.takeProfit2Price,
-  
+
     quantity: signal.quantity,
-  
+
     positionSize:
       signal.positionSize ??
       signal.quantity * signal.price,
-  
+
     regime: signal.regime,
-  
+
     initialR: signal.initialR ?? 0,
     signalTime: nowMs(),
     barsWaited: 0,
-  
+
     lastAtr:
       typeof signal.indicators?.lastAtr === 'number' &&
       Number.isFinite(signal.indicators.lastAtr)
         ? signal.indicators.lastAtr
         : 0,
-  
+
     timeFailBars:
       signal.timeFailBars > 0
         ? signal.timeFailBars
         : BREAKOUT_TIME_FAIL_BARS,
-  
+
     timeFailMinMfeR:
       signal.timeFailMinMfeR ??
       BREAKOUT_TIME_FAIL_MIN_MFE_R,
-  
+
     minTp1R:
       signal.minTp1R ??
       BREAKOUT_MIN_TP1_R,
-  
+
+    // Важно: это начало сигнальной 5m-свечи.
+    // Не Date.now(), не время исполнения.
     signalCandleTime
   };
 
@@ -1704,22 +1735,44 @@ async function processSymbol(
   if (AUTO_BOT_CONFIG.logSignals) {
     logSignalCheck({
       timestamp: formatTime(nowMs()),
+
       symbol,
       side,
+
       entryMode: signalEntryMode,
       regime: signal.regime,
+      regimeAtEntry: signal.regime,
+
       marketState: marketState.state,
       sideBias: marketState.sideBias,
+
       coherence: coherence.toFixed(6),
+
       entryTimeframe: '5m',
       contextTimeframe: '15m',
+
+      signalTimeUtc: rawSignalTimeUtc,
+      signalCandleTime:
+        formatTime(signalCandleTime),
+
       entryPrice: signal.price,
       stopLoss: signal.stopLossPrice,
+
       tp1: signal.takeProfit1Price,
       tp2: signal.takeProfit2Price,
+
       quantity: signal.quantity,
       positionSize: pending.positionSize,
-      initialR: (signal.initialR ?? 0).toFixed(4),
+
+      initialR:
+        (signal.initialR ?? 0).toFixed(4),
+
+      timeFailBars: pending.timeFailBars,
+      timeFailMinMfeR:
+        pending.timeFailMinMfeR,
+
+      minTp1R: pending.minTp1R,
+
       action: 'signal_generated'
     });
   }
@@ -1730,17 +1783,37 @@ async function processSymbol(
     `(5m entry / 15m context)`,
     {
       entryMode: signalEntryMode,
+
       entry: signal.price,
       sl: signal.stopLossPrice,
+
       tp1: signal.takeProfit1Price,
       tp2: signal.takeProfit2Price,
+
       qty: signal.quantity,
       size: pending.positionSize,
+
       R: signal.initialR?.toFixed(4),
+
       marketState: marketState.state,
       marketBias: marketState.sideBias,
+
       coherence: coherence.toFixed(4),
-      counterTrendBreakout: isCounterTrendBreakout,
+
+      counterTrendBreakout:
+        isCounterTrendBreakout,
+
+      signalTimeUtc: rawSignalTimeUtc,
+
+      signalCandleTime:
+        formatTime(signalCandleTime),
+
+      timeFailBars: pending.timeFailBars,
+
+      timeFailMinMfeR:
+        pending.timeFailMinMfeR,
+
+      minTp1R: pending.minTp1R,
 
       ...get5mEntryLogMeta(signal.indicators),
       ...getVolumeLogMeta(signal.indicators)
