@@ -747,10 +747,7 @@ function formatRejectReason(code: string): string {
       'long-пробой недостаточно глубоко за уровнем',
 
     'breakout_short_not_deep_enough':
-      'short-пробой недостаточно глубоко за уровнем',
-    
-    'breakout_tp1_r_too_low':
-      'фактический TP1/R ниже минимального',
+      'short-пробой недостаточно глубоко за уровнем'
   };
 
   return map[code] ?? code;
