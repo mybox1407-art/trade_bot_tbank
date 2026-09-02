@@ -9,7 +9,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-type LogRow = Record<string, unknown>;
+export type LogRow = Record<string, unknown>;
 
 function escapeCsv(value: unknown): string {
   if (value === null || value === undefined) {
@@ -217,10 +217,50 @@ function writeRow(
   );
 }
 
+/**
+ * Диагностика сигналов.
+ *
+ * В signal_log.csv нужно передавать:
+ * - entryMode
+ * - regime / regimeAtEntry
+ * - volumeRatio
+ * - breakout distance
+ * - tp1ToInitialR
+ * - time-fail параметры
+ *
+ * Это позволит сравнить отклонённые и исполненные пробои.
+ */
 export function logSignalCheck(row: LogRow) {
   writeRow('signal_log.csv', row);
 }
 
+/**
+ * Журнал сделок.
+ *
+ * Для корректной статистики breakout-стратегии передавай:
+ *
+ * open:
+ * - entryMode
+ * - regime
+ * - regimeAtEntry
+ * - initialR
+ * - timeFailBars
+ * - timeFailMinMfeR
+ * - minTp1R
+ *
+ * close:
+ * - entryMode
+ * - regimeAtEntry
+ * - realizedPnL
+ * - realizedR
+ * - barsHeld5m
+ * - maxFavorableExcursionR
+ * - maxAdverseExcursionR
+ * - reason
+ *
+ * writeRow() автоматически расширит старый trades.csv новыми колонками,
+ * сохранив старые строки и подставив в новые поля пустые значения.
+ */
 export function logTrade(row: LogRow) {
   writeRow('trades.csv', row);
 }
