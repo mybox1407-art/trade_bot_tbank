@@ -1455,23 +1455,6 @@ async function processSymbol(
     entryTimeframe: AUTO_BOT_CONFIG.timeframe
   });
 
-  if (marketState.state === 'chaotic') {
-    log(
-      'info',
-      `${symbol}: 15m state=chaotic, skipping 5m entry`
-    );
-
-    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-      await sendTelegramMessage([
-        '[ПРОВЕРКА СИГНАЛА]',
-        `${symbol} | chaotic`,
-        'Отклонён: 15m-рынок хаотичный'
-      ].join('\n'));
-    }
-
-    return;
-  }
-
   const signal = analyzeMarketMultiTimeframe({
     candles15m,
     candles5m,
@@ -1599,23 +1582,6 @@ async function processSymbol(
     marketState.sideBias !== 'neutral' &&
     marketState.sideBias !== side;
 
-  const marketBiasAllowed = true;
-
-  if (!marketBiasAllowed) {
-    log(
-      'info',
-      `${symbol}: breakout signal blocked by market bias`,
-      {
-        entryMode: signalEntryMode,
-        regime: signal.regime,
-        marketBias: marketState.sideBias,
-        signalSide: side
-      }
-    );
-
-    return;
-  }
-
   if (isCounterTrendBreakout) {
     log(
       'info',
@@ -1635,29 +1601,16 @@ async function processSymbol(
     side
   );
 
-  if (coherence < 0.4) {
-    log(
-      'info',
-      `${symbol}: low 15m coherence ${coherence.toFixed(4)} ` +
-      `for 5m ${side}, skipping`,
-      {
-        entryMode: signalEntryMode,
-        regime: signal.regime
-      }
-    );
-
-    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-      await sendTelegramMessage([
-        '[ПРОВЕРКА СИГНАЛА]',
-        `${symbol} | ${signal.regime}`,
-        `Цена 5m: ${formatMoney(signal.price)} RUB`,
-        `Путь входа: ${getEntryModeLabel(signalEntryMode)}`,
-        `Отклонён: низкая 15m coherence (${coherence.toFixed(2)})`
-      ].join('\n'));
+  log(
+    'info',
+    `${symbol}: breakout coherence diagnostic`,
+    {
+      entryMode: signalEntryMode,
+      regime: signal.regime,
+      side,
+      coherence
     }
-
-    return;
-  }
+  );  
 
   if (
     !signal.stopLossPrice ||
