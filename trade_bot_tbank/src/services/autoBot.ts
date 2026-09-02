@@ -498,37 +498,53 @@ function getCurrentFavorableExcursionR(
 
 function getClosedBarsAfterEntry(
   candles: Candle[],
-  state: BreakoutRuntimeState
+  state: BreakoutRuntimeState,
+  now: number
 ): Candle[] {
-  const barMs = timeframeToMs(AUTO_BOT_CONFIG.timeframe);
+  const barMs = timeframeToMs(
+    AUTO_BOT_CONFIG.timeframe
+  );
 
-  return candles.filter(candle => {
-    const openTime = candleOpenTimeMs(candle);
+  return candles
+    .filter(candle => {
+      const openTime = candleOpenTimeMs(candle);
 
-    if (openTime === null) {
-      return false;
-    }
+      if (openTime === null) {
+        return false;
+      }
 
-    const closeTime = openTime + barMs;
+      const closeTime = openTime + barMs;
 
-    // Считаем только полностью закрытые бары, начавшиеся после входа.
-    // Сигнальная свеча не должна считаться первым time-fail баром.
-    return (
-      closeTime > state.openedAt &&
-      openTime > state.signalCandleTime
-    );
-  });
+      return (
+        openTime >= state.signalCandleTime &&
+        closeTime <= now
+      );
+    })
+    .sort((a, b) => {
+      const timeA = candleOpenTimeMs(a) ?? 0;
+      const timeB = candleOpenTimeMs(b) ?? 0;
+
+      return timeA - timeB;
+    });
 }
 
 function getTimeFailState(
   state: BreakoutRuntimeState,
-  candles: Candle[]
+  candles: Candle[],
+  now: number
 ): {
   barsElapsed: number;
   maxFavorableExcursionR: number;
   failed: boolean;
+  newlyProcessedBars: number;
 } {
-  const closedBars = getClosedBarsAfterEntry(candles, state);
+  const closedBars = getClosedBarsAfterEntry(
+    candles,
+    state,
+    now
+  );
+
+  let newlyProcessedBars = 0;
 
   for (const candle of closedBars) {
     const candleTime = candleOpenTimeMs(candle);
@@ -541,11 +557,13 @@ function getTimeFailState(
     }
 
     state.processedCandleTimes.add(candleTime);
+    newlyProcessedBars += 1;
 
-    const candleMfeR = getCurrentFavorableExcursionR(
-      state,
-      candle
-    );
+    const candleMfeR =
+      getCurrentFavorableExcursionR(
+        state,
+        candle
+      );
 
     state.maxFavorableExcursionR = Math.max(
       state.maxFavorableExcursionR,
@@ -553,7 +571,8 @@ function getTimeFailState(
     );
   }
 
-  const barsElapsed = closedBars.length;
+  const barsElapsed =
+    state.processedCandleTimes.size;
 
   return {
     barsElapsed,
@@ -563,7 +582,9 @@ function getTimeFailState(
     failed:
       barsElapsed >= state.timeFailBars &&
       state.maxFavorableExcursionR <
-        state.timeFailMinMfeR
+        state.timeFailMinMfeR,
+
+    newlyProcessedBars
   };
 }
 
@@ -1735,6 +1756,14 @@ async function processSymbol(
 // ============================================================================
 // Исполнение pending-сигнала
 // ============================================================================
+
+function floorToBar(
+  timestamp: number,
+  barMs: number
+): number {
+  return Math.floor(timestamp / barMs) * barMs;
+}
+
 async function tryExecutePendingSignal(
   symbol: Symbol
 ) {
@@ -1916,6 +1945,11 @@ async function tryExecutePendingSignal(
     pendingSignals.delete(symbol);
 
     const openedAt = nowMs();
+
+    const signalCandleTime = floorToBar(
+      pending.signalCandleTime,
+      timeframeToMs(AUTO_BOT_CONFIG.timeframe)
+    );
 
     breakoutRuntimeState.set(symbol, {
       symbol,
@@ -2420,7 +2454,8 @@ export async function runPositionMonitorCycle() {
         if (runtime) {
           const timeFail = getTimeFailState(
             runtime,
-            candles5m
+            candles5m,
+            nowMs()
           );
 
           log(
@@ -2428,22 +2463,32 @@ export async function runPositionMonitorCycle() {
             `BREAKOUT TIME-FAIL CHECK: ${position.symbol}`,
             {
               side: position.side,
-
               regimeAtEntry: runtime.regimeAtEntry,
-
+          
+              openedAt: formatTime(runtime.openedAt),
+              signalCandleTime:
+                formatTime(runtime.signalCandleTime),
+          
               barsElapsed: timeFail.barsElapsed,
+              newlyProcessedBars:
+                timeFail.newlyProcessedBars,
+          
               requiredBars: runtime.timeFailBars,
-
+          
               maxFavorableExcursionR:
                 timeFail.maxFavorableExcursionR,
-
+          
               minRequiredMfeR:
                 runtime.timeFailMinMfeR,
-
+          
+              processedCandleTimes:
+                [...runtime.processedCandleTimes]
+                  .map(formatTime),
+          
               failed: timeFail.failed
             }
           );
-
+          
           if (timeFail.failed) {
             const balanceBefore = getBalance();
 
