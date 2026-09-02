@@ -1498,7 +1498,10 @@ async function processSymbol(
     signal.entryMode ??
     (signal.indicators?.entryMode as EntryMode | undefined) ??
     'none';
-
+  
+  // В данной версии бота разрешена только самостоятельная ветка пробоя.
+  // Даже если где-то в старом коде ещё сформируется standard-сигнал,
+  // autoBot не даст ему открыть позицию.
   if (signalEntryMode !== 'breakout_entry') {
     log(
       'warn',
@@ -1510,25 +1513,37 @@ async function processSymbol(
       }
     );
   
+    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
+      await sendTelegramMessage([
+        '[ПРОВЕРКА СИГНАЛА]',
+        `${symbol} | ${signal.regime}`,
+        `Цена 5m: ${formatMoney(signal.price)} RUB`,
+        `Путь входа: ${getEntryModeLabel(signalEntryMode)}`,
+        'Отклонён: разрешены только пробойные входы'
+      ].join('\n'));
+    }
+  
     return;
   }
   
-  const marketBiasAllowed = true;
+  // Статистика сохраняется для всех четырёх режимов:
+  // breakout_watch, trend_up, trend_down, trend_breakout.
+  //
+  // Вход против текущего marketState.sideBias разрешён намеренно:
+  // направление подтверждается в strategy.ts фактом 5m-пробоя,
+  // объёмом, формой свечи, RSI и ограничением удаления от уровня.
+  const isCounterTrendBreakout =
+    marketState.sideBias !== 'neutral' &&
+    marketState.sideBias !== side;
   
-  // Standard-входы идут только по направлению 15m market bias.
-  // Подтверждённый breakout-entry допускается в обе стороны:
-  // направление уже подтверждается 5m закрытием за уровнем,
-  // объёмом, формой свечи и ограничением дистанции от уровня.
-  const marketBiasAllowed =
-    signalEntryMode === 'breakout_entry' ||
-    marketState.sideBias === 'neutral' ||
-    marketState.sideBias === side;
+  // Единственный торговый режим — breakout_entry.
+  // Поэтому здесь нет отдельного фильтра market bias.
+  const marketBiasAllowed = true;
   
   if (!marketBiasAllowed) {
     log(
       'info',
-      `${symbol}: 5m signal ${side} conflicts with ` +
-      `15m market bias ${marketState.sideBias}, skipping`,
+      `${symbol}: breakout signal blocked by market bias`,
       {
         entryMode: signalEntryMode,
         regime: signal.regime,
@@ -1536,16 +1551,6 @@ async function processSymbol(
         signalSide: side
       }
     );
-  
-    if (AUTO_BOT_CONFIG.telegramSignalChecksEnabled) {
-      await sendTelegramMessage([
-        '[ПРОВЕРКА СИГНАЛА]',
-        `${symbol} | ${signal.regime}`,
-        `Цена 5m: ${formatMoney(signal.price)} RUB`,
-        `Путь входа: ${getEntryModeLabel(signalEntryMode)}`,
-        `Отклонён: ${side.toUpperCase()} против 15m bias ${marketState.sideBias}`
-      ].join('\n'));
-    }
   
     return;
   }
