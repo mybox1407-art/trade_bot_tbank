@@ -756,12 +756,33 @@ function formatRejectReason(code: string): string {
 function getRejectCodes(
   indicators: Record<string, unknown>
 ): string[] {
+  const contextRegime =
+    indicators.contextRegime;
+
   const reasons = indicators.rejectReasons;
 
-  if (Array.isArray(reasons) && reasons.length > 0) {
-    return reasons
+  const nonBreakoutRegimes = new Set([
+    'range',
+    'high_volatility',
+    'unknown'
+  ]);
+
+  if (nonBreakoutRegimes.has(
+    String(contextRegime)
+  )) {
+    return [
+      '15m_breakout_context_not_tradeable'
+    ];
+  }
+
+  if (Array.isArray(reasons)) {
+    const normalizedReasons = reasons
       .filter(reason => typeof reason === 'string')
       .map(reason => String(reason));
+
+    if (normalizedReasons.length > 0) {
+      return normalizedReasons;
+    }
   }
 
   const reject = indicators.reject;
