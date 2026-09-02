@@ -1,8 +1,30 @@
 // trade_bot_tbank/src/services/positionState.ts
 
+export type EntryMode =
+  | 'none'
+  | 'standard'
+  | 'breakout_entry';
+
+export type MarketRegime =
+  | 'trend_up'
+  | 'trend_down'
+  | 'range'
+  | 'breakout_watch'
+  | 'trend_breakout'
+  | 'high_volatility'
+  | 'unknown';
+
+export type CloseReason =
+  | 'take_profit'
+  | 'stop_loss'
+  | 'breakout_time_fail'
+  | 'session_close'
+  | 'manual';
+
 export interface VirtualPosition {
   symbol: string;
   side: 'long' | 'short';
+
   entryPrice: number;
   quantity: number;
 
@@ -20,11 +42,48 @@ export interface VirtualPosition {
    * Комиссия входа уже списана из balance при openPosition().
    */
   entryCommission: number;
+
+  /**
+   * Контекст и параметры стратегии фиксируются в момент открытия.
+   * Не подменяй regimeAtEntry текущим режимом при закрытии:
+   * статистика должна строиться по режиму именно в момент входа.
+   */
+  entryMode: EntryMode;
+  regimeAtEntry: MarketRegime;
+
+  /**
+   * Фактический риск на одну бумагу.
+   * Рассчитывается от фактической цены исполнения:
+   * abs(entryPrice - stopLossPrice).
+   */
+  initialR: number;
+
+  /**
+   * Параметры сопровождения breakout-позиции.
+   *
+   * На четвёртом закрытом 5m-баре position manager проверяет:
+   * MFE < timeFailMinMfeR -> breakout_time_fail.
+   */
+  timeFailBars: number;
+  timeFailMinMfeR: number;
+
+  /**
+   * Минимальный требуемый TP1 / initialR на входе.
+   * Хранится для аудита и последующей статистики.
+   */
+  minTp1R: number;
+
+  /**
+   * Время сигнальной 5m-свечи, с которой был создан вход.
+   * Нужно, чтобы time-fail не считал сигнальную свечу первым баром.
+   */
+  signalCandleTime: number | null;
 }
 
 export interface ClosedTrade {
   symbol: string;
   side: 'long' | 'short';
+
   entryPrice: number;
   exitPrice: number;
   quantity: number;
@@ -32,15 +91,27 @@ export interface ClosedTrade {
 
   /**
    * PnL сделки после комиссии выхода.
-   * Комиссия входа была списана ранее, непосредственно при открытии.
+   * Комиссия входа была списана раньше, непосредственно при открытии.
    */
   realizedPnL: number;
 
   closedAt: string;
-  reason: 'take_profit' | 'stop_loss' | 'manual';
+  reason: CloseReason;
+
   entryCommission: number;
   exitCommission: number;
   totalCommission: number;
+
+  /**
+   * Снимок входных условий для статистики.
+   */
+  entryMode: EntryMode;
+  regimeAtEntry: MarketRegime;
+  initialR: number;
+  timeFailBars: number;
+  timeFailMinMfeR: number;
+  minTp1R: number;
+  signalCandleTime: number | null;
 }
 
 // ============================================================================
@@ -79,6 +150,63 @@ function normalizeSymbol(symbol: string): string {
 
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function normalizeEntryMode(
+  entryMode: EntryMode | undefined
+): EntryMode {
+  if (
+    entryMode === 'standard' ||
+    entryMode === 'breakout_entry'
+  ) {
+    return entryMode;
+  }
+
+  return 'none';
+}
+
+function normalizeRegime(
+  regime: MarketRegime | undefined
+): MarketRegime {
+  const allowed: MarketRegime[] = [
+    'trend_up',
+    'trend_down',
+    'range',
+    'breakout_watch',
+    'trend_breakout',
+    'high_volatility',
+    'unknown'
+  ];
+
+  return regime && allowed.includes(regime)
+    ? regime
+    : 'unknown';
+}
+
+function normalizePositiveNumber(
+  value: number | undefined | null,
+  fallback: number
+): number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value > 0
+  )
+    ? value
+    : fallback;
+}
+
+function normalizeNonNegativeNumber(
+  value: number | undefined | null,
+  fallback: number
+): number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0
+  )
+    ? value
+    : fallback;
 }
 
 // ============================================================================
@@ -147,11 +275,26 @@ export function getLastClosedTrade(
 export function openPosition(data: {
   symbol: string;
   side: 'long' | 'short';
+
   entryPrice: number;
   takeProfitPrice: number;
   stopLossPrice: number;
+
   positionSize?: number | null;
   quantity?: number | null;
+
+  /**
+   * Контекст входа и параметры breakout-сопровождения.
+   * Все поля optional ради обратной совместимости со старым кодом,
+   * но autoBot.ts должен передавать их для breakout_entry.
+   */
+  entryMode?: EntryMode;
+  regimeAtEntry?: MarketRegime;
+  initialR?: number | null;
+  timeFailBars?: number | null;
+  timeFailMinMfeR?: number | null;
+  minTp1R?: number | null;
+  signalCandleTime?: number | null;
 }) {
   const symbol = normalizeSymbol(data.symbol);
 
@@ -182,6 +325,54 @@ export function openPosition(data: {
     return {
       ok: false,
       message: 'Invalid stop-loss price'
+    };
+  }
+
+  if (
+    data.side === 'long' &&
+    data.stopLossPrice >= data.entryPrice
+  ) {
+    return {
+      ok: false,
+      message:
+        'Invalid long stop-loss: ' +
+        'stop must be below entry price'
+    };
+  }
+
+  if (
+    data.side === 'short' &&
+    data.stopLossPrice <= data.entryPrice
+  ) {
+    return {
+      ok: false,
+      message:
+        'Invalid short stop-loss: ' +
+        'stop must be above entry price'
+    };
+  }
+
+  if (
+    data.side === 'long' &&
+    data.takeProfitPrice <= data.entryPrice
+  ) {
+    return {
+      ok: false,
+      message:
+        'Invalid long take-profit: ' +
+        'take-profit must be above entry price'
+    };
+  }
+
+  if (
+    data.side === 'short' &&
+    data.takeProfitPrice >= data.entryPrice
+  ) {
+    return {
+      ok: false,
+      message:
+        'Invalid short take-profit: ' +
+        'take-profit must be below entry price'
     };
   }
 
@@ -284,16 +475,78 @@ export function openPosition(data: {
    */
   balance = roundMoney(balance - entryCommission);
 
+  const calculatedInitialR = Math.abs(
+    data.entryPrice - data.stopLossPrice
+  );
+
+  const initialR = normalizePositiveNumber(
+    data.initialR,
+    calculatedInitialR
+  );
+
+  const entryMode = normalizeEntryMode(
+    data.entryMode
+  );
+
+  const regimeAtEntry = normalizeRegime(
+    data.regimeAtEntry
+  );
+
+  const timeFailBars = Math.floor(
+    normalizeNonNegativeNumber(
+      data.timeFailBars,
+      entryMode === 'breakout_entry'
+        ? 4
+        : 0
+    )
+  );
+
+  const timeFailMinMfeR = normalizeNonNegativeNumber(
+    data.timeFailMinMfeR,
+    entryMode === 'breakout_entry'
+      ? 0.25
+      : 0
+  );
+
+  const minTp1R = normalizeNonNegativeNumber(
+    data.minTp1R,
+    entryMode === 'breakout_entry'
+      ? 1.15
+      : 0
+  );
+
+  const signalCandleTime =
+    data.signalCandleTime != null &&
+    Number.isFinite(data.signalCandleTime) &&
+    data.signalCandleTime > 0
+      ? data.signalCandleTime
+      : null;
+
   const position: VirtualPosition = {
     symbol,
     side: data.side,
+
     entryPrice: data.entryPrice,
     quantity,
+
     notional: roundMoney(notional),
+
     takeProfitPrice: data.takeProfitPrice,
     stopLossPrice: data.stopLossPrice,
     openedAt: new Date().toISOString(),
-    entryCommission
+
+    entryCommission,
+
+    entryMode,
+    regimeAtEntry,
+
+    initialR,
+
+    timeFailBars,
+    timeFailMinMfeR,
+
+    minTp1R,
+    signalCandleTime
   };
 
   positions.set(symbol, position);
@@ -324,7 +577,7 @@ export function openPosition(data: {
 export function closePosition(
   symbol: string,
   exitPrice: number,
-  reason: 'take_profit' | 'stop_loss' | 'manual'
+  reason: CloseReason
 ) {
   const normalizedSymbol = normalizeSymbol(symbol);
 
@@ -381,16 +634,30 @@ export function closePosition(
   const closedTrade: ClosedTrade = {
     symbol: position.symbol,
     side: position.side,
+
     entryPrice: position.entryPrice,
     exitPrice,
     quantity: position.quantity,
     notional: position.notional,
+
     realizedPnL,
+
     closedAt: new Date().toISOString(),
     reason,
+
     entryCommission: position.entryCommission,
     exitCommission,
-    totalCommission
+    totalCommission,
+
+    entryMode: position.entryMode,
+    regimeAtEntry: position.regimeAtEntry,
+
+    initialR: position.initialR,
+    timeFailBars: position.timeFailBars,
+    timeFailMinMfeR: position.timeFailMinMfeR,
+
+    minTp1R: position.minTp1R,
+    signalCandleTime: position.signalCandleTime
   };
 
   /**
