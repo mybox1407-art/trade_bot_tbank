@@ -176,6 +176,7 @@ export interface StrategySignal {
 export interface MultiTimeframeInput {
   candles15m: Candle[];
   candles5m: Candle[];
+  candles1m?: Candle[]; // ← новое
   balance?: number;
   htf?: HtfFilterOptions;
 }
@@ -1039,23 +1040,57 @@ export function analyzeMarketMultiTimeframe(
   const standardLongSignal = false;
 
   // ==========================================================================
+  // 1M ENTRY TRIGGER (для схемы "5m — мозг, 1m — руки")
+  // ==========================================================================
+  
+  let breakoutLongTriggered = breakoutLongSignal;
+  let breakoutShortTriggered = breakoutShortSignal;
+  
+  if (input.candles1m && input.candles1m.length > 2) {
+    const last1m = last(input.candles1m);
+    const prev1m = input.candles1m[input.candles1m.length - 2];
+  
+    // Для лонга: 1m-цена пересекла longBreakoutThreshold снизу вверх.
+    if (breakoutLongSignal) {
+      const crossedUp =
+        prev1m.close <= longBreakoutThreshold &&
+        last1m.close > longBreakoutThreshold;
+  
+      breakoutLongTriggered = crossedUp;
+    }
+  
+    // Для шорта: 1m-цена пересекла shortBreakdownThreshold сверху вниз.
+    if (breakoutShortSignal) {
+      const crossedDown =
+        prev1m.close >= shortBreakdownThreshold &&
+        last1m.close < shortBreakdownThreshold;
+  
+      breakoutShortTriggered = crossedDown;
+    }
+  }
+  // Если candles1m нет — оставляем триггер равным 5m-сигналу.
+
+  // ==========================================================================
   // BREAKOUT-ONLY ENTRY
   // ==========================================================================
-  const breakoutLongSignal =
+  const breakoutLongRaw =
     breakoutContextAllowed &&
     volume5m.ok &&
     bodyValid &&
     closeNearHigh &&
     rsiLongBreakoutOk &&
     freshLongBreakout;
-
-  const breakoutShortSignal =
+  
+  const breakoutShortRaw =
     breakoutContextAllowed &&
     volume5m.ok &&
     bodyValid &&
     closeNearLow &&
     rsiShortBreakoutOk &&
     freshShortBreakdown;
+  
+  const breakoutLongSignal = breakoutLongRaw && breakoutLongTriggered;
+  const breakoutShortSignal = breakoutShortRaw && breakoutShortTriggered;
 
   const longSignal = breakoutLongSignal;
   const shortSignal = breakoutShortSignal;
