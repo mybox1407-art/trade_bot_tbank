@@ -23,7 +23,7 @@ import { logSignalCheck, logTrade } from './logger';
 import axios from 'axios';
 
 export const AUTO_BOT_CONFIG = {
-  symbols: ['TATN', 'GAZP', 'NVTK'] as const,
+  symbols: ['TATN', 'GAZP', 'NVTK', 'ROSN', 'SBER', 'MTSS', 'IRKT', 'AFLT', 'OZON', 'LKOH', 'VTBR'] as const,
   timeframe: '5m' as const,
   contextTimeframe: '15m' as const,
   // Новое: таймфрейм для триггера входа
