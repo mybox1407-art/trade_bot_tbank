@@ -1306,6 +1306,11 @@ export function analyzeMarketMultiTimeframe(
       breakoutLongSignal,
       breakoutShortSignal,
 
+      // 1m-триггеры
+      breakoutLongTriggered,
+      breakoutShortTriggered,
+      has1mTrigger: Boolean(input.candles1m?.length),
+
       breakoutEntryMaxDistanceAtr: BREAKOUT_ENTRY_MAX_DISTANCE_ATR,
       freshLongBreakout,
       freshShortBreakdown,
