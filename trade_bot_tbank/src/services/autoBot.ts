@@ -28,6 +28,9 @@ export const AUTO_BOT_CONFIG = {
   contextTimeframe: '15m' as const,
   // Новое: таймфрейм для триггера входа
   entryTriggerTimeframe: '1m' as const,
+  // Интервал запуска 1m-триггерного цикла
+  oneMinuteTriggerIntervalMs: 15 * 1000,
+  
   candlesLimit: 300,
   contextCandlesLimit: 250,
   htfCandlesLimit: 300,
