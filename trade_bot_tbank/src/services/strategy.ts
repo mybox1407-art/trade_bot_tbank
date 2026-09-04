@@ -1078,12 +1078,6 @@ export function analyzeMarketMultiTimeframe(
     }
   }
   
-  // Если 1m нет, считаем триггер равным 5m-сигналу (fallback).
-  if (!input.candles1m?.length) {
-    breakoutLongTriggered = breakoutLongSignal;
-    breakoutShortTriggered = breakoutShortSignal;
-  }
-
   // ==========================================================================
   // BREAKOUT-ONLY ENTRY
   // ==========================================================================
@@ -1103,11 +1097,15 @@ export function analyzeMarketMultiTimeframe(
     rsiShortBreakoutOk &&
     freshShortBreakdown;
   
+  // Объявляем breakoutLongSignal / breakoutShortSignal ЗДЕСЬ
   const breakoutLongSignal = breakoutLongRaw && breakoutLongTriggered;
   const breakoutShortSignal = breakoutShortRaw && breakoutShortTriggered;
-
-  const longSignal = breakoutLongSignal;
-  const shortSignal = breakoutShortSignal;
+  
+  // Если 1m нет, считаем триггер равным 5m-сигналу (fallback).
+  if (!input.candles1m?.length) {
+    breakoutLongTriggered = breakoutLongSignal;
+    breakoutShortTriggered = breakoutShortSignal;
+  }
 
   let side: 'long' | 'short' | 'none' = 'none';
 
