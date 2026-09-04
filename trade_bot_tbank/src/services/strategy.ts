@@ -747,6 +747,9 @@ function emptySignal(
 // В данной версии отключены все standard-входы.
 // Единственный возможный вход — breakout_entry.
 //
+
+
+// ============================================================================
 export function analyzeMarketMultiTimeframe(
   input: MultiTimeframeInput
 ): StrategySignal {
@@ -917,8 +920,11 @@ export function analyzeMarketMultiTimeframe(
   const longBreakoutThreshold =
     localHigh5m + lastAtr5m * ENTRY_5M_DIAGNOSTIC_ATR_BUFFER;
 
-  // Вместо требования закрытия 5m за уровнем:
-  // confirmedBreakout5m = price > longBreakoutThreshold
+  const longBreakoutDistanceAtr =
+    (price - longBreakoutThreshold) / lastAtr5m;
+
+  const shortBreakoutDistanceAtr =
+    (shortBreakdownThreshold - price) / lastAtr5m;
   
   // Требуем, чтобы цена была около уровня (в пределах 0.20 ATR)
   const longSetupNearLevel =
@@ -938,26 +944,6 @@ export function analyzeMarketMultiTimeframe(
   
   const freshShortBreakdown =
     shortSetupNearLevel &&
-    shortBreakoutDistanceAtr >=
-      BREAKOUT_ENTRY_MIN_DISTANCE_ATR &&
-    shortBreakoutDistanceAtr <=
-      BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
-
-  const longBreakoutDistanceAtr =
-    (price - longBreakoutThreshold) / lastAtr5m;
-
-  const shortBreakoutDistanceAtr =
-    (shortBreakdownThreshold - price) / lastAtr5m;
-
-  const freshLongBreakout =
-    confirmedBreakout5m &&
-    longBreakoutDistanceAtr >=
-      BREAKOUT_ENTRY_MIN_DISTANCE_ATR &&
-    longBreakoutDistanceAtr <=
-      BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
-
-  const freshShortBreakdown =
-    confirmedBreakdown5m &&
     shortBreakoutDistanceAtr >=
       BREAKOUT_ENTRY_MIN_DISTANCE_ATR &&
     shortBreakoutDistanceAtr <=
@@ -1217,61 +1203,7 @@ export function analyzeMarketMultiTimeframe(
       rejectReasons.push('5m_breakout_not_confirmed_or_too_late');
     }
 
-    if (
-      confirmedBreakout5m &&
-      longBreakoutDistanceAtr > BREAKOUT_ENTRY_MAX_DISTANCE_ATR
-    ) {
-      rejectReasons.push('breakout_long_too_far_from_level');
-    }
-
-    if (
-      confirmedBreakdown5m &&
-      shortBreakoutDistanceAtr > BREAKOUT_ENTRY_MAX_DISTANCE_ATR
-    ) {
-      rejectReasons.push('breakout_short_too_far_from_level');
-    }
-
-    if (
-      confirmedBreakout5m &&
-      !rsiLongBreakoutOk
-    ) {
-      rejectReasons.push('breakout_long_rsi_out_of_range');
-    }
-
-    if (
-      confirmedBreakdown5m &&
-      !rsiShortBreakoutOk
-    ) {
-      rejectReasons.push('breakout_short_rsi_out_of_range');
-    }
-
-    if (confirmedBreakout5m && !closeNearHigh) {
-      rejectReasons.push('breakout_long_close_not_near_high');
-    }
-
-    if (confirmedBreakdown5m && !closeNearLow) {
-      rejectReasons.push('breakout_short_close_not_near_low');
-    }
-
-    if (
-      confirmedBreakout5m &&
-      longBreakoutDistanceAtr <
-        BREAKOUT_ENTRY_MIN_DISTANCE_ATR
-    ) {
-      rejectReasons.push(
-        'breakout_long_not_deep_enough'
-      );
-    }
-    
-    if (
-      confirmedBreakdown5m &&
-      shortBreakoutDistanceAtr <
-        BREAKOUT_ENTRY_MIN_DISTANCE_ATR
-    ) {
-      rejectReasons.push(
-        'breakout_short_not_deep_enough'
-      );
-    }
+    // Удалены все проверки с confirmedBreakout5m / confirmedBreakdown5m
 
     return emptySignal(price, contextRegime, {
       ready: true,
@@ -1325,8 +1257,6 @@ export function analyzeMarketMultiTimeframe(
       localHigh5m,
       shortBreakdownThreshold,
       longBreakoutThreshold,
-      confirmedBreakdown5m,
-      confirmedBreakout5m,
 
       entryMode: 'none',
       standardLongSignal,
@@ -1419,8 +1349,6 @@ export function analyzeMarketMultiTimeframe(
       localHigh5m,
       shortBreakdownThreshold,
       longBreakoutThreshold,
-      confirmedBreakdown5m,
-      confirmedBreakout5m,
       longBreakoutDistanceAtr,
       shortBreakoutDistanceAtr,
       breakoutEntryMaxDistanceAtr: BREAKOUT_ENTRY_MAX_DISTANCE_ATR
@@ -1501,9 +1429,6 @@ export function analyzeMarketMultiTimeframe(
       shortBreakdownThreshold,
       longBreakoutThreshold,
 
-      confirmedBreakdown5m,
-      confirmedBreakout5m,
-
       freshLongBreakout,
       freshShortBreakdown,
 
@@ -1555,9 +1480,6 @@ export function analyzeMarketMultiTimeframe(
       localHigh5m,
       shortBreakdownThreshold,
       longBreakoutThreshold,
-
-      confirmedBreakdown5m,
-      confirmedBreakout5m,
 
       freshLongBreakout,
       freshShortBreakdown,
@@ -1662,8 +1584,6 @@ export function analyzeMarketMultiTimeframe(
       localHigh5m,
       shortBreakdownThreshold,
       longBreakoutThreshold,
-      confirmedBreakdown5m,
-      confirmedBreakout5m,
 
       breakoutEntryMinDistanceAtr: BREAKOUT_ENTRY_MIN_DISTANCE_ATR,
       breakoutEntryMaxDistanceAtr: BREAKOUT_ENTRY_MAX_DISTANCE_ATR,
