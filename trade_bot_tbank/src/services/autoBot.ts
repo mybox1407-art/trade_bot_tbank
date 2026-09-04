@@ -1339,7 +1339,7 @@ export async function runRegimeCheckCycle() {
     }
 
       try {
-        await processSymbol(
+        await (
           symbol,
           availableBalance
         );
@@ -1377,6 +1377,31 @@ async function processSymbol(
 ) {
   log('info', `Processing ${symbol}...`);
 
+  const candles1mRaw = await getCandles(
+    symbol,
+    '1m',
+    1000
+  );
+  
+  const candles1m = trimCandles(
+    candles1mRaw,
+    1000,
+    timeframeToMs('1m')
+  );
+  
+  if (candles1m.length < 100) {
+    log(
+      'warn',
+      `${symbol}: not enough 1m entry-trigger candles`,
+      {
+        received: candles1m.length,
+        required: 100
+      }
+    );
+  
+    return;
+  }
+    
   const candles15mRaw = await getCandles(
     symbol,
     AUTO_BOT_CONFIG.contextTimeframe,
@@ -1479,6 +1504,7 @@ async function processSymbol(
   const signal = analyzeMarketMultiTimeframe({
     candles15m,
     candles5m,
+    candles1m, // ← новое
     balance: availableBalance,
     htf: {
       enabled: AUTO_BOT_CONFIG.htfFilterEnabled,
