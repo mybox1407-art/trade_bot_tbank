@@ -1100,13 +1100,16 @@ export function analyzeMarketMultiTimeframe(
   // Объявляем breakoutLongSignal / breakoutShortSignal ЗДЕСЬ
   const breakoutLongSignal = breakoutLongRaw && breakoutLongTriggered;
   const breakoutShortSignal = breakoutShortRaw && breakoutShortTriggered;
-  
+
   // Если 1m нет, считаем триггер равным 5m-сигналу (fallback).
   if (!input.candles1m?.length) {
     breakoutLongTriggered = breakoutLongSignal;
     breakoutShortTriggered = breakoutShortSignal;
   }
 
+  const longSignal = breakoutLongSignal;
+  const shortSignal = breakoutShortSignal;
+  
   let side: 'long' | 'short' | 'none' = 'none';
 
   if (longSignal && !shortSignal) {
