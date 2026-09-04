@@ -1344,10 +1344,9 @@ export async function runRegimeCheckCycle() {
     }
 
       try {
-        // TODO: реализовать обработку символа
-        log(
-          'info',
-          `Processing ${symbol} (placeholder)`
+        await (
+          symbol,
+          availableBalance
         );
       } catch (error) {
         log(
