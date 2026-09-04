@@ -1344,7 +1344,7 @@ export async function runRegimeCheckCycle() {
     }
 
       try {
-        await (
+        await processSymbol(
           symbol,
           availableBalance
         );
@@ -2970,7 +2970,9 @@ async function runOneMinuteTriggerCycle() {
         pendingSignals.delete(symbol);
         continue;
       }
-
+      
+      const balanceBefore = getBalance();
+      
       // Открытие позиции
       const result = openPosition({
         symbol: pending.symbol,
@@ -3028,8 +3030,7 @@ async function runOneMinuteTriggerCycle() {
         processedCandleTimes: new Set<number>(),
         maxFavorableExcursionR: 0
       });
-
-      const balanceBefore = getBalance();
+      
       const balanceAfter = getBalance();
 
       if (AUTO_BOT_CONFIG.logTrades) {
