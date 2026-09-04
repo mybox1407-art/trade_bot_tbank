@@ -1081,21 +1081,39 @@ export function analyzeMarketMultiTimeframe(
   // ==========================================================================
   // BREAKOUT-ONLY ENTRY
   // ==========================================================================
-  const breakoutLongRaw =
-    breakoutContextAllowed &&
-    volume5m.ok &&
-    bodyValid &&
-    closeNearHigh &&
-    rsiLongBreakoutOk &&
-    freshLongBreakout;
-  
-  const breakoutShortRaw =
-    breakoutContextAllowed &&
-    volume5m.ok &&
-    bodyValid &&
-    closeNearLow &&
-    rsiShortBreakoutOk &&
-    freshShortBreakdown;
+// ==========================================================================
+// BREAKOUT-ONLY ENTRY
+// ==========================================================================
+
+// В breakout_watch разрешаем более широкий диапазон входа.
+// В trend_breakout требуем свежий пробой.
+const isBreakoutWatch = contextRegime === 'breakout_watch';
+
+const breakoutLongRaw =
+  breakoutContextAllowed &&
+  volume5m.ok &&
+  bodyValid &&
+  closeNearHigh &&
+  rsiLongBreakoutOk &&
+  (
+    isBreakoutWatch
+      ? (longBreakoutDistanceAtr >= -0.2 &&  // Цена может быть чуть ниже уровня
+         longBreakoutDistanceAtr <= 0.5)     // Или до 0.7 ATR выше
+      : freshLongBreakout
+  );
+
+const breakoutShortRaw =
+  breakoutContextAllowed &&
+  volume5m.ok &&
+  bodyValid &&
+  closeNearLow &&
+  rsiShortBreakoutOk &&
+  (
+    isBreakoutWatch
+      ? (shortBreakoutDistanceAtr >= -0.2 &&
+         shortBreakoutDistanceAtr <= 0.5)
+      : freshShortBreakdown
+  );
   
   // Объявляем breakoutLongSignal / breakoutShortSignal ЗДЕСЬ
   const breakoutLongSignal = breakoutLongRaw && breakoutLongTriggered;
