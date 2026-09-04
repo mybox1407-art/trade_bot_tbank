@@ -26,6 +26,8 @@ export const AUTO_BOT_CONFIG = {
   symbols: ['TATN', 'GAZP', 'NVTK'] as const,
   timeframe: '5m' as const,
   contextTimeframe: '15m' as const,
+  // Новое: таймфрейм для триггера входа
+  entryTriggerTimeframe: '1m' as const,
   candlesLimit: 300,
   contextCandlesLimit: 250,
   htfCandlesLimit: 300,
@@ -1516,57 +1518,67 @@ async function processSymbol(
   if (!signal.buy && !signal.sell) {
     const indicators = signal.indicators ?? {};
 
-    log(
-      'info',
-      `${symbol}: no 5m entry signal`,
-      {
-        regime: signal.regime,
-        entryMode: signal.entryMode,
-
-        reject:
-          indicators.reject ??
-          'conditions_not_met',
-
-        entryTimeframe:
-          indicators.entryTimeframe ??
-          '5m',
-
-        contextTimeframe:
-          indicators.contextTimeframe ??
-          '15m',
-
-        marketState: marketState.state,
-        marketBias: marketState.sideBias,
-
-        price: signal.price,
-        stopPct: indicators.stopPct,
-
-        sideWouldBe: indicators.sideWouldBe,
-        entryModeWouldBe:
-          indicators.entryModeWouldBe,
-
-        htfSeriesLength: htfSeries.length,
-        htfEnabled: indicators.htfEnabled,
-        htfBias: indicators.htfBias,
-
-        ...get5mEntryLogMeta(indicators),
-        ...getVolumeLogMeta(indicators),
-
-        breakoutEntryMinDistanceAtr:
-          indicators.breakoutEntryMinDistanceAtr,
-    
-        breakoutEntryMaxDistanceAtr:
-          indicators.breakoutEntryMaxDistanceAtr,
-    
-        tp1ToInitialR:
-          indicators.tp1ToInitialR,
-    
-        minBreakoutTp1R:
-          indicators.minBreakoutTp1R,
-
-        rejectReasons: indicators.rejectReasons
-      }
-    );
+  log(
+    'info',
+    `${symbol}: no 5m entry signal`,
+    {
+      regime: signal.regime,
+      entryMode: signal.entryMode,
+  
+      reject:
+        indicators.reject ??
+        'conditions_not_met',
+  
+      entryTimeframe:
+        indicators.entryTimeframe ??
+        '5m',
+  
+      contextTimeframe:
+        indicators.contextTimeframe ??
+        '15m',
+  
+      marketState: marketState.state,
+      marketBias: marketState.sideBias,
+  
+      price: signal.price,
+      stopPct: indicators.stopPct,
+  
+      sideWouldBe: indicators.sideWouldBe,
+      entryModeWouldBe:
+        indicators.entryModeWouldBe,
+  
+      htfSeriesLength: htfSeries.length,
+      htfEnabled: indicators.htfEnabled,
+      htfBias: indicators.htfBias,
+  
+      ...get5mEntryLogMeta(indicators),
+      ...getVolumeLogMeta(indicators),
+  
+      // 1m-триггеры
+      breakoutLongTriggered:
+        indicators.breakoutLongTriggered,
+  
+      breakoutShortTriggered:
+        indicators.breakoutShortTriggered,
+  
+      has1mTrigger:
+        indicators.has1mTrigger,
+  
+      breakoutEntryMinDistanceAtr:
+        indicators.breakoutEntryMinDistanceAtr,
+  
+      breakoutEntryMaxDistanceAtr:
+        indicators.breakoutEntryMaxDistanceAtr,
+  
+      tp1ToInitialR:
+        indicators.tp1ToInitialR,
+  
+      minBreakoutTp1R:
+        indicators.minBreakoutTp1R,
+  
+      rejectReasons: indicators.rejectReasons
+    }
+  );
 
     await sendTelegramRejectedSignalCheck(
       symbol,
@@ -1886,7 +1898,17 @@ async function processSymbol(
       minTp1R: pending.minTp1R,
 
       ...get5mEntryLogMeta(signal.indicators),
-      ...getVolumeLogMeta(signal.indicators)
+      ...getVolumeLogMeta(signal.indicators),
+
+      // 1m-триггеры
+      breakoutLongTriggered:
+        signal.indicators?.breakoutLongTriggered,
+      
+      breakoutShortTriggered:
+        signal.indicators?.breakoutShortTriggered,
+      
+      has1mTrigger:
+        signal.indicators?.has1mTrigger,
     }
   );
 
