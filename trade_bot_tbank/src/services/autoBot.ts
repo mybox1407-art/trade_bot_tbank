@@ -1385,7 +1385,7 @@ async function processSymbol(
   const candles1mRaw = await getCandles(
     symbol,
     '1m',
-    400
+    200
   );
   
   const candles1m = trimCandles(
