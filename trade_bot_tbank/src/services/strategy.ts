@@ -64,7 +64,7 @@ export const BREAKOUT_TIME_FAIL_MIN_MFE_R = 0.20;
 // VOLUME SETTINGS
 // ============================================================================
 const VOLUME_LOOKBACK = 20;
-const VOLUME_SPIKE_MULTIPLIER = 1.1;
+const VOLUME_SPIKE_MULTIPLIER = 0.7;
 
 // ============================================================================
 // 5M ENTRY SETTINGS
@@ -72,7 +72,7 @@ const VOLUME_SPIKE_MULTIPLIER = 1.1;
 const ENTRY_5M_DIAGNOSTIC_LOOKBACK = 4;
 const ENTRY_5M_DIAGNOSTIC_ATR_BUFFER = 0.05;
 const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 0.8;
-const ENTRY_5M_VOLUME_MULTIPLIER = 1.1;
+const ENTRY_5M_VOLUME_MULTIPLIER = 0.7;
 const ENTRY_5M_ATR_STOP_MULT = 1.1;
 const ENTRY_5M_CLOSE_NEAR_EXTREME_ATR = 0.70;
 const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
@@ -80,7 +80,7 @@ const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
 // ============================================================================
 // FRESH BREAKOUT ENTRY
 // ============================================================================
-const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.35;
+const BREAKOUT_ENTRY_MAX_DISTANCE_ATR = 0.5;
 const BREAKOUT_ENTRY_MIN_DISTANCE_ATR = 0.05;
 
 // Для ранних breakout-entry допускаем нейтральный RSI.
