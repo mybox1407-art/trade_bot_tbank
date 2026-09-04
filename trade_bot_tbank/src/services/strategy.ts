@@ -917,8 +917,31 @@ export function analyzeMarketMultiTimeframe(
   const longBreakoutThreshold =
     localHigh5m + lastAtr5m * ENTRY_5M_DIAGNOSTIC_ATR_BUFFER;
 
-  const confirmedBreakdown5m = price < shortBreakdownThreshold;
-  const confirmedBreakout5m = price > longBreakoutThreshold;
+  // Вместо требования закрытия 5m за уровнем:
+  // confirmedBreakout5m = price > longBreakoutThreshold
+  
+  // Требуем, чтобы цена была около уровня (в пределах 0.20 ATR)
+  const longSetupNearLevel =
+    price >= longBreakoutThreshold - lastAtr5m * 0.20 &&
+    price <= longBreakoutThreshold + lastAtr5m * 0.20;
+  
+  const shortSetupNearLevel =
+    price >= shortBreakdownThreshold - lastAtr5m * 0.20 &&
+    price <= shortBreakdownThreshold + lastAtr5m * 0.20;
+  
+  const freshLongBreakout =
+    longSetupNearLevel &&
+    longBreakoutDistanceAtr >=
+      BREAKOUT_ENTRY_MIN_DISTANCE_ATR &&
+    longBreakoutDistanceAtr <=
+      BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
+  
+  const freshShortBreakdown =
+    shortSetupNearLevel &&
+    shortBreakoutDistanceAtr >=
+      BREAKOUT_ENTRY_MIN_DISTANCE_ATR &&
+    shortBreakoutDistanceAtr <=
+      BREAKOUT_ENTRY_MAX_DISTANCE_ATR;
 
   const longBreakoutDistanceAtr =
     (price - longBreakoutThreshold) / lastAtr5m;
@@ -1043,32 +1066,37 @@ export function analyzeMarketMultiTimeframe(
   // 1M ENTRY TRIGGER (для схемы "5m — мозг, 1m — руки")
   // ==========================================================================
   
-  let breakoutLongTriggered = breakoutLongSignal;
-  let breakoutShortTriggered = breakoutShortSignal;
+  let breakoutLongTriggered = false;
+  let breakoutShortTriggered = false;
   
-  if (input.candles1m && input.candles1m.length > 2) {
+  if (input.candles1m && input.candles1m.length >= 2) {
     const last1m = last(input.candles1m);
     const prev1m = input.candles1m[input.candles1m.length - 2];
   
-    // Для лонга: 1m-цена пересекла longBreakoutThreshold снизу вверх.
-    if (breakoutLongSignal) {
-      const crossedUp =
-        prev1m.close <= longBreakoutThreshold &&
-        last1m.close > longBreakoutThreshold;
-  
-      breakoutLongTriggered = crossedUp;
+    // LONG: 1m закрылась выше longBreakoutThreshold,
+    // а предыдущая была ниже или на уровне.
+    if (
+      prev1m.close <= longBreakoutThreshold &&
+      last1m.close > longBreakoutThreshold
+    ) {
+      breakoutLongTriggered = true;
     }
   
-    // Для шорта: 1m-цена пересекла shortBreakdownThreshold сверху вниз.
-    if (breakoutShortSignal) {
-      const crossedDown =
-        prev1m.close >= shortBreakdownThreshold &&
-        last1m.close < shortBreakdownThreshold;
-  
-      breakoutShortTriggered = crossedDown;
+    // SHORT: 1m закрылась ниже shortBreakdownThreshold,
+    // а предыдущая была выше или на уровне.
+    if (
+      prev1m.close >= shortBreakdownThreshold &&
+      last1m.close < shortBreakdownThreshold
+    ) {
+      breakoutShortTriggered = true;
     }
   }
-  // Если candles1m нет — оставляем триггер равным 5m-сигналу.
+  
+  // Если 1m нет, считаем триггер равным 5m-сигналу (fallback).
+  if (!input.candles1m?.length) {
+    breakoutLongTriggered = breakoutLongSignal;
+    breakoutShortTriggered = breakoutShortSignal;
+  }
 
   // ==========================================================================
   // BREAKOUT-ONLY ENTRY
