@@ -123,8 +123,12 @@ function getTimeframeMs(timeframe: string): number {
 function getHistoryMultiplier(timeframe: string): number {
   switch (timeframe) {
     case '1m':
+      return 10;  // ← 1000 × 1m × 10 = 10,000 минут = 6.9 дней
+    
     case '2m':
     case '3m':
+      return 7;   // ← Меньше, но всё ещё достаточно
+    
     case '5m':
       return 5;
 
