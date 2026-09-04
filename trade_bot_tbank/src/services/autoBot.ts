@@ -2872,6 +2872,254 @@ export async function runPositionMonitorCycle() {
 }
 
 // ============================================================================
+// 1M ENTRY TRIGGER CYCLE
+// ============================================================================
+let oneMinuteTriggerInterval: NodeJS.Timeout | null = null;
+
+async function runOneMinuteTriggerCycle() {
+  const now = nowMs();
+
+  if (!isMonitorWindowOpen(now)) {
+    return;
+  }
+
+  const pendingList = Array.from(pendingSignals.entries());
+
+  if (pendingList.length === 0) {
+    return;
+  }
+
+  for (const [symbol, pending] of pendingList) {
+    try {
+      const currentPrice = await getCurrentPrice(symbol);
+
+      // Проверка slippage (как в tryExecutePendingSignal)
+      const baseTolerance = 0.001;
+      const lastAtr = pending.lastAtr > 0 ? pending.lastAtr : 0;
+      const atrTolerance =
+        lastAtr > 0 && pending.entryPrice > 0
+          ? lastAtr / pending.entryPrice
+          : 0;
+
+      const breakoutSlippageTolerance = Math.max(
+        baseTolerance + 0.5 * atrTolerance,
+        1.25 * atrTolerance
+      );
+
+      const slippageTolerance =
+        pending.entryMode === 'breakout_entry'
+          ? breakoutSlippageTolerance
+          : baseTolerance + 0.5 * atrTolerance;
+
+      const priceDiff =
+        Math.abs(currentPrice - pending.entryPrice) /
+        pending.entryPrice;
+
+      if (priceDiff > slippageTolerance) {
+        log(
+          'info',
+          `${symbol}: 1m trigger skipped, price moved too far`,
+          {
+            side: pending.side,
+            signalPrice: pending.entryPrice,
+            currentPrice,
+            priceDiff
+          }
+        );
+
+        continue;
+      }
+
+      // Проверка фактического TP1/R (как в tryExecutePendingSignal)
+      const actualInitialR = Math.abs(
+        currentPrice - pending.stopLossPrice
+      );
+
+      const actualTp1Distance =
+        pending.side === 'long'
+          ? pending.takeProfit1Price - currentPrice
+          : currentPrice - pending.takeProfit1Price;
+
+      const actualTp1R =
+        actualInitialR > 0
+          ? actualTp1Distance / actualInitialR
+          : 0;
+
+      const minTp1R =
+        pending.minTp1R ?? BREAKOUT_MIN_TP1_R;
+
+      if (
+        !Number.isFinite(actualTp1R) ||
+        actualTp1R < minTp1R
+      ) {
+        log(
+          'warn',
+          `${symbol}: 1m trigger cancelled by actual TP1/R`,
+          {
+            side: pending.side,
+            signalPrice: pending.entryPrice,
+            executionPrice: currentPrice,
+            actualTp1R,
+            minTp1R
+          }
+        );
+
+        pendingSignals.delete(symbol);
+        continue;
+      }
+
+      // Открытие позиции
+      const result = openPosition({
+        symbol: pending.symbol,
+        side: pending.side,
+        entryPrice: currentPrice,
+        takeProfitPrice: pending.takeProfit1Price,
+        stopLossPrice: pending.stopLossPrice,
+        quantity: pending.quantity,
+        entryMode: pending.entryMode,
+        regimeAtEntry: pending.regime,
+        initialR: Math.abs(
+          currentPrice - pending.stopLossPrice
+        ),
+        timeFailBars: pending.timeFailBars,
+        timeFailMinMfeR: pending.timeFailMinMfeR,
+        minTp1R: pending.minTp1R,
+        signalCandleTime: pending.signalCandleTime
+      });
+
+      if (!result.ok) {
+        log(
+          'warn',
+          `Failed to open position for ${symbol} via 1m trigger`,
+          {
+            entryMode: pending.entryMode,
+            message: result.message
+          }
+        );
+
+        continue;
+      }
+
+      pendingSignals.delete(symbol);
+
+      const openedAt = nowMs();
+      const signalCandleTime = floorToBar(
+        pending.signalCandleTime,
+        timeframeToMs(AUTO_BOT_CONFIG.timeframe)
+      );
+
+      breakoutRuntimeState.set(symbol, {
+        symbol,
+        side: pending.side,
+        entryPrice: currentPrice,
+        stopLossPrice: pending.stopLossPrice,
+        takeProfitPrice: pending.takeProfit1Price,
+        initialR: Math.abs(
+          currentPrice - pending.stopLossPrice
+        ),
+        regimeAtEntry: pending.regime,
+        openedAt,
+        signalCandleTime,
+        timeFailBars: pending.timeFailBars,
+        timeFailMinMfeR: pending.timeFailMinMfeR,
+        processedCandleTimes: new Set<number>(),
+        maxFavorableExcursionR: 0
+      });
+
+      const balanceBefore = getBalance();
+      const balanceAfter = getBalance();
+
+      if (AUTO_BOT_CONFIG.logTrades) {
+        logTrade({
+          timestamp: formatTime(nowMs()),
+          symbol: pending.symbol,
+          side: pending.side,
+          entryMode: pending.entryMode,
+          action: 'open',
+          entryPrice: currentPrice,
+          stopLoss: pending.stopLossPrice,
+          takeProfit: pending.takeProfit1Price,
+          quantity: pending.quantity,
+          positionSize: pending.positionSize,
+          regime: pending.regime,
+          initialR: (
+            pending.initialR ?? 0
+          ).toFixed(4),
+          balanceBefore,
+          balanceAfter,
+          availableBalance:
+            result.availableBalance ?? 0,
+          regimeAtEntry: pending.regime,
+          timeFailBars: pending.timeFailBars,
+          timeFailMinMfeR:
+            pending.timeFailMinMfeR,
+          minTp1R: pending.minTp1R
+        });
+      }
+
+      log(
+        'info',
+        `POSITION OPENED (1m trigger): ${symbol} ` +
+        `${pending.side.toUpperCase()}`,
+        {
+          entryMode: pending.entryMode,
+          signalPrice: pending.entryPrice,
+          entryPrice: currentPrice,
+          stopLoss: pending.stopLossPrice,
+          takeProfit1: pending.takeProfit1Price,
+          quantity: pending.quantity,
+          balance: result.balance
+        }
+      );
+
+      const telegramMessage = formatOpenPositionMessage(
+        pending.symbol,
+        pending.side,
+        pending.entryMode,
+        pending.entryPrice,
+        currentPrice,
+        pending.quantity,
+        pending.positionSize,
+        pending.stopLossPrice,
+        pending.takeProfit1Price,
+        balanceBefore,
+        balanceAfter,
+        pending.regime,
+        pending.initialR,
+        pending.minTp1R
+      );
+
+      await sendTelegramMessage(telegramMessage);
+    } catch (error) {
+      log(
+        'error',
+        `Error in 1m trigger for ${symbol}`,
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : String(error)
+        }
+      );
+    }
+  }
+}
+
+function scheduleOneMinuteTrigger() {
+  oneMinuteTriggerInterval = setInterval(() => {
+    runOneMinuteTriggerCycle()
+      .catch(error => {
+        log('error', '1m trigger cycle error', {
+          error:
+            error instanceof Error
+              ? error.message
+              : String(error)
+        });
+      });
+  }, AUTO_BOT_CONFIG.oneMinuteTriggerIntervalMs);
+}
+
+// ============================================================================
 // Запуск / остановка
 // ============================================================================
 let regimeTimer: NodeJS.Timeout | null = null;
@@ -2936,6 +3184,8 @@ export async function startAutoBot() {
       });
   }, AUTO_BOT_CONFIG.positionMonitorIntervalMs);
 
+  scheduleOneMinuteTrigger();
+
   log('info', 'Auto-bot started', {
     entryTimeframe: AUTO_BOT_CONFIG.timeframe,
     contextTimeframe: AUTO_BOT_CONFIG.contextTimeframe,
@@ -2961,8 +3211,13 @@ export function stopAutoBot() {
     clearInterval(monitorInterval);
   }
 
+  if (oneMinuteTriggerInterval) {
+    clearInterval(oneMinuteTriggerInterval);
+  }
+
   regimeTimer = null;
   monitorInterval = null;
+  oneMinuteTriggerInterval = null;
 
   log('info', 'Auto-bot stopped');
 }
