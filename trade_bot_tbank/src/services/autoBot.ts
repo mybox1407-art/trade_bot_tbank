@@ -1921,7 +1921,7 @@ async function processSymbol(
     signal.indicators
   );
 
-  await tryExecutePendingSignal(symbol);
+  //await tryExecutePendingSignal(symbol);
 }
 
 // ============================================================================
