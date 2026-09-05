@@ -44,7 +44,7 @@ const DEFAULT_TIME_FAIL_BARS = 0;
 // BREAKOUT SETTINGS
 // ============================================================================
 const BREAKOUT_ATR_BUFFER_K = 0.1;
-const BREAKOUT_BODY_ATR_MIN = 0.3;
+const BREAKOUT_BODY_ATR_MIN = 0.15;
 const MAX_BREAKOUT_BODY_ATR = 2;
 const BREAKOUT_ATR_STOP_MULT = 1.5;
 
@@ -64,7 +64,7 @@ export const BREAKOUT_TIME_FAIL_MIN_MFE_R = 0.20;
 // VOLUME SETTINGS
 // ============================================================================
 const VOLUME_LOOKBACK = 20;
-const VOLUME_SPIKE_MULTIPLIER = 0.7;
+const VOLUME_SPIKE_MULTIPLIER = 0.5;
 
 // ============================================================================
 // 5M ENTRY SETTINGS
@@ -72,7 +72,7 @@ const VOLUME_SPIKE_MULTIPLIER = 0.7;
 const ENTRY_5M_DIAGNOSTIC_LOOKBACK = 4;
 const ENTRY_5M_DIAGNOSTIC_ATR_BUFFER = 0.05;
 const ENTRY_5M_MAX_EMA20_EXTENSION_ATR = 0.8;
-const ENTRY_5M_VOLUME_MULTIPLIER = 0.7;
+const ENTRY_5M_VOLUME_MULTIPLIER = 0.5;
 const ENTRY_5M_ATR_STOP_MULT = 1.1;
 const ENTRY_5M_CLOSE_NEAR_EXTREME_ATR = 0.70;
 const ENTRY_5M_MAX_DISTANCE_FROM_LEVEL_ATR = 0.5;
@@ -1097,8 +1097,8 @@ const breakoutLongRaw =
   rsiLongBreakoutOk &&
   (
     isBreakoutWatch
-      ? (longBreakoutDistanceAtr >= -0.2 &&  // Цена может быть чуть ниже уровня
-         longBreakoutDistanceAtr <= 0.5)     // Или до 0.7 ATR выше
+      ? (longBreakoutDistanceAtr >= -0.5 &&  // Цена может быть чуть ниже уровня
+         longBreakoutDistanceAtr <= 1)     // Или до 0.7 ATR выше
       : freshLongBreakout
   );
 
@@ -1110,8 +1110,8 @@ const breakoutShortRaw =
   rsiShortBreakoutOk &&
   (
     isBreakoutWatch
-      ? (shortBreakoutDistanceAtr >= -0.2 &&
-         shortBreakoutDistanceAtr <= 0.5)
+      ? (shortBreakoutDistanceAtr >= -0.5 &&
+         shortBreakoutDistanceAtr <= 1)
       : freshShortBreakdown
   );
   
